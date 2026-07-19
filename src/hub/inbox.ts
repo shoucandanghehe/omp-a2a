@@ -1,6 +1,7 @@
 import { Database } from "bun:sqlite";
 import * as path from "node:path";
 import { ensureDir } from "../paths";
+import { formatMessageRef, parseMessageRef } from "./message-ref";
 import { encodeTextPayload } from "./payload";
 import type {
 	EncodedTextPayload,
@@ -61,6 +62,7 @@ export class InboxStore {
 	#database: Database;
 	#insert;
 	#getLedger;
+	#getLedgerByRef;
 	#insertLedger;
 	#get;
 	#listAfterCursor;
@@ -298,6 +300,9 @@ export class InboxStore {
 		this.#getLedger = this.#database.query<LedgerRow, [string]>(
 			"SELECT msg_id, project, sender, recipient, encoding, data, uncompressed_bytes, created_at, server_sequence, reply_to FROM message_ledger WHERE msg_id = ?",
 		);
+		this.#getLedgerByRef = this.#database.query<LedgerRow, [string, string, number]>(
+			"SELECT msg_id, project, sender, recipient, encoding, data, uncompressed_bytes, created_at, server_sequence, reply_to FROM message_ledger WHERE project = ? AND recipient = ? AND server_sequence = ?",
+		);
 		this.#insertLedger = this.#database.query(
 			"INSERT INTO message_ledger(msg_id, project, sender, recipient, encoding, data, uncompressed_bytes, created_at, server_sequence, reply_to) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
 		);
@@ -338,49 +343,48 @@ export class InboxStore {
 		});
 		this.#enqueue = this.#database.transaction(
 			(message: HubWireMessageDraft, validateNew: () => void): HubWireMessageEnvelope => {
-			const existing = this.#getLedger.get(message.msgId);
-			if (existing) {
-				const stored = this.#messageFromLedger(existing);
-				const matches =
-					stored.project === message.project &&
-					stored.from === message.from &&
-					stored.to === message.to &&
-					stored.replyTo === message.replyTo &&
-					stored.payload.encoding === message.payload.encoding &&
-					stored.payload.data === message.payload.data &&
-					stored.payload.uncompressedBytes === message.payload.uncompressedBytes;
-				if (!matches) throw new MessageIdConflictError(`messageId already used: ${message.msgId}`);
-				return stored;
-			}
-			validateNew();
-			if (message.replyTo) {
-				const parent = this.#getLedger.get(message.replyTo);
-				if (!parent) throw new CausalParentError(`unknown replyTo: ${message.replyTo}`);
-				const samePair =
-					(parent.sender === message.from && parent.recipient === message.to) ||
-					(parent.sender === message.to && parent.recipient === message.from);
-				if (parent.project !== message.project || !samePair) {
-					throw new CausalParentError(`replyTo does not match project conversation: ${message.replyTo}`);
+				const parent = this.#resolveCausalParent(message);
+				const replyTo = parent?.msg_id;
+				const replyToRef = parent
+					? formatMessageRef(parent.recipient, parent.server_sequence)
+					: undefined;
+				const existing = this.#getLedger.get(message.msgId);
+				if (existing) {
+					const stored = this.#messageFromLedger(existing);
+					const matches =
+						stored.project === message.project &&
+						stored.from === message.from &&
+						stored.to === message.to &&
+						stored.replyTo === replyTo &&
+						stored.payload.encoding === message.payload.encoding &&
+						stored.payload.data === message.payload.data &&
+						stored.payload.uncompressedBytes === message.payload.uncompressedBytes;
+					if (!matches) throw new MessageIdConflictError(`messageId already used: ${message.msgId}`);
+					return stored;
 				}
-			}
-			const stored: HubWireMessageEnvelope = {
-				...message,
-				serverSequence: this.#allocateSequence(message.project, message.to),
-			};
-			this.#insertLedger.run(
-				stored.msgId,
-				stored.project,
-				stored.from,
-				stored.to,
-				stored.payload.encoding,
-				stored.payload.data,
-				stored.payload.uncompressedBytes,
-				stored.createdAt,
-				stored.serverSequence,
-				stored.replyTo ?? null,
-			);
-			this.#insertEnvelope(stored);
-			return stored;
+				validateNew();
+				const serverSequence = this.#allocateSequence(message.project, message.to);
+				const stored: HubWireMessageEnvelope = {
+					...message,
+					messageRef: formatMessageRef(message.to, serverSequence),
+					replyTo,
+					replyToRef,
+					serverSequence,
+				};
+				this.#insertLedger.run(
+					stored.msgId,
+					stored.project,
+					stored.from,
+					stored.to,
+					stored.payload.encoding,
+					stored.payload.data,
+					stored.payload.uncompressedBytes,
+					stored.createdAt,
+					stored.serverSequence,
+					stored.replyTo ?? null,
+				);
+				this.#insertEnvelope(stored);
+				return stored;
 			},
 		);
 		this.#readPending = this.#database.transaction(
@@ -452,6 +456,33 @@ export class InboxStore {
 		);
 	}
 
+	#resolveCausalParent(message: HubWireMessageDraft): LedgerRow | null {
+		const parentById = message.replyTo ? this.#getLedger.get(message.replyTo) : null;
+		if (message.replyTo && !parentById) throw new CausalParentError(`unknown replyTo: ${message.replyTo}`);
+
+		let parentByRef: LedgerRow | null = null;
+		if (message.replyToRef) {
+			const reference = parseMessageRef(message.replyToRef);
+			parentByRef =
+				this.#getLedgerByRef.get(message.project, reference.recipient, reference.serverSequence) ?? null;
+			if (!parentByRef) throw new CausalParentError(`unknown replyToRef: ${message.replyToRef}`);
+		}
+		if (parentById && parentByRef && parentById.msg_id !== parentByRef.msg_id) {
+			throw new CausalParentError("replyTo and replyToRef identify different messages");
+		}
+		const parent = parentById ?? parentByRef;
+		if (!parent) return null;
+		const samePair =
+			(parent.sender === message.from && parent.recipient === message.to) ||
+			(parent.sender === message.to && parent.recipient === message.from);
+		if (parent.project !== message.project || !samePair) {
+			throw new CausalParentError(
+				`causal parent does not match project conversation: ${message.replyToRef ?? message.replyTo}`,
+			);
+		}
+		return parent;
+	}
+
 	#allocateSequence(project: string, recipient: string): number {
 		const row = this.#nextSequence.get(project, recipient);
 		if (!row || !Number.isSafeInteger(row.next_sequence) || row.next_sequence <= 0) {
@@ -501,6 +532,8 @@ export class InboxStore {
 			data: row.data,
 			uncompressedBytes: row.uncompressed_bytes,
 		};
+		const parent = row.reply_to ? this.#getLedger.get(row.reply_to) : null;
+		if (row.reply_to && !parent) throw new Error(`missing causal parent ${row.reply_to}`);
 		const base = {
 			msgId: row.msg_id,
 			project: row.project,
@@ -509,7 +542,9 @@ export class InboxStore {
 			payload,
 			createdAt: row.created_at,
 			serverSequence: row.server_sequence,
+			messageRef: formatMessageRef(row.recipient, row.server_sequence),
 			replyTo: row.reply_to ?? undefined,
+			replyToRef: parent ? formatMessageRef(parent.recipient, parent.server_sequence) : undefined,
 		};
 		if (row.kind === "message") return { ...base, kind: "message" };
 		if (row.kind === "delivery_receipt" && row.receipt_for && row.delivered_at != null) {

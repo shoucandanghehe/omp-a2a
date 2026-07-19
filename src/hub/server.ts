@@ -187,6 +187,9 @@ export async function startHubServer(opts?: {
 			) {
 				return void response.status(400).json({ error: "invalid replyTo" });
 			}
+			if (body.replyToRef !== undefined && typeof body.replyToRef !== "string") {
+				return void response.status(400).json({ error: "invalid replyToRef" });
+			}
 			const draft: HubWireMessageDraft = {
 				kind: "message",
 				msgId: messageId,
@@ -196,6 +199,7 @@ export async function startHubServer(opts?: {
 				payload: body.payload,
 				createdAt: Date.now(),
 				replyTo: body.replyTo,
+				replyToRef: body.replyToRef,
 			};
 			const message = inboxes.enqueue(draft, () => {
 				const recipient = readMember(body.project, body.to, dataDir);

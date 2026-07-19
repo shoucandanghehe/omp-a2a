@@ -17,7 +17,9 @@ type HubWireEnvelopeBase = {
 	to: string;
 	payload: EncodedTextPayload;
 	createdAt: number;
+	messageRef?: string;
 	replyTo?: string;
+	replyToRef?: string;
 };
 
 export type HubWireMessageDraft = HubWireEnvelopeBase & { kind: "message" };
@@ -40,7 +42,9 @@ type HubEnvelopeBase = {
 	to: string;
 	text: string;
 	createdAt: number;
+	messageRef?: string;
 	replyTo?: string;
+	replyToRef?: string;
 	serverSequence: number;
 };
 
@@ -91,6 +95,7 @@ export type HubSendBody = {
 	to: string;
 	payload: EncodedTextPayload;
 	replyTo?: string;
+	replyToRef?: string;
 	messageId?: string;
 };
 
@@ -100,5 +105,6 @@ export type HubSendInput = {
 	to: string;
 	text: string;
 	replyTo?: string;
+	replyToRef?: string;
 	messageId?: string;
 };

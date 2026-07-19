@@ -106,7 +106,18 @@ test("send uses the joined membership as the claimed sender", async () => {
 	const result = await operations.execute({ action: "send", to: "worker", text: "hello" }, { cwd: "/repo" });
 
 	expect(result.text).toContain("Queued for worker");
+	expect(result.text).toContain("ref=worker:1");
 	expect((await client.inbox("send", "worker"))[0]?.text).toBe("hello");
+	const correction = await operations.execute(
+		{ action: "send", to: "worker", text: "corrected", replyToRef: "worker:1" },
+		{ cwd: "/repo" },
+	);
+	expect(correction.text).toContain("ref=worker:2");
+	expect(correction.text).toContain("replyTo=worker:1");
+	expect((await client.inbox("send", "worker"))[1]).toMatchObject({
+		messageRef: "worker:2",
+		replyToRef: "worker:1",
+	});
 });
 
 test("read-only operations report the connected Hub and joined membership", async () => {

@@ -1,4 +1,5 @@
 import { gunzipSync, gzipSync } from "node:zlib";
+import { formatMessageRef, parseMessageRef } from "./message-ref";
 import type { EncodedTextPayload, HubEnvelope, HubWireEnvelope } from "./types";
 
 export const TEXT_COMPRESSION_THRESHOLD_BYTES = 32 * 1024;
@@ -46,6 +47,14 @@ export function decodeWireEnvelope(message: HubWireEnvelope): HubEnvelope {
 	} else if (!Number.isSafeInteger(serverSequence) || serverSequence <= 0) {
 		throw new Error("invalid Inbox server sequence");
 	}
+	const messageRef = serverSequence > 0 ? formatMessageRef(message.to, serverSequence) : undefined;
+	if (message.messageRef !== undefined && message.messageRef !== messageRef) {
+		throw new Error("Inbox messageRef does not match recipient sequence");
+	}
+	if (message.replyToRef !== undefined) {
+		parseMessageRef(message.replyToRef);
+		if (message.replyTo === undefined) throw new Error("Inbox replyToRef requires replyTo");
+	}
 	const base = {
 		msgId: message.msgId,
 		project: message.project,
@@ -54,7 +63,9 @@ export function decodeWireEnvelope(message: HubWireEnvelope): HubEnvelope {
 		text: decodeTextPayload(message.payload),
 		createdAt: message.createdAt,
 		serverSequence,
+		messageRef,
 		replyTo: message.replyTo,
+		replyToRef: message.replyToRef,
 	};
 	const kind = message.kind;
 	if (kind === undefined || kind === "message") return { ...base, kind: "message" };

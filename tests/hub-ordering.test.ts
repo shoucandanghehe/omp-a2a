@@ -204,6 +204,87 @@ test("replyTo preserves and validates the causal parent", async () => {
 
 });
 
+test("friendly message references resolve causal parents", async () => {
+	dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-ordering-"));
+	hub = await startHubServer({ port: 0, dataDir });
+	const client = new HubClient(hub.meta.baseUrl);
+	await client.createProject({ name: "friendly-ref" });
+	await client.register({ project: "friendly-ref", agentId: "controller", cwd: "/controller", pid: 1 });
+	await client.register({ project: "friendly-ref", agentId: "worker", cwd: "/worker", pid: 2 });
+
+	const parent = await client.send({
+		project: "friendly-ref",
+		from: "controller",
+		to: "worker",
+		text: "first instruction",
+		messageId: "friendly-parent",
+	});
+	expect(parent.messageRef).toBe("worker:1");
+
+	const correction = await client.send({
+		project: "friendly-ref",
+		from: "controller",
+		to: "worker",
+		text: "corrected instruction",
+		messageId: "friendly-correction",
+		replyToRef: parent.messageRef,
+	});
+	expect(correction).toMatchObject({
+		messageRef: "worker:2",
+		replyTo: parent.msgId,
+		replyToRef: "worker:1",
+	});
+	expect((await client.readInbox("friendly-ref", "worker")).messages.at(-1)).toMatchObject({
+		messageRef: "worker:2",
+		replyTo: parent.msgId,
+		replyToRef: "worker:1",
+	});
+	const reply = await client.send({
+		project: "friendly-ref",
+		from: "worker",
+		to: "controller",
+		text: "done",
+		messageId: "friendly-reply",
+		replyToRef: parent.messageRef,
+	});
+	expect(reply).toMatchObject({
+		messageRef: "controller:1",
+		replyTo: parent.msgId,
+		replyToRef: "worker:1",
+	});
+	await expect(
+		client.send({
+			project: "friendly-ref",
+			from: "controller",
+			to: "worker",
+			text: "bad reference",
+			messageId: "friendly-invalid",
+			replyToRef: "worker:01",
+		}),
+	).rejects.toThrow("invalid messageRef");
+	await expect(
+		client.send({
+			project: "friendly-ref",
+			from: "controller",
+			to: "worker",
+			text: "missing reference",
+			messageId: "friendly-missing",
+			replyToRef: "worker:99",
+		}),
+	).rejects.toThrow("unknown replyToRef");
+	await expect(
+		client.send({
+			project: "friendly-ref",
+			from: "controller",
+			to: "worker",
+			text: "mismatched references",
+			messageId: "friendly-mismatch",
+			replyTo: parent.msgId,
+			replyToRef: correction.messageRef,
+		}),
+	).rejects.toThrow("identify different messages");
+});
+
 test("concurrent sends are returned in authoritative server sequence", async () => {
 	dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-ordering-"));
 	hub = await startHubServer({ port: 0, dataDir });
