@@ -1,9 +1,10 @@
-import { afterEach, describe, expect, test } from "bun:test";
+import { afterEach, describe, expect, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HubClient } from "../src/hub/client";
 import { startHubServer, type HubServerHandle } from "../src/hub/server";
+import { OFFLINE_MS } from "../src/types";
 
 const roots: string[] = [];
 const hubs: HubServerHandle[] = [];
@@ -46,6 +47,26 @@ describe("Hub project control plane", () => {
 
 		expect((await client.listMembers("presence")).map((member) => member.agentId)).toEqual(["worker"]);
 		expect((await client.heartbeat("presence", "worker")).status).toBe("online");
+	});
+
+	test("heartbeat reconnects a lease-expired member but not one that explicitly left", async () => {
+		const now = spyOn(Date, "now").mockReturnValue(1_000);
+		try {
+			const hub = await startHubServer({ port: 0, dataDir: dataDir() });
+			hubs.push(hub);
+			const client = new HubClient(hub.meta.baseUrl);
+			await client.createProject({ name: "reconnect" });
+			await client.register({ project: "reconnect", agentId: "worker", cwd: "/work", pid: 1 });
+
+			now.mockReturnValue(1_000 + OFFLINE_MS + 1);
+			expect(await client.listMembers("reconnect")).toEqual([]);
+			expect((await client.heartbeat("reconnect", "worker")).status).toBe("online");
+
+			await client.unregister("reconnect", "worker");
+			await expect(client.heartbeat("reconnect", "worker")).rejects.toThrow("member is offline");
+		} finally {
+			now.mockRestore();
+		}
 	});
 
 	test("an online agent ID cannot be replaced implicitly", async () => {

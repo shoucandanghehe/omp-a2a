@@ -103,10 +103,14 @@ export function listProjects(dataDir?: string): A2aProject[] {
 	return projects.sort((left, right) => left.name.localeCompare(right.name));
 }
 
+function readStoredMember(project: string, agentId: string, dataDir?: string): A2aMember | null {
+	return readJson<A2aMember>(memberPath(project, agentId, dataDir));
+}
+
 export function readMember(project: string, agentId: string, dataDir?: string): A2aMember | null {
 	assertProjectName(project);
 	assertAgentId(agentId);
-	const stored = readJson<A2aMember>(memberPath(project, agentId, dataDir));
+	const stored = readStoredMember(project, agentId, dataDir);
 	return stored ? refreshMember(stored) : null;
 }
 
@@ -122,7 +126,6 @@ export function listMembers(opts: ListMembersOptions & { dataDir?: string }): A2
 		const stored = readJson<A2aMember>(path.join(dir, file));
 		if (!stored?.agentId) continue;
 		const member = refreshMember(stored, now);
-		if (member.status !== stored.status) writeJsonAtomic(memberPath(opts.project, member.agentId, opts.dataDir), member);
 		if (opts.all || member.status === "online") members.push(member);
 	}
 	return members.sort((left, right) => left.agentId.localeCompare(right.agentId));
@@ -160,10 +163,12 @@ export function joinProject(opts: JoinOptions & { dataDir?: string }): A2aMember
 }
 
 export function heartbeat(project: string, agentId: string, dataDir?: string): A2aMember {
-	const member = readMember(project, agentId, dataDir);
-	if (!member) throw new Error(`not a member: ${agentId}@${project}`);
-	if (member.status === "offline") throw new Error(`member is offline: ${agentId}@${project}`);
-	const next: A2aMember = { ...member, lastSeenAt: Date.now(), status: "online" };
+	assertProjectName(project);
+	assertAgentId(agentId);
+	const stored = readStoredMember(project, agentId, dataDir);
+	if (!stored) throw new Error(`not a member: ${agentId}@${project}`);
+	if (stored.status === "offline") throw new Error(`member is offline: ${agentId}@${project}`);
+	const next: A2aMember = { ...stored, lastSeenAt: Date.now(), status: "online" };
 	writeJsonAtomic(memberPath(project, agentId, dataDir), next);
 	return next;
 }
