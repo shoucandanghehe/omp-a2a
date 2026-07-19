@@ -1,0 +1,3 @@
+# Copy to ~/.omp/a2a/config.yml
+# Hub must already be running: `bun run hub -- --port 4173`
+hubUrl: http://127.0.0.1:4173
