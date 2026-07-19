@@ -182,6 +182,7 @@ export class HubClient {
 				to: input.to,
 				messageId: input.messageId ?? crypto.randomUUID(),
 				replyTo: input.replyTo,
+				replyToRef: input.replyToRef,
 				payload: encodeTextPayload(input.text),
 			}),
 		});

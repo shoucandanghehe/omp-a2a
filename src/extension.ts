@@ -49,7 +49,7 @@ function usage(): string {
 		"/a2a join <project> --as <agentId> [--caps a,b]",
 		"/a2a leave",
 		"/a2a list [--project <name>] [--all]",
-		"/a2a send <agentId> <message...> [--message-id <id>] [--reply-to <msgId>]",
+		"/a2a send <agentId> <message...> [--message-id <id>] [--reply-to-ref <agentId:sequence>] [--reply-to <msgId>]",
 		"/a2a inbox",
 		"/a2a status",
 		"/a2a hub",
@@ -124,6 +124,7 @@ function commandRequest(raw: string): A2aOperationRequest | null {
 			text,
 			messageId: typeof flags["message-id"] === "string" ? flags["message-id"] : undefined,
 			replyTo: typeof flags["reply-to"] === "string" ? flags["reply-to"] : undefined,
+			replyToRef: typeof flags["reply-to-ref"] === "string" ? flags["reply-to-ref"] : undefined,
 		};
 	}
 	return null;
@@ -167,7 +168,7 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		pi.sendMessage(
 			{
 				customType: "a2a-inbound",
-				content: `[a2a inbound] from=${message.from} project=${message.project} seq=${message.serverSequence} at=${new Date(message.createdAt).toISOString()} msg=${message.msgId} replyTo=${message.replyTo ?? "-"}\n${message.text}`,
+				content: `[a2a inbound] ref=${message.messageRef ?? "-"} from=${message.from} project=${message.project} at=${new Date(message.createdAt).toISOString()} msg=${message.msgId} replyTo=${message.replyToRef ?? message.replyTo ?? "-"}\n${message.text}`,
 				display: true,
 				details: message,
 			},
@@ -191,7 +192,7 @@ export default function a2aExtension(pi: ExtensionAPI) {
 				.receive((message: HubEnvelope) => {
 					if (message.kind === "delivery_receipt") {
 						context.ui.notify(
-							`[a2a delivered] seq=${message.serverSequence} msg=${message.receiptFor} to=${message.from} at=${new Date(message.deliveredAt).toISOString()}`,
+							`[a2a delivered] ref=${message.messageRef ?? "-"} msg=${message.receiptFor} to=${message.from} at=${new Date(message.deliveredAt).toISOString()}`,
 							"info",
 						);
 						return;
@@ -278,7 +279,7 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		name: "a2a",
 		label: "A2A Mesh",
 		description:
-			"Custom multi-project mesh client for a standalone Hub. Create/list/delete projects; join/leave; list members; send and receive messages. Deleting a project requires every member to be offline.",
+			"Custom multi-project mesh client for a standalone Hub. Send messages with agent-friendly refs such as api:42; use replyToRef for causal replies. Create/list/delete projects; join/leave; list members; receive messages.",
 		parameters: z.object({
 			op: z.enum([
 				"project_create",
@@ -298,6 +299,7 @@ export default function a2aExtension(pi: ExtensionAPI) {
 			text: z.string().optional(),
 			messageId: z.string().optional(),
 			replyTo: z.string().optional(),
+			replyToRef: z.string().optional(),
 			displayName: z.string().optional(),
 			description: z.string().optional(),
 			caps: z.array(z.string()).optional(),
@@ -317,6 +319,7 @@ export default function a2aExtension(pi: ExtensionAPI) {
 						messageId: params.messageId,
 						displayName: params.displayName,
 						replyTo: params.replyTo,
+						replyToRef: params.replyToRef,
 						description: params.description,
 						caps: params.caps,
 						all: params.all,

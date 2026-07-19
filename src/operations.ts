@@ -22,6 +22,7 @@ export type A2aOperationRequest = {
 	text?: string;
 	messageId?: string;
 	replyTo?: string;
+	replyToRef?: string;
 	caps?: string[];
 	displayName?: string;
 	description?: string;
@@ -174,9 +175,10 @@ export class A2aOperations {
 					text: request.text,
 					messageId: request.messageId,
 					replyTo: request.replyTo,
+					replyToRef: request.replyToRef,
 				});
 				return {
-					text: `Queued for ${message.to} msg=${message.msgId} seq=${message.serverSequence}${message.replyTo ? ` replyTo=${message.replyTo}` : ""}`,
+					text: `Queued for ${message.to} ref=${message.messageRef ?? "-"} msg=${message.msgId}${message.replyToRef ? ` replyTo=${message.replyToRef}` : message.replyTo ? ` replyTo=${message.replyTo}` : ""}`,
 					details: { message },
 				};
 			}
@@ -228,8 +230,8 @@ export class A2aOperations {
 						: messages
 								.map((message) =>
 									message.kind === "delivery_receipt"
-										? `[delivery receipt] seq=${message.serverSequence} at=${new Date(message.createdAt).toISOString()} msg=${message.receiptFor} to=${message.from} deliveredAt=${new Date(message.deliveredAt).toISOString()}`
-										: `[seq=${message.serverSequence} at=${new Date(message.createdAt).toISOString()} msg=${message.msgId} replyTo=${message.replyTo ?? "-"}] from=${message.from}\n${message.text}`,
+										? `[delivery receipt] ref=${message.messageRef ?? "-"} at=${new Date(message.createdAt).toISOString()} msg=${message.receiptFor} to=${message.from} deliveredAt=${new Date(message.deliveredAt).toISOString()}`
+										: `[ref=${message.messageRef ?? "-"} at=${new Date(message.createdAt).toISOString()} msg=${message.msgId} replyTo=${message.replyToRef ?? message.replyTo ?? "-"}] from=${message.from}\n${message.text}`,
 								)
 								.join("\n\n");
 				const acknowledgment =

@@ -23,7 +23,7 @@ OMP multi-project collaboration mesh.
 
 Messages below 32 KiB use an identity payload. Larger text is gzip-compressed on the Mesh wire. Decoded text is limited to 4 MiB. Inbox storage has no message-count cap. Every accepted envelope receives a Hub-assigned `serverSequence` that is monotonic within its `(project, recipient)` stream. Pending reads use only `serverSequence > cursor ORDER BY serverSequence`; `createdAt` is diagnostic metadata and never participates in correctness ordering.
 
-`messageId` is an optional idempotency key. Retrying the same body returns the original envelope and sequence, including after acknowledgment; reusing the ID for different content returns `409`. The deduplication ledger is retained until Project deletion. `replyTo` is an optional causal parent and must name a message in the same Project between the same participant pair.
+`messageId` is an opaque idempotency key for machines. Retrying the same body returns the original envelope and sequence, including after acknowledgment; reusing the ID for different content returns `409`. The deduplication ledger is retained until Project deletion. Agents normally use the derived Project-scoped `messageRef` (`<recipient>:<serverSequence>`, for example `api:42`) instead. `replyToRef` accepts that friendly reference and resolves it to the internal `replyTo` message ID; raw `replyTo` remains supported for compatibility. Both forms must identify a message in the same Project between the same participant pair.
 
 The extension uses at-least-once delivery. Reading pending messages does not advance the persistent cursor. After OMP injection succeeds, acknowledgment transactionally removes the next ordered message, records an observable acknowledgment status, advances the cursor, and creates the delivery receipt. A crash after injection but before acknowledgment therefore redelivers the same `messageId`; consumers must use that ID for deduplication. Unknown and out-of-order acknowledgments fail explicitly, while repeated acknowledgments report `already_acknowledged`.
 
@@ -132,8 +132,9 @@ Inside OMP, after the selected Hub is running:
 /a2a project create billing-rewrite
 /a2a join billing-rewrite --as api --caps api,db
 /a2a list
-/a2a send web please align the login API contract --message-id task-42
-/a2a send web corrected contract --message-id reply-42 --reply-to task-42
+/a2a send web please align the login API contract
+# after the Hub returns ref=web:42:
+/a2a send web corrected contract --reply-to-ref web:42
 /a2a inbox
 /a2a status
 /a2a leave
@@ -142,7 +143,7 @@ Inside OMP, after the selected Hub is running:
 
 The model-facing `a2a` Tool exposes the same operations through the same `A2aOperations` module.
 
-`send` reports `queued` with `msgId` and `serverSequence`. Inbox and inbound output include `serverSequence`, `createdAt`, cursor, and `replyTo`. The sender extension later displays `[a2a delivered]` with the original `msgId` after the receiving extension acknowledges it. This proves receipt by the peer OMP extension, not that its model read, understood, or completed the work; semantic completion still requires a normal reply.
+`send` reports `queued` with the friendly `messageRef`; the opaque `msgId` remains in output details for idempotency and diagnostics. Inbox and inbound output use friendly refs such as `web:42` and show `replyToRef` when present. The sender extension later displays `[a2a delivered]` with the original `msgId` after the receiving extension acknowledges it. This proves receipt by the peer OMP extension, not that its model read, understood, or completed the work; semantic completion still requires a normal reply.
 
 Project deletion is idempotent and removes its persisted Inbox. It is rejected until every member is offline.
 
@@ -152,7 +153,7 @@ Project deletion is idempotent and removes its persisted Inbox. It is rejected u
 bun run smoke
 ```
 
-This runs the Bun tests, Registry smoke, and a real Hub/HubClient smoke covering per-stream monotonic FIFO ordering, concurrent writes and duplicate reads, idempotent message IDs, causal replies, acknowledgment-driven persistent cursors, pre-ack failure and post-ack restart behavior, durable delivery receipts, legacy Inbox migration, gzip payloads, and safe Project deletion.
+This runs the Bun tests, Registry smoke, and a real Hub/HubClient smoke covering per-stream monotonic FIFO ordering, friendly message references, concurrent writes and duplicate reads, idempotent message IDs, causal replies, acknowledgment-driven persistent cursors, pre-ack failure and post-ack restart behavior, durable delivery receipts, legacy Inbox migration, gzip payloads, and safe Project deletion.
 
 ## Layout
 
@@ -163,6 +164,7 @@ src/
   hub/server.ts    # standalone custom Mesh Hub
   hub/client.ts    # pure URL client
   hub/inbox.ts     # persistent SQLite Inbox
+  hub/message-ref.ts # derived agent-facing message references
   hub/payload.ts   # text encoding, gzip, and decoded-size limits
   hub/cli.ts       # bun run hub
   extension.ts     # thin OMP adapters and background timers
