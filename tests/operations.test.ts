@@ -29,6 +29,19 @@ test("A2aOperations creates and lists projects through the connected Hub", async
 	expect(listed.text).toContain("shared");
 });
 
+test("A2aOperations deletes an inactive project through the connected Hub", async () => {
+	root = mkdtempSync(join(tmpdir(), "omp-a2a-operations-"));
+	hub = await startHubServer({ port: 0, dataDir: root });
+	const client = new HubClient(hub.meta.baseUrl);
+	const operations = new A2aOperations({ getClient: async () => client, pid: 123 });
+	await operations.execute({ action: "project_create", project: "retired" }, { cwd: "/repo" });
+
+	const deleted = await operations.execute({ action: "project_delete", project: "retired" }, { cwd: "/repo" });
+
+	expect(deleted.text).toBe("Deleted A2A project retired");
+	expect(await client.listProjects()).toEqual([]);
+});
+
 test("leave clears local membership and reports pending cleanup when Hub is unavailable", async () => {
 	root = mkdtempSync(join(tmpdir(), "omp-a2a-operations-"));
 	hub = await startHubServer({ port: 0, dataDir: root });
@@ -55,7 +68,7 @@ test("leave clears local membership and reports pending cleanup when Hub is unav
 	expect(operations.membership).toBeNull();
 });
 
-test("Inbox acknowledgment happens only after successful delivery", async () => {
+test("failed delivery remains pending until a successful delivery is acknowledged", async () => {
 	root = mkdtempSync(join(tmpdir(), "omp-a2a-operations-"));
 	hub = await startHubServer({ port: 0, dataDir: root });
 	const client = new HubClient(hub.meta.baseUrl);
@@ -73,11 +86,12 @@ test("Inbox acknowledgment happens only after successful delivery", async () => 
 		}),
 	).rejects.toThrow("injection failed");
 	expect(await client.inbox("delivery", "worker")).toHaveLength(1);
+	expect(await client.inbox("delivery", "controller")).toEqual([]);
 
-	const delivered: string[] = [];
-	expect(await operations.receive((message) => delivered.push(message.text))).toBe(1);
-	expect(delivered).toEqual(["work"]);
-	expect(await client.inbox("delivery", "worker")).toEqual([]);
+	const repeated: string[] = [];
+	expect(await operations.receive((message) => repeated.push(message.text))).toBe(1);
+	expect(repeated).toEqual(["work"]);
+	expect(await client.inbox("delivery", "controller")).toHaveLength(1);
 });
 
 test("send uses the joined membership as the claimed sender", async () => {
@@ -91,7 +105,7 @@ test("send uses the joined membership as the claimed sender", async () => {
 
 	const result = await operations.execute({ action: "send", to: "worker", text: "hello" }, { cwd: "/repo" });
 
-	expect(result.text).toContain("Sent to worker");
+	expect(result.text).toContain("Queued for worker");
 	expect((await client.inbox("send", "worker"))[0]?.text).toBe("hello");
 });
 
@@ -125,4 +139,23 @@ test("manual inbox displays and acknowledges messages", async () => {
 
 	expect(result.text).toContain("manual");
 	expect(await client.inbox("inbox", "worker")).toEqual([]);
+});
+
+test("manual inbox identifies and acknowledges delivery receipts", async () => {
+	root = mkdtempSync(join(tmpdir(), "omp-a2a-operations-"));
+	hub = await startHubServer({ port: 0, dataDir: root });
+	const client = new HubClient(hub.meta.baseUrl);
+	const operations = new A2aOperations({ getClient: async () => client, pid: 123 });
+	await operations.execute({ action: "project_create", project: "receipts" }, { cwd: "/repo" });
+	await client.register({ project: "receipts", agentId: "worker", cwd: "/worker", pid: 456 });
+	await operations.execute({ action: "join", project: "receipts", agentId: "controller" }, { cwd: "/repo" });
+	await operations.execute({ action: "send", to: "worker", text: "work" }, { cwd: "/repo" });
+	const message = (await client.inbox("receipts", "worker"))[0]!;
+	await client.ack("receipts", "worker", [message.msgId]);
+
+	const result = await operations.execute({ action: "inbox" }, { cwd: "/repo" });
+
+	expect(result.text).toContain("Inbox cursor=");
+	expect(result.text).toContain(`msg=${message.msgId} to=worker`);
+	expect(await client.inbox("receipts", "controller")).toEqual([]);
 });

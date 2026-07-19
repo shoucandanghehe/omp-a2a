@@ -4,6 +4,7 @@ import type { Server } from "node:http";
 import * as path from "node:path";
 import {
 	createProject,
+	deleteProject,
 	getProject,
 	heartbeat,
 	joinProject,
@@ -22,11 +23,18 @@ import {
 	inboxDatabasePath,
 } from "../paths";
 import { HubDataLock, HubDataDirInUseError } from "./data-lock";
-import { InboxStore } from "./inbox";
+import {
+	CausalParentError,
+	InboxStore,
+	MessageIdConflictError,
+	OutOfOrderAcknowledgmentError,
+	UnknownMessageError,
+} from "./inbox";
 import { decodeTextPayload, PayloadTooLargeError } from "./payload";
-import type { HubMeta, HubRegisterBody, HubSendBody, HubWireEnvelope } from "./types";
+import type { HubMeta, HubRegisterBody, HubSendBody, HubWireMessageDraft } from "./types";
 
 const DEFAULT_PORT = 4173;
+class RecipientUnavailableError extends Error {}
 
 
 export type HubServerHandle = {
@@ -86,6 +94,17 @@ export async function startHubServer(opts?: {
 			if (!body.name) return void response.status(400).json({ error: "name required" });
 			const project = createProject({ ...body, name: body.name, dataDir });
 			response.status(201).json({ project });
+		} catch (error) {
+			const status = error instanceof RegistryConflictError ? 409 : 400;
+			response.status(status).json({ error: error instanceof Error ? error.message : String(error) });
+		}
+	});
+
+	app.delete("/v1/projects/:name", (request, response) => {
+		try {
+			const deleted = deleteProject(request.params.name, dataDir);
+			inboxes.deleteProject(request.params.name);
+			response.json({ ok: true, deleted });
 		} catch (error) {
 			const status = error instanceof RegistryConflictError ? 409 : 400;
 			response.status(status).json({ error: error instanceof Error ? error.message : String(error) });
@@ -155,22 +174,45 @@ export async function startHubServer(opts?: {
 			if (decodeTextPayload(body.payload).trim().length === 0) {
 				return void response.status(400).json({ error: "message text required" });
 			}
-			const recipient = readMember(body.project, body.to, dataDir);
-			if (!recipient || recipient.status !== "online") {
-				return void response.status(404).json({ error: `peer ${body.to} is not online in ${body.project}` });
+			const messageId = body.messageId ?? crypto.randomUUID();
+			if (
+				typeof messageId !== "string" ||
+				!/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(messageId)
+			) {
+				return void response.status(400).json({ error: "invalid messageId" });
 			}
-			const message: HubWireEnvelope = {
-				msgId: crypto.randomUUID(),
+			if (
+				body.replyTo !== undefined &&
+				(typeof body.replyTo !== "string" || !/^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/.test(body.replyTo))
+			) {
+				return void response.status(400).json({ error: "invalid replyTo" });
+			}
+			const draft: HubWireMessageDraft = {
+				kind: "message",
+				msgId: messageId,
 				project: body.project,
 				from: body.from,
 				to: body.to,
 				payload: body.payload,
 				createdAt: Date.now(),
+				replyTo: body.replyTo,
 			};
-			inboxes.push(message);
+			const message = inboxes.enqueue(draft, () => {
+				const recipient = readMember(body.project, body.to, dataDir);
+				if (!recipient || recipient.status !== "online") {
+					throw new RecipientUnavailableError(`peer ${body.to} is not online in ${body.project}`);
+				}
+			});
 			response.json({ ok: true, message });
 		} catch (error) {
-			const status = error instanceof PayloadTooLargeError ? 413 : 400;
+			const status =
+				error instanceof RecipientUnavailableError
+					? 404
+					: error instanceof MessageIdConflictError || error instanceof CausalParentError
+						? 409
+						: error instanceof PayloadTooLargeError
+							? 413
+							: 400;
 			response.status(status).json({ error: error instanceof Error ? error.message : String(error) });
 		}
 	});
@@ -180,17 +222,40 @@ export async function startHubServer(opts?: {
 		const agentId = String(request.query.agentId ?? "");
 		if (!project || !agentId) return void response.status(400).json({ error: "project and agentId required" });
 		const limit = Math.min(Math.max(Number(request.query.limit) || 500, 1), 1_000);
-		response.json({ messages: inboxes.list(project, agentId, limit) });
+		response.json(inboxes.read(project, agentId, limit));
+	});
+
+	app.post("/v1/inbox/read", (request, response) => {
+		const body = request.body as { project?: string; agentId?: string; limit?: number };
+		if (!body.project || !body.agentId) {
+			return void response.status(400).json({ error: "project and agentId required" });
+		}
+		const limit = Math.min(Math.max(Number(body.limit) || 500, 1), 1_000);
+		response.json(inboxes.read(body.project, body.agentId, limit));
 	});
 
 	app.post("/v1/inbox/ack", (request, response) => {
-		const body = request.body as { project?: string; agentId?: string; messageIds?: unknown };
-		if (!body.project || !body.agentId || !Array.isArray(body.messageIds)) {
-			return void response.status(400).json({ error: "project, agentId, messageIds required" });
+		try {
+			const body = request.body as { project?: string; agentId?: string; messageIds?: unknown };
+			if (
+				!body.project ||
+				!body.agentId ||
+				!Array.isArray(body.messageIds) ||
+				!body.messageIds.every((value): value is string => typeof value === "string")
+			) {
+				return void response.status(400).json({ error: "project, agentId, string messageIds required" });
+			}
+			const result = inboxes.acknowledge(body.project, body.agentId, body.messageIds);
+			response.json({ ok: true, ...result });
+		} catch (error) {
+			const status =
+				error instanceof UnknownMessageError
+					? 404
+					: error instanceof OutOfOrderAcknowledgmentError
+						? 409
+						: 400;
+			response.status(status).json({ error: error instanceof Error ? error.message : String(error) });
 		}
-		const messageIds = body.messageIds.filter((value): value is string => typeof value === "string");
-		inboxes.ack(body.project, body.agentId, messageIds);
-		response.json({ ok: true });
 	});
 
 	let server: Server;

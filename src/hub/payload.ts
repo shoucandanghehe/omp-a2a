@@ -40,12 +40,34 @@ export function decodeTextPayload(payload: EncodedTextPayload): string {
 }
 
 export function decodeWireEnvelope(message: HubWireEnvelope): HubEnvelope {
-	return {
+	let serverSequence = message.serverSequence;
+	if (serverSequence === undefined) {
+		serverSequence = 0;
+	} else if (!Number.isSafeInteger(serverSequence) || serverSequence <= 0) {
+		throw new Error("invalid Inbox server sequence");
+	}
+	const base = {
 		msgId: message.msgId,
 		project: message.project,
 		from: message.from,
 		to: message.to,
 		text: decodeTextPayload(message.payload),
 		createdAt: message.createdAt,
+		serverSequence,
+		replyTo: message.replyTo,
 	};
+	const kind = message.kind;
+	if (kind === undefined || kind === "message") return { ...base, kind: "message" };
+	if (kind === "delivery_receipt") {
+		if (typeof message.receiptFor !== "string" || typeof message.deliveredAt !== "number") {
+			throw new Error("invalid delivery receipt metadata");
+		}
+		return {
+			...base,
+			kind,
+			receiptFor: message.receiptFor,
+			deliveredAt: message.deliveredAt,
+		};
+	}
+	throw new Error(`unsupported inbox envelope kind: ${String(kind)}`);
 }

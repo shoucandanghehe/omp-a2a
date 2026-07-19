@@ -69,4 +69,29 @@ describe("Hub project control plane", () => {
 		await expect(startHubServer({ port: 0, dataDir: root })).rejects.toThrow("already in use");
 	});
 
+	test("deleting an empty project is idempotent", async () => {
+		const hub = await startHubServer({ port: 0, dataDir: dataDir() });
+		hubs.push(hub);
+		const client = new HubClient(hub.meta.baseUrl);
+		await client.createProject({ name: "retired" });
+
+		expect(await client.deleteProject("retired")).toBe(true);
+		expect(await client.listProjects()).toEqual([]);
+		expect(await client.deleteProject("retired")).toBe(false);
+	});
+
+	test("a project cannot be deleted while a member is active", async () => {
+		const hub = await startHubServer({ port: 0, dataDir: dataDir() });
+		hubs.push(hub);
+		const client = new HubClient(hub.meta.baseUrl);
+		await client.createProject({ name: "active" });
+		await client.register({ project: "active", agentId: "worker", cwd: "/worker", pid: 1 });
+
+		await expect(client.deleteProject("active")).rejects.toThrow("active members: worker");
+		expect((await client.listProjects()).map((project) => project.name)).toEqual(["active"]);
+
+		await client.unregister("active", "worker");
+		expect(await client.deleteProject("active")).toBe(true);
+	});
+
 });
