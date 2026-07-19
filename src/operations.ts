@@ -8,6 +8,7 @@ export type A2aOperationRequest = {
 	action:
 		| "hub"
 		| "project_create"
+		| "project_delete"
 		| "project_list"
 		| "join"
 		| "leave"
@@ -19,6 +20,8 @@ export type A2aOperationRequest = {
 	agentId?: string;
 	to?: string;
 	text?: string;
+	messageId?: string;
+	replyTo?: string;
 	caps?: string[];
 	displayName?: string;
 	description?: string;
@@ -101,6 +104,16 @@ export class A2aOperations {
 					details: { project },
 				};
 			}
+			case "project_delete": {
+				if (!request.project) throw new Error("project is required");
+				const deleted = await client.deleteProject(request.project);
+				return {
+					text: deleted
+						? `Deleted A2A project ${request.project}`
+						: `A2A project ${request.project} does not exist`,
+					details: { project: request.project, deleted },
+				};
+			}
 			case "project_list": {
 				const projects = await client.listProjects();
 				const rows = await Promise.all(
@@ -159,9 +172,11 @@ export class A2aOperations {
 					from: this.#membership.agentId,
 					to: request.to,
 					text: request.text,
+					messageId: request.messageId,
+					replyTo: request.replyTo,
 				});
 				return {
-					text: `Sent to ${message.to} msg=${message.msgId}`,
+					text: `Queued for ${message.to} msg=${message.msgId} seq=${message.serverSequence}${message.replyTo ? ` replyTo=${message.replyTo}` : ""}`,
 					details: { message },
 				};
 			}
@@ -203,21 +218,38 @@ export class A2aOperations {
 			}
 			case "inbox": {
 				if (!this.#membership) throw new Error("not joined");
-				const messages = await client.inbox(this.#membership.project, this.#membership.agentId);
-				const text =
+				const { messages, cursor } = await client.readInbox(
+					this.#membership.project,
+					this.#membership.agentId,
+				);
+				const entries =
 					messages.length === 0
 						? "Inbox empty."
 						: messages
-								.map((message) => `[${message.msgId}] from=${message.from}\n${message.text}`)
+								.map((message) =>
+									message.kind === "delivery_receipt"
+										? `[delivery receipt] seq=${message.serverSequence} at=${new Date(message.createdAt).toISOString()} msg=${message.receiptFor} to=${message.from} deliveredAt=${new Date(message.deliveredAt).toISOString()}`
+										: `[seq=${message.serverSequence} at=${new Date(message.createdAt).toISOString()} msg=${message.msgId} replyTo=${message.replyTo ?? "-"}] from=${message.from}\n${message.text}`,
+								)
 								.join("\n\n");
-				if (messages.length > 0) {
-					await client.ack(
-						this.#membership.project,
-						this.#membership.agentId,
-						messages.map((message) => message.msgId),
-					);
-				}
-				return { text, details: { messages } };
+				const acknowledgment =
+					messages.length === 0
+						? null
+						: await client.ack(
+								this.#membership.project,
+								this.#membership.agentId,
+								messages.map((message) => message.msgId),
+							);
+				const cursorStatus =
+					acknowledgment?.cursor ?? (messages.length === 0 ? cursor : "unknown (legacy Hub)");
+				return {
+					text: `Inbox cursor=${cursorStatus}\n${entries}`,
+					details: {
+						messages,
+						cursor: acknowledgment?.cursor ?? cursor,
+						acknowledgments: acknowledgment?.acknowledgments ?? null,
+					},
+				};
 			}
 			default:
 				throw new Error(`unsupported A2A action: ${request.action}`);
@@ -234,7 +266,7 @@ export class A2aOperations {
 		if (!this.#membership) return 0;
 		const membership = this.#membership;
 		const client = await this.#getClient();
-		const messages = await client.inbox(membership.project, membership.agentId);
+		const { messages } = await client.readInbox(membership.project, membership.agentId);
 		let delivered = 0;
 		for (const message of messages) {
 			await deliver(message);

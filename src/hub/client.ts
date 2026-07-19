@@ -4,15 +4,33 @@ import * as path from "node:path";
 import { a2aRoot } from "../paths";
 import type { A2aMember, A2aProject } from "../types";
 import { decodeWireEnvelope, encodeTextPayload } from "./payload";
-import type { HubEnvelope, HubMeta, HubRegisterBody, HubSendInput, HubWireEnvelope } from "./types";
+import type {
+	HubAckBatch,
+	HubEnvelope,
+	HubInboxBatch,
+	HubMeta,
+	HubRegisterBody,
+	HubSendInput,
+	HubWireEnvelope,
+	HubWireInboxBatch,
+} from "./types";
 
 const DEFAULT_HUB_URL = "http://127.0.0.1:4173";
+
+class HubHttpError extends Error {
+	constructor(
+		readonly status: number,
+		message: string,
+	) {
+		super(message);
+	}
+}
 
 async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
 	const response = await fetch(url, init);
 	const body = (await response.json().catch(() => ({}))) as T & { error?: string };
 	if (!response.ok) {
-		throw new Error(body.error ? String(body.error) : `HTTP ${response.status} ${url}`);
+		throw new HubHttpError(response.status, body.error ? String(body.error) : `HTTP ${response.status} ${url}`);
 	}
 	return body;
 }
@@ -109,6 +127,14 @@ export class HubClient {
 		return response.project;
 	}
 
+	async deleteProject(name: string): Promise<boolean> {
+		const response = await fetchJson<{ ok: true; deleted: boolean }>(
+			`${this.#baseUrl}/v1/projects/${encodeURIComponent(name)}`,
+			{ method: "DELETE" },
+		);
+		return response.deleted;
+	}
+
 	async listProjects(): Promise<A2aProject[]> {
 		const response = await fetchJson<{ projects: A2aProject[] }>(`${this.#baseUrl}/v1/projects`);
 		return response.projects;
@@ -154,6 +180,8 @@ export class HubClient {
 				project: input.project,
 				from: input.from,
 				to: input.to,
+				messageId: input.messageId ?? crypto.randomUUID(),
+				replyTo: input.replyTo,
 				payload: encodeTextPayload(input.text),
 			}),
 		});
@@ -166,11 +194,37 @@ export class HubClient {
 		return response.messages.map(decodeWireEnvelope);
 	}
 
-	async ack(project: string, agentId: string, messageIds: string[]): Promise<void> {
-		await fetchJson<{ ok: true }>(`${this.#baseUrl}/v1/inbox/ack`, {
+	async readInbox(project: string, agentId: string, limit = 500): Promise<HubInboxBatch> {
+		try {
+			const response = await fetchJson<HubWireInboxBatch>(`${this.#baseUrl}/v1/inbox/read`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ project, agentId, limit }),
+			});
+			return {
+				messages: response.messages.map(decodeWireEnvelope),
+				cursor: response.cursor,
+			};
+		} catch (error) {
+			if (!(error instanceof HubHttpError) || error.status !== 404) throw error;
+			const query = new URLSearchParams({ project, agentId, limit: String(limit) });
+			const response = await fetchJson<{ messages: HubWireEnvelope[]; cursor?: number }>(
+				`${this.#baseUrl}/v1/inbox?${query}`,
+			);
+			return {
+				messages: response.messages.map(decodeWireEnvelope),
+				cursor: Number.isSafeInteger(response.cursor) ? response.cursor! : 0,
+			};
+		}
+	}
+
+	async ack(project: string, agentId: string, messageIds: string[]): Promise<HubAckBatch | null> {
+		const response = await fetchJson<Partial<HubAckBatch> & { ok: true }>(`${this.#baseUrl}/v1/inbox/ack`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({ project, agentId, messageIds }),
 		});
+		if (!Array.isArray(response.acknowledgments) || !Number.isSafeInteger(response.cursor)) return null;
+		return { acknowledgments: response.acknowledgments, cursor: response.cursor! };
 	}
 }

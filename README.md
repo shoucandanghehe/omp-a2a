@@ -13,7 +13,7 @@ OMP multi-project collaboration mesh.
   http://127.0.0.1:4173
   - authoritative Project Registry
   - heartbeat-based membership
-  - persistent SQLite Inbox + explicit ack
+  - persistent SQLite Inbox + durable delivery receipts
   - custom Mesh send protocol
 ```
 
@@ -21,7 +21,15 @@ OMP multi-project collaboration mesh.
 - **Extension:** pure client; Slash and Tool adapters share one `A2aOperations` implementation.
 - **Multiple Hubs:** supported when every Hub has a different URL and data directory. Projects with the same name on different Hubs are unrelated.
 
-Messages below 32 KiB use an identity payload. Larger text is gzip-compressed on the Mesh wire. Decoded text is limited to 4 MiB. Inbox storage has no message-count cap; messages remain until the recipient acknowledges successful delivery.
+Messages below 32 KiB use an identity payload. Larger text is gzip-compressed on the Mesh wire. Decoded text is limited to 4 MiB. Inbox storage has no message-count cap. Every accepted envelope receives a Hub-assigned `serverSequence` that is monotonic within its `(project, recipient)` stream. Pending reads use only `serverSequence > cursor ORDER BY serverSequence`; `createdAt` is diagnostic metadata and never participates in correctness ordering.
+
+`messageId` is an optional idempotency key. Retrying the same body returns the original envelope and sequence, including after acknowledgment; reusing the ID for different content returns `409`. The deduplication ledger is retained until Project deletion. `replyTo` is an optional causal parent and must name a message in the same Project between the same participant pair.
+
+The extension uses at-least-once delivery. Reading pending messages does not advance the persistent cursor. After OMP injection succeeds, acknowledgment transactionally removes the next ordered message, records an observable acknowledgment status, advances the cursor, and creates the delivery receipt. A crash after injection but before acknowledgment therefore redelivers the same `messageId`; consumers must use that ID for deduplication. Unknown and out-of-order acknowledgments fail explicitly, while repeated acknowledgments report `already_acknowledged`.
+
+On the first upgraded Hub start, the existing SQLite Inbox is migrated in place: queued rows receive deterministic per-stream sequences in `(project, recipient, createdAt, rowid)` order, and pending messages seed the deduplication ledger. The previous global-sequence ledger is rebuilt for scoped sequences, and any pre-ack consume cursor is reset so migration prefers possible redelivery over message loss. IDs for messages already acknowledged before the upgrade no longer exist and cannot be backfilled. Until the Hub is upgraded, a new client falls back to the legacy peek-and-ack path, so scoped sequence, causal-link, and persistent acknowledgment guarantees require the new Hub.
+
+When the receiving extension acknowledges a successfully injected message, the same storage transaction advances its cursor and creates a durable `delivery_receipt` in the sender's Inbox; acknowledging the receipt removes it without creating another receipt. Messages arriving while the Agent is active use OMP's steer queue rather than becoming stale follow-up turns.
 
 ## Trust model
 
@@ -113,7 +121,7 @@ caps: [api, db]
 autoJoin: true
 ```
 
-Project creation, listing, membership, and messaging always go through the selected Hub.
+Project creation, listing, deletion, membership, and messaging always go through the selected Hub.
 
 ## Usage
 
@@ -124,13 +132,19 @@ Inside OMP, after the selected Hub is running:
 /a2a project create billing-rewrite
 /a2a join billing-rewrite --as api --caps api,db
 /a2a list
-/a2a send web please align the login API contract
+/a2a send web please align the login API contract --message-id task-42
+/a2a send web corrected contract --message-id reply-42 --reply-to task-42
 /a2a inbox
 /a2a status
 /a2a leave
+/a2a project delete billing-rewrite
 ```
 
 The model-facing `a2a` Tool exposes the same operations through the same `A2aOperations` module.
+
+`send` reports `queued` with `msgId` and `serverSequence`. Inbox and inbound output include `serverSequence`, `createdAt`, cursor, and `replyTo`. The sender extension later displays `[a2a delivered]` with the original `msgId` after the receiving extension acknowledges it. This proves receipt by the peer OMP extension, not that its model read, understood, or completed the work; semantic completion still requires a normal reply.
+
+Project deletion is idempotent and removes its persisted Inbox. It is rejected until every member is offline.
 
 ## Verify
 
@@ -138,7 +152,7 @@ The model-facing `a2a` Tool exposes the same operations through the same `A2aOpe
 bun run smoke
 ```
 
-This runs the Bun tests, Registry smoke, and a real Hub/HubClient smoke covering independent Hubs, heartbeat presence, duplicate rejection, trust-on-claim delivery, gzip payloads, explicit ack, and restart persistence.
+This runs the Bun tests, Registry smoke, and a real Hub/HubClient smoke covering per-stream monotonic FIFO ordering, concurrent writes and duplicate reads, idempotent message IDs, causal replies, acknowledgment-driven persistent cursors, pre-ack failure and post-ack restart behavior, durable delivery receipts, legacy Inbox migration, gzip payloads, and safe Project deletion.
 
 ## Layout
 

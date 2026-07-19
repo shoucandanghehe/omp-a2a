@@ -34,11 +34,18 @@ async function main() {
 	assert(duplicateRejected, "online duplicate rejected");
 	assert((await client.listMembers("mesh-demo")).length === 2, "heartbeat presence ignores diagnostic PID");
 
-	console.log("\n== trust-on-claim send and explicit ack ==");
+	console.log("\n== trust-on-claim send and durable delivery receipt ==");
 	const message = await client.send({ project: "mesh-demo", from: "controller", to: "web", text: "hello" });
 	assert((await client.inbox("mesh-demo", "web"))[0]?.text === "hello", "unregistered sender claim accepted");
 	await client.ack("mesh-demo", "web", [message.msgId]);
 	assert((await client.inbox("mesh-demo", "web")).length === 0, "ack removes message");
+	const receipt = (await client.inbox("mesh-demo", "controller"))[0];
+	assert(
+		receipt?.kind === "delivery_receipt" && receipt.receiptFor === message.msgId,
+		"ack creates delivery receipt",
+	);
+	await client.ack("mesh-demo", "controller", [receipt.msgId]);
+	assert((await client.inbox("mesh-demo", "web")).length === 0, "receipt ack does not loop");
 
 	console.log("\n== gzip large payload ==");
 	const largeText = "compressible diff line\n".repeat(2_000);
@@ -63,6 +70,20 @@ async function main() {
 		unknownRejected = true;
 	}
 	assert(unknownRejected, "unknown recipient rejected");
+
+	console.log("\n== safe project deletion ==");
+	let activeDeleteRejected = false;
+	try {
+		await restartedClient.deleteProject("mesh-demo");
+	} catch {
+		activeDeleteRejected = true;
+	}
+	assert(activeDeleteRejected, "project with online members cannot be deleted");
+	await restartedClient.unregister("mesh-demo", "api");
+	await restartedClient.unregister("mesh-demo", "web");
+	assert(await restartedClient.deleteProject("mesh-demo"), "inactive project deleted");
+	assert((await restartedClient.listProjects()).length === 0, "deleted project absent");
+	assert(!(await restartedClient.deleteProject("mesh-demo")), "project deletion is idempotent");
 
 	console.log("\n== PASS ==");
 	console.log("Custom Mesh Hub smoke OK");

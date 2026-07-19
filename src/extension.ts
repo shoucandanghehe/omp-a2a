@@ -1,13 +1,15 @@
 import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { loadLocalConfig } from "./config";
 import { HubClient, resolveHubUrl } from "./hub/client";
-import type { HubEnvelope } from "./hub/types";
+import type { HubEnvelope, HubMessageEnvelope } from "./hub/types";
 import { A2aOperations, type A2aOperationRequest } from "./operations";
 import { AGENT_ID_RE, HEARTBEAT_MS, PROJECT_NAME_RE } from "./types";
 
 type TimerContext = {
 	setInterval: (fn: () => void, ms: number) => unknown;
 	clearTimer: (handle: unknown) => void;
+	isIdle: () => boolean;
+	ui: { notify: (message: string, type?: "info" | "warning" | "error") => void };
 };
 
 function parseArgs(raw: string): { positional: string[]; flags: Record<string, string | boolean> } {
@@ -42,11 +44,12 @@ function usage(): string {
 		"A2A multi-project custom mesh (standalone Hub + omp client)",
 		"",
 		"/a2a project create <name> [--display <text>] [--desc <text>]",
+		"/a2a project delete <name>",
 		"/a2a project list",
 		"/a2a join <project> --as <agentId> [--caps a,b]",
 		"/a2a leave",
 		"/a2a list [--project <name>] [--all]",
-		"/a2a send <agentId> <message...>",
+		"/a2a send <agentId> <message...> [--message-id <id>] [--reply-to <msgId>]",
 		"/a2a inbox",
 		"/a2a status",
 		"/a2a hub",
@@ -75,6 +78,12 @@ function commandRequest(raw: string): A2aOperationRequest | null {
 						? flags.description
 						: undefined,
 		};
+	}
+	if (command === "project" && positional[1] === "delete") {
+		const project = positional[2];
+		if (!project) throw new Error("usage: /a2a project delete <name>");
+		if (!PROJECT_NAME_RE.test(project)) throw new Error(`invalid project name: ${project}`);
+		return { action: "project_delete", project };
 	}
 	if (command === "project" && (positional[1] === "list" || positional[1] === undefined)) {
 		return { action: "project_list" };
@@ -109,7 +118,13 @@ function commandRequest(raw: string): A2aOperationRequest | null {
 		const to = positional[1];
 		const text = positional.slice(2).join(" ").trim();
 		if (!to || !text) throw new Error("usage: /a2a send <agentId> <message...>");
-		return { action: "send", to, text };
+		return {
+			action: "send",
+			to,
+			text,
+			messageId: typeof flags["message-id"] === "string" ? flags["message-id"] : undefined,
+			replyTo: typeof flags["reply-to"] === "string" ? flags["reply-to"] : undefined,
+		};
 	}
 	return null;
 }
@@ -148,15 +163,15 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		polling = false;
 	};
 
-	const injectEnvelope = (message: HubEnvelope) => {
+	const injectEnvelope = (message: HubMessageEnvelope, deliverAs: "steer" | "followUp") => {
 		pi.sendMessage(
 			{
 				customType: "a2a-inbound",
-				content: `[a2a inbound] from=${message.from} project=${message.project} msg=${message.msgId}\n${message.text}`,
+				content: `[a2a inbound] from=${message.from} project=${message.project} seq=${message.serverSequence} at=${new Date(message.createdAt).toISOString()} msg=${message.msgId} replyTo=${message.replyTo ?? "-"}\n${message.text}`,
 				display: true,
 				details: message,
 			},
-			{ deliverAs: "followUp", triggerTurn: true },
+			{ deliverAs, triggerTurn: true },
 		);
 	};
 
@@ -173,7 +188,16 @@ export default function a2aExtension(pi: ExtensionAPI) {
 			if (polling) return;
 			polling = true;
 			void operations
-				.receive(injectEnvelope)
+				.receive((message: HubEnvelope) => {
+					if (message.kind === "delivery_receipt") {
+						context.ui.notify(
+							`[a2a delivered] seq=${message.serverSequence} msg=${message.receiptFor} to=${message.from} at=${new Date(message.deliveredAt).toISOString()}`,
+							"info",
+						);
+						return;
+					}
+					injectEnvelope(message, context.isIdle() ? "followUp" : "steer");
+				})
 				.catch((error) => {
 					pi.logger?.warn?.(`a2a inbox poll failed: ${error instanceof Error ? error.message : String(error)}`);
 				})
@@ -254,13 +278,26 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		name: "a2a",
 		label: "A2A Mesh",
 		description:
-			"Custom multi-project mesh client for a standalone Hub. Create/list projects; join/leave; list members; send and receive messages.",
+			"Custom multi-project mesh client for a standalone Hub. Create/list/delete projects; join/leave; list members; send and receive messages. Deleting a project requires every member to be offline.",
 		parameters: z.object({
-			op: z.enum(["project_create", "project_list", "join", "leave", "list", "status", "send", "inbox", "hub"]),
+			op: z.enum([
+				"project_create",
+				"project_delete",
+				"project_list",
+				"join",
+				"leave",
+				"list",
+				"status",
+				"send",
+				"inbox",
+				"hub",
+			]),
 			project: z.string().optional(),
 			agentId: z.string().optional(),
 			to: z.string().optional(),
 			text: z.string().optional(),
+			messageId: z.string().optional(),
+			replyTo: z.string().optional(),
 			displayName: z.string().optional(),
 			description: z.string().optional(),
 			caps: z.array(z.string()).optional(),
@@ -277,7 +314,9 @@ export default function a2aExtension(pi: ExtensionAPI) {
 						agentId: params.agentId,
 						to: params.to,
 						text: params.text,
+						messageId: params.messageId,
 						displayName: params.displayName,
+						replyTo: params.replyTo,
 						description: params.description,
 						caps: params.caps,
 						all: params.all,
