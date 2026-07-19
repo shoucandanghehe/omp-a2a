@@ -1,0 +1,32 @@
+services:
+  hub:
+    build: .
+    image: omp-a2a-hub:local
+    restart: unless-stopped
+    ports:
+      - "${OMP_A2A_HUB_PORT:-4173}:4173"
+    environment:
+      OMP_A2A_HUB_PORT: "4173"
+      # Listen on all interfaces inside the container
+      OMP_A2A_HUB_HOST: "0.0.0.0"
+      # URL that host-side omp clients use (published port on the host)
+      OMP_A2A_HUB_PUBLIC_URL: "${OMP_A2A_HUB_PUBLIC_URL:-http://127.0.0.1:4173}"
+      OMP_A2A_HUB_DATA_DIR: /data/omp-a2a
+    volumes:
+      # This Compose project owns one fully independent Hub data directory.
+      - a2a-data:/data/omp-a2a
+    healthcheck:
+      test:
+        [
+          "CMD",
+          "bun",
+          "-e",
+          "fetch('http://127.0.0.1:4173/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))",
+        ]
+      interval: 10s
+      timeout: 3s
+      retries: 6
+      start_period: 5s
+
+volumes:
+  a2a-data:
