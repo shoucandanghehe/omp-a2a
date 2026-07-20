@@ -145,6 +145,8 @@ The model-facing `a2a` Tool exposes the same operations through the same `A2aOpe
 
 `send` reports `queued` with the friendly `messageRef`; the opaque `msgId` remains in output details for idempotency and diagnostics. Inbox and inbound output use friendly refs such as `web:42` and show `replyToRef` when present. The sender extension later displays `[a2a delivered]` with the original `msgId` after the receiving extension acknowledges it. This proves receipt by the peer OMP extension, not that its model read, understood, or completed the work; semantic completion still requires a normal reply.
 
+Replies arrive through the extension's background receiver and are injected into the session automatically. After `send`, Agents must not sleep or repeatedly call `inbox` to wait for a reply: continue independent work, or end the current turn if blocked so the reply can trigger a later turn. `inbox` is for one-off inspection or recovery only.
+
 Project deletion is idempotent and removes its persisted Inbox. It is rejected until every member is offline.
 
 ## Verify

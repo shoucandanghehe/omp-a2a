@@ -2,7 +2,7 @@ import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
 import { loadLocalConfig } from "./config";
 import { HubClient, resolveHubUrl } from "./hub/client";
 import type { HubEnvelope, HubMessageEnvelope } from "./hub/types";
-import { A2aOperations, type A2aOperationRequest } from "./operations";
+import { A2aOperations, ASYNC_REPLY_GUIDANCE, type A2aOperationRequest } from "./operations";
 import { AGENT_ID_RE, HEARTBEAT_MS, PROJECT_NAME_RE } from "./types";
 
 type TimerContext = {
@@ -278,8 +278,7 @@ export default function a2aExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "a2a",
 		label: "A2A Mesh",
-		description:
-			"Custom multi-project mesh client for a standalone Hub. Send messages with agent-friendly refs such as api:42; use replyToRef for causal replies. Create/list/delete projects; join/leave; list members; receive messages.",
+		description: `Custom multi-project mesh client for a standalone Hub. Send messages with agent-friendly refs such as api:42; use replyToRef for causal replies. Create/list/delete projects; join/leave; list members; receive messages. ${ASYNC_REPLY_GUIDANCE}`,
 		parameters: z.object({
 			op: z.enum([
 				"project_create",
