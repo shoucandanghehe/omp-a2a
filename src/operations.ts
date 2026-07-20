@@ -1,6 +1,11 @@
 import type { HubClient } from "./hub/client";
 import type { HubEnvelope, HubMeta } from "./hub/types";
 import type { A2aMember } from "./types";
+export const ASYNC_REPLY_GUIDANCE =
+	"Inbound messages and replies are injected automatically. " +
+	"Never wait, sleep, or poll inbox for a reply after send. " +
+	"Continue independent work; if blocked, end the current turn—the reply will trigger a future turn. " +
+	"Use inbox only for one-off inspection or recovery.";
 
 export type A2aMembership = { project: string; agentId: string };
 
@@ -178,7 +183,7 @@ export class A2aOperations {
 					replyToRef: request.replyToRef,
 				});
 				return {
-					text: `Queued for ${message.to} ref=${message.messageRef ?? "-"} msg=${message.msgId}${message.replyToRef ? ` replyTo=${message.replyToRef}` : message.replyTo ? ` replyTo=${message.replyTo}` : ""}`,
+					text: `Queued for ${message.to} ref=${message.messageRef ?? "-"} msg=${message.msgId}${message.replyToRef ? ` replyTo=${message.replyToRef}` : message.replyTo ? ` replyTo=${message.replyTo}` : ""}\n${ASYNC_REPLY_GUIDANCE}`,
 					details: { message },
 				};
 			}

@@ -107,6 +107,7 @@ test("send uses the joined membership as the claimed sender", async () => {
 
 	expect(result.text).toContain("Queued for worker");
 	expect(result.text).toContain("ref=worker:1");
+	expect(result.text).toContain("Never wait, sleep, or poll inbox for a reply after send");
 	expect((await client.inbox("send", "worker"))[0]?.text).toBe("hello");
 	const correction = await operations.execute(
 		{ action: "send", to: "worker", text: "corrected", replyToRef: "worker:1" },
