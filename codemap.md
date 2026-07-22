@@ -39,15 +39,15 @@ OMP session
 
 ### Control plane
 
-Project CRUD, registration, heartbeat presence, member listing, and unregister operations pass from `A2aOperations` through `HubClient` to Hub routes backed by `src/registry.ts`. Presence is lease-based: clients heartbeat every 5 seconds; records become stale after 15 seconds and offline after 60 seconds. A Hub data-directory lock prevents two server processes from owning the same persistent state.
+Project CRUD, registration, heartbeat presence, member listing, and unregister operations pass from `A2aOperations` through `HubClient` to Hub routes backed by `src/registry.ts`. Registration issues an opaque lease token; heartbeat and unregister require it, and stale/offline takeover rotates it. Presence remains time-based: clients heartbeat every 5 seconds; records become stale after 15 seconds and offline after 60 seconds. A Hub data-directory lock prevents two server processes from owning the same persistent state.
 
 ### Message plane
 
 1. `HubClient.send` encodes text and posts a message with an opaque idempotency key.
 2. The Hub validates the recipient, causal parent, payload, and message ID.
 3. `InboxStore` transactionally allocates a sequence scoped to `(project, recipient)`, records the durable ledger entry, and enqueues the envelope.
-4. The receiving extension polls without consuming, injects the envelope as an OMP `steer` or `followUp`, then acknowledges it.
-5. The acknowledgment transaction removes the pending row, advances the cursor, records acknowledgment state, and enqueues one delivery receipt for the original sender.
+4. The receiving extension polls with its current membership lease without consuming, injects the envelope as an OMP `steer` or `followUp`, then acknowledges it with the same lease.
+5. The acknowledgment transaction removes the pending row, advances the cursor, records acknowledgment state, and enqueues one delivery receipt for the original sender. A trust-on-claim sender must register before consuming that receipt stream.
 
 This is at-least-once delivery around the injection/acknowledgment boundary. Consumers must deduplicate by `messageId` because a crash after injection and before acknowledgment causes redelivery.
 
@@ -72,8 +72,6 @@ The Hub runs locally with `bun run hub` or through `docker compose`. `Dockerfile
 
 ## Known Operational Constraints
 
-- Membership leases are not fenced to the registering `sessionId`; heartbeat and unregister address a member only by `project` and `agentId`. A superseded process can therefore mutate a replacement lease if it resumes.
-- `A2aOperations` retains membership as `{ project, agentId }` without the Hub identity. Changing the selected Hub while joined does not automatically leave the old Hub or register with the new one.
 - Project deletion spans two persistence owners: the filesystem Registry is deleted before `InboxStore.deleteProject` purges SQLite. A crash between those operations can leave orphaned Inbox and ledger state.
 - Only the initial Hub probe has a request timeout. Ordinary client calls have no default deadline, and heartbeat calls are not single-flight.
 - Malformed global JSON Hub configuration is silently ignored before falling back. The Slash parser also consumes flag-like message tokens because it treats every `--` token as an option.
@@ -104,10 +102,10 @@ Operational guidance and user-visible workarounds are documented in [`README.md`
 
 ## Verification
 
-`bun run smoke` runs the Bun test suite followed by both executable smoke scenarios. The suite covers Hub/data-directory isolation, heartbeat membership, online identity conflicts, durable inbox restart, gzip boundaries, schema migration, stream ordering, idempotent message IDs, causal references, explicit acknowledgments, cursor durability, at-least-once redelivery, delivery receipts, project deletion, and the shared operations layer.
+`bun run smoke` runs the Bun test suite followed by both executable smoke scenarios. The suite covers Hub/data-directory isolation, lease ownership and stale-owner fencing, Hub-bound membership, active-poll cancellation, failed-join timer recovery, online identity conflicts, durable Inbox restart, gzip boundaries, schema migration, stream ordering, idempotent message IDs, causal references, explicit acknowledgments, cursor durability, at-least-once redelivery, delivery receipts, project deletion, and the shared operations layer.
 
-This command does not perform a standalone TypeScript type check, linting, or a real Docker image/network smoke. Automated coverage is concentrated in Hub persistence and ordering; extension lifecycle races, stale-owner replacement, Hub target changes, malformed configuration, stalled HTTP, and crash-between-store deletion are not covered end to end.
+This command does not perform a standalone TypeScript type check, linting, or a real Docker image/network smoke. Automated coverage remains concentrated in Hub persistence and ordering; malformed configuration, default request deadlines, response byte budgets, and crash-between-store deletion are not covered end to end.
 
 ## Operational Boundary
 
-The Hub has no authentication or authorization. Caller-provided project and sender identities are trusted claims, so deployment must remain on a fully trusted private network and must not expose the service to the public Internet or untrusted clients. The default Compose port mapping publishes on all host interfaces; use a loopback bind or an equivalent firewall boundary when remote access is unnecessary.
+The Hub does not authenticate project access or caller-provided sender claims. Opaque leases fence registered-member lifecycle and Inbox consumption, but they are not a substitute for network authentication or authorization. Deployment must remain on a fully trusted private network and must not expose the service to the public Internet or untrusted clients. The default Compose port mapping publishes on all host interfaces; use a loopback bind or an equivalent firewall boundary when remote access is unnecessary.

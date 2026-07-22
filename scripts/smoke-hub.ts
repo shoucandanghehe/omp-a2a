@@ -23,8 +23,8 @@ async function main() {
 	assert((await otherClient.listProjects()).length === 0, "Hub registries are isolated");
 
 	console.log("\n== register and reject duplicate ==");
-	await client.register({ project: "mesh-demo", agentId: "api", cwd: "/code/api", pid: 999_999_998 });
-	await client.register({ project: "mesh-demo", agentId: "web", cwd: "/code/web", pid: 999_999_999 });
+	const api = await client.register({ project: "mesh-demo", agentId: "api", cwd: "/code/api", pid: 999_999_998 });
+	const web = await client.register({ project: "mesh-demo", agentId: "web", cwd: "/code/web", pid: 999_999_999 });
 	let duplicateRejected = false;
 	try {
 		await client.register({ project: "mesh-demo", agentId: "api", cwd: "/replacement", pid: 1 });
@@ -36,22 +36,35 @@ async function main() {
 
 	console.log("\n== trust-on-claim send and durable delivery receipt ==");
 	const message = await client.send({ project: "mesh-demo", from: "controller", to: "web", text: "hello" });
-	assert((await client.inbox("mesh-demo", "web"))[0]?.text === "hello", "unregistered sender claim accepted");
-	await client.ack("mesh-demo", "web", [message.msgId]);
-	assert((await client.inbox("mesh-demo", "web")).length === 0, "ack removes message");
-	const receipt = (await client.inbox("mesh-demo", "controller"))[0];
+	assert((await client.inbox("mesh-demo", "web", 500, web.leaseId))[0]?.text === "hello", "unregistered sender claim accepted");
+	await client.ack("mesh-demo", "web", [message.msgId], web.leaseId);
+	assert((await client.inbox("mesh-demo", "web", 500, web.leaseId)).length === 0, "ack removes message");
+	let anonymousReceiptRejected = false;
+	try {
+		await client.inbox("mesh-demo", "controller");
+	} catch {
+		anonymousReceiptRejected = true;
+	}
+	assert(anonymousReceiptRejected, "unregistered sender cannot consume Inbox");
+	const controller = await client.register({
+		project: "mesh-demo",
+		agentId: "controller",
+		cwd: "/code/controller",
+		pid: 999_999_997,
+	});
+	const receipt = (await client.inbox("mesh-demo", "controller", 500, controller.leaseId))[0];
 	assert(
 		receipt?.kind === "delivery_receipt" && receipt.receiptFor === message.msgId,
 		"ack creates delivery receipt",
 	);
-	await client.ack("mesh-demo", "controller", [receipt.msgId]);
-	assert((await client.inbox("mesh-demo", "web")).length === 0, "receipt ack does not loop");
+	await client.ack("mesh-demo", "controller", [receipt.msgId], controller.leaseId);
+	assert((await client.inbox("mesh-demo", "web", 500, web.leaseId)).length === 0, "receipt ack does not loop");
 
 	console.log("\n== gzip large payload ==");
 	const largeText = "compressible diff line\n".repeat(2_000);
 	const large = await client.send({ project: "mesh-demo", from: "controller", to: "web", text: largeText });
-	assert((await client.inbox("mesh-demo", "web"))[0]?.text === largeText, "large payload round trip");
-	await client.ack("mesh-demo", "web", [large.msgId]);
+	assert((await client.inbox("mesh-demo", "web", 500, web.leaseId))[0]?.text === largeText, "large payload round trip");
+	await client.ack("mesh-demo", "web", [large.msgId], web.leaseId);
 
 	console.log("\n== persistent Inbox across restart ==");
 	const durable = await client.send({ project: "mesh-demo", from: "controller", to: "web", text: "survive restart" });
@@ -59,8 +72,11 @@ async function main() {
 	const restarted = await startHubServer({ dataDir: firstDataDir, port: 0 });
 	handles.push(restarted);
 	const restartedClient = new HubClient(restarted.meta.baseUrl);
-	assert((await restartedClient.inbox("mesh-demo", "web"))[0]?.msgId === durable.msgId, "message survives restart");
-	await restartedClient.ack("mesh-demo", "web", [durable.msgId]);
+	assert(
+		(await restartedClient.inbox("mesh-demo", "web", 500, web.leaseId))[0]?.msgId === durable.msgId,
+		"message survives restart",
+	);
+	await restartedClient.ack("mesh-demo", "web", [durable.msgId], web.leaseId);
 
 	console.log("\n== fail closed unknown recipient ==");
 	let unknownRejected = false;
@@ -79,8 +95,9 @@ async function main() {
 		activeDeleteRejected = true;
 	}
 	assert(activeDeleteRejected, "project with online members cannot be deleted");
-	await restartedClient.unregister("mesh-demo", "api");
-	await restartedClient.unregister("mesh-demo", "web");
+	await restartedClient.unregister("mesh-demo", "api", api.leaseId);
+	await restartedClient.unregister("mesh-demo", "web", web.leaseId);
+	await restartedClient.unregister("mesh-demo", "controller", controller.leaseId);
 	assert(await restartedClient.deleteProject("mesh-demo"), "inactive project deleted");
 	assert((await restartedClient.listProjects()).length === 0, "deleted project absent");
 	assert(!(await restartedClient.deleteProject("mesh-demo")), "project deletion is idempotent");

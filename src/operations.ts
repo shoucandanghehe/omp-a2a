@@ -7,7 +7,7 @@ export const ASYNC_REPLY_GUIDANCE =
 	"Continue independent work; if blocked, end the current turn—the reply will trigger a future turn. " +
 	"Use inbox only for one-off inspection or recovery.";
 
-export type A2aMembership = { project: string; agentId: string };
+export type A2aMembership = { project: string; agentId: string; hubBaseUrl: string };
 
 export type A2aOperationRequest = {
 	action:
@@ -51,6 +51,19 @@ type A2aOperationsOptions = {
 	pid?: number;
 };
 
+type BoundMembership = A2aMembership & {
+	client: HubClient;
+	leaseId: string;
+};
+
+function publicMembership(membership: BoundMembership): A2aMembership {
+	return {
+		project: membership.project,
+		agentId: membership.agentId,
+		hubBaseUrl: membership.hubBaseUrl,
+	};
+}
+
 function formatMembers(members: A2aMember[]): string {
 	if (members.length === 0) return "(no members)";
 	return members
@@ -64,7 +77,7 @@ function formatMembers(members: A2aMember[]): string {
 export class A2aOperations {
 	#getClient: () => Promise<HubClient>;
 	#pid: number;
-	#membership: A2aMembership | null = null;
+	#membership: BoundMembership | null = null;
 
 	constructor(options: A2aOperationsOptions) {
 		this.#getClient = options.getClient;
@@ -72,17 +85,18 @@ export class A2aOperations {
 	}
 
 	get membership(): A2aMembership | null {
-		return this.#membership ? { ...this.#membership } : null;
+		return this.#membership ? publicMembership(this.#membership) : null;
 	}
 
 	async execute(request: A2aOperationRequest, context: A2aOperationContext): Promise<A2aOperationResult> {
 		if (request.action === "leave") {
 			if (!this.#membership) return { text: "Not joined", details: { left: null } };
-			const left = this.#membership;
+			const membership = this.#membership;
+			const left = publicMembership(membership);
 			this.#membership = null;
 			let cleanupPending = false;
 			try {
-				await (await this.#getClient()).unregister(left.project, left.agentId);
+				await membership.client.unregister(membership.project, membership.agentId, membership.leaseId);
 			} catch {
 				cleanupPending = true;
 			}
@@ -95,10 +109,11 @@ export class A2aOperations {
 				cleanupPending,
 			};
 		}
-		const client = await this.#getClient();
+
 		switch (request.action) {
 			case "project_create": {
 				if (!request.project) throw new Error("project is required");
+				const client = await this.#getClient();
 				const project = await client.createProject({
 					name: request.project,
 					displayName: request.displayName,
@@ -112,6 +127,7 @@ export class A2aOperations {
 			}
 			case "project_delete": {
 				if (!request.project) throw new Error("project is required");
+				const client = await this.#getClient();
 				const deleted = await client.deleteProject(request.project);
 				return {
 					text: deleted
@@ -121,6 +137,7 @@ export class A2aOperations {
 				};
 			}
 			case "project_list": {
+				const client = await this.#getClient();
 				const projects = await client.listProjects();
 				const rows = await Promise.all(
 					projects.map(async (project) => ({
@@ -139,18 +156,20 @@ export class A2aOperations {
 			case "join": {
 				if (!request.project) throw new Error("project is required");
 				if (!request.agentId) throw new Error("agentId is required");
-				if (
-					this.#membership?.project === request.project &&
-					this.#membership.agentId === request.agentId
-				) {
-					await client.heartbeat(request.project, request.agentId);
+				const client = await this.#getClient();
+				const previous = this.#membership;
+				const sameMembership =
+					previous &&
+					previous.project === request.project &&
+					previous.agentId === request.agentId &&
+					previous.hubBaseUrl === client.baseUrl;
+
+				let members: A2aMember[];
+				if (sameMembership) {
+					await previous.client.heartbeat(previous.project, previous.agentId, previous.leaseId);
+					members = await previous.client.listMembers(previous.project);
 				} else {
-					if (this.#membership) {
-						const previous = this.#membership;
-						this.#membership = null;
-						await client.unregister(previous.project, previous.agentId).catch(() => undefined);
-					}
-					const { member } = await client.register({
+					const { member, leaseId } = await client.register({
 						project: request.project,
 						agentId: request.agentId,
 						cwd: context.cwd,
@@ -159,23 +178,43 @@ export class A2aOperations {
 						displayName: request.displayName,
 						sessionId: context.sessionId,
 					});
-					this.#membership = { project: member.project, agentId: member.agentId };
+					try {
+						members = await client.listMembers(request.project);
+					} catch (error) {
+						await client.unregister(member.project, member.agentId, leaseId).catch(() => undefined);
+						throw error;
+					}
+					this.#membership = {
+						project: member.project,
+						agentId: member.agentId,
+						hubBaseUrl: client.baseUrl,
+						client,
+						leaseId,
+					};
+					if (previous) {
+						await previous.client
+							.unregister(previous.project, previous.agentId, previous.leaseId)
+							.catch(() => undefined);
+					}
 				}
-				const members = await client.listMembers(request.project);
+
+				const membership = this.#membership;
+				if (!membership) throw new Error("membership was not established");
 				return {
 					text: `Joined ${request.project} as ${request.agentId}\n${formatMembers(members)}`,
-					details: { member: this.#membership, members },
+					details: { member: publicMembership(membership), members },
 					membershipChanged: "joined",
 				};
 			}
 			case "send": {
-				if (!this.#membership) throw new Error("not joined");
+				const membership = this.#membership;
+				if (!membership) throw new Error("not joined");
 				if (!request.to) throw new Error("to is required");
 				if (!request.text?.trim()) throw new Error("text is required");
-				if (request.to === this.#membership.agentId) throw new Error("cannot send to yourself");
-				const message = await client.send({
-					project: this.#membership.project,
-					from: this.#membership.agentId,
+				if (request.to === membership.agentId) throw new Error("cannot send to yourself");
+				const message = await membership.client.send({
+					project: membership.project,
+					from: membership.agentId,
 					to: request.to,
 					text: request.text,
 					messageId: request.messageId,
@@ -188,35 +227,40 @@ export class A2aOperations {
 				};
 			}
 			case "hub": {
-				const meta = await client.meta();
+				const meta = await (await this.#getClient()).meta();
 				return {
 					text: `Hub running\nbase: ${meta.baseUrl}\ndata: ${meta.dataDir}\npid: ${meta.pid}`,
 					details: { hub: meta },
 				};
 			}
 			case "status": {
+				const membership = this.#membership;
+				const client = membership?.client ?? (await this.#getClient());
 				const meta = await client.meta();
-				if (!this.#membership) {
+				if (!membership) {
 					return {
 						text: `A2A: not joined\nHub: ${meta.baseUrl} (pid ${meta.pid})`,
 						details: { membership: null, hub: meta },
 					};
 				}
-				const members = await client.listMembers(this.#membership.project);
+				const members = await client.listMembers(membership.project);
 				return {
 					text: [
-						`A2A project: ${this.#membership.project}`,
-						`You: ${this.#membership.agentId} @ ${context.cwd}`,
+						`A2A project: ${membership.project}`,
+						`You: ${membership.agentId} @ ${context.cwd}`,
 						`Hub: ${meta.baseUrl} (pid ${meta.pid})`,
 						`Online members (${members.length}):`,
 						formatMembers(members),
 					].join("\n"),
-					details: { membership: this.#membership, members, hub: meta },
+					details: { membership: publicMembership(membership), members, hub: meta },
 				};
 			}
 			case "list": {
-				const project = request.project ?? this.#membership?.project;
+				const membership = this.#membership;
+				const project = request.project ?? membership?.project;
 				if (!project) throw new Error("project is required (or join first)");
+				const client =
+					membership && project === membership.project ? membership.client : await this.#getClient();
 				const members = await client.listMembers(project, request.all);
 				return {
 					text: `Project ${project}:\n${formatMembers(members)}`,
@@ -224,10 +268,13 @@ export class A2aOperations {
 				};
 			}
 			case "inbox": {
-				if (!this.#membership) throw new Error("not joined");
-				const { messages, cursor } = await client.readInbox(
-					this.#membership.project,
-					this.#membership.agentId,
+				const membership = this.#membership;
+				if (!membership) throw new Error("not joined");
+				const { messages, cursor } = await membership.client.readInbox(
+					membership.project,
+					membership.agentId,
+					500,
+					membership.leaseId,
 				);
 				const entries =
 					messages.length === 0
@@ -242,10 +289,11 @@ export class A2aOperations {
 				const acknowledgment =
 					messages.length === 0
 						? null
-						: await client.ack(
-								this.#membership.project,
-								this.#membership.agentId,
+						: await membership.client.ack(
+								membership.project,
+								membership.agentId,
 								messages.map((message) => message.msgId),
+								membership.leaseId,
 							);
 				const cursorStatus =
 					acknowledgment?.cursor ?? (messages.length === 0 ? cursor : "unknown (legacy Hub)");
@@ -264,20 +312,42 @@ export class A2aOperations {
 	}
 
 	async heartbeat(): Promise<A2aMember | null> {
-		if (!this.#membership) return null;
-		const client = await this.#getClient();
-		return await client.heartbeat(this.#membership.project, this.#membership.agentId);
+		const membership = this.#membership;
+		if (!membership) return null;
+		return await membership.client.heartbeat(
+			membership.project,
+			membership.agentId,
+			membership.leaseId,
+		);
 	}
 
-	async receive(deliver: (message: HubEnvelope) => void | Promise<void>): Promise<number> {
-		if (!this.#membership) return 0;
+	async receive(
+		deliver: (message: HubEnvelope) => void | Promise<void>,
+		signal?: AbortSignal,
+	): Promise<number> {
 		const membership = this.#membership;
-		const client = await this.#getClient();
-		const { messages } = await client.readInbox(membership.project, membership.agentId);
+		if (!membership) return 0;
+		if (signal?.aborted) throw signal.reason ?? new Error("Inbox receive aborted");
+		const { messages } = await membership.client.readInbox(
+			membership.project,
+			membership.agentId,
+			500,
+			membership.leaseId,
+			signal,
+		);
+		if (signal?.aborted) throw signal.reason ?? new Error("Inbox receive aborted");
 		let delivered = 0;
 		for (const message of messages) {
+			if (signal?.aborted) throw signal.reason ?? new Error("Inbox receive aborted");
 			await deliver(message);
-			await client.ack(membership.project, membership.agentId, [message.msgId]);
+			if (signal?.aborted) throw signal.reason ?? new Error("Inbox receive aborted");
+			await membership.client.ack(
+				membership.project,
+				membership.agentId,
+				[message.msgId],
+				membership.leaseId,
+				signal,
+			);
 			delivered++;
 		}
 		return delivered;

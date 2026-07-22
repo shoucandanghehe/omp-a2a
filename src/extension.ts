@@ -140,7 +140,8 @@ export default function a2aExtension(pi: ExtensionAPI) {
 	let heartbeatTimer: unknown = null;
 	let inboxTimer: unknown = null;
 	let clearTimer: ((handle: unknown) => void) | null = null;
-	let polling = false;
+	let activePoll: Promise<void> | null = null;
+	let backgroundAbort: AbortController | null = null;
 
 	const refreshHubUrl = (cwd: string) => {
 		configuredHubUrl = loadLocalConfig(cwd)?.hubUrl;
@@ -156,12 +157,16 @@ export default function a2aExtension(pi: ExtensionAPI) {
 
 	const operations = new A2aOperations({ getClient: ensureClient });
 
-	const stopBackground = () => {
+	const stopBackground = async () => {
 		if (clearTimer && heartbeatTimer != null) clearTimer(heartbeatTimer);
 		if (clearTimer && inboxTimer != null) clearTimer(inboxTimer);
 		heartbeatTimer = null;
 		inboxTimer = null;
-		polling = false;
+		backgroundAbort?.abort(new Error("A2A background work stopped"));
+		const poll = activePoll;
+		if (poll) await poll.catch(() => undefined);
+		if (activePoll === poll) activePoll = null;
+		backgroundAbort = null;
 	};
 
 	const injectEnvelope = (message: HubMessageEnvelope, deliverAs: "steer" | "followUp") => {
@@ -177,18 +182,18 @@ export default function a2aExtension(pi: ExtensionAPI) {
 	};
 
 	const startBackground = (context: TimerContext) => {
-		stopBackground();
 		clearTimer = (handle) => context.clearTimer(handle);
 		if (!operations.membership) return;
+		const controller = new AbortController();
+		backgroundAbort = controller;
 		heartbeatTimer = context.setInterval(() => {
 			void operations.heartbeat().catch((error) => {
 				pi.logger?.warn?.(`a2a heartbeat failed: ${error instanceof Error ? error.message : String(error)}`);
 			});
 		}, HEARTBEAT_MS);
 		inboxTimer = context.setInterval(() => {
-			if (polling) return;
-			polling = true;
-			void operations
+			if (activePoll) return;
+			const poll = operations
 				.receive((message: HubEnvelope) => {
 					if (message.kind === "delivery_receipt") {
 						context.ui.notify(
@@ -198,21 +203,28 @@ export default function a2aExtension(pi: ExtensionAPI) {
 						return;
 					}
 					injectEnvelope(message, context.isIdle() ? "followUp" : "steer");
-				})
+				}, controller.signal)
+				.then(() => undefined)
 				.catch((error) => {
-					pi.logger?.warn?.(`a2a inbox poll failed: ${error instanceof Error ? error.message : String(error)}`);
+					if (!controller.signal.aborted) {
+						pi.logger?.warn?.(`a2a inbox poll failed: ${error instanceof Error ? error.message : String(error)}`);
+					}
 				})
 				.finally(() => {
-					polling = false;
+					if (activePoll === poll) activePoll = null;
 				});
+			activePoll = poll;
 		}, 1_000);
 	};
 
 	const run = async (request: A2aOperationRequest, context: TimerContext & { cwd: string; sessionId?: string }) => {
-		if (request.action === "join" || request.action === "leave") stopBackground();
-		const result = await operations.execute(request, { cwd: context.cwd, sessionId: context.sessionId });
-		if (result.membershipChanged === "joined") startBackground(context);
-		return result;
+		const changesMembership = request.action === "join" || request.action === "leave";
+		if (changesMembership) await stopBackground();
+		try {
+			return await operations.execute(request, { cwd: context.cwd, sessionId: context.sessionId });
+		} finally {
+			if (changesMembership && operations.membership) startBackground(context);
+		}
 	};
 
 	pi.on("session_start", async (_event, context) => {
@@ -246,7 +258,7 @@ export default function a2aExtension(pi: ExtensionAPI) {
 	});
 
 	pi.on("session_shutdown", async () => {
-		stopBackground();
+		await stopBackground();
 		try {
 			await operations.execute({ action: "leave" }, { cwd: sessionCwd });
 		} catch (error) {

@@ -21,16 +21,18 @@ test("Inbox messages survive Hub restart and remain until acknowledged", async (
 	hubs.push(first);
 	const sender = new HubClient(first.meta.baseUrl);
 	await sender.createProject({ name: "durable" });
-	await sender.register({ project: "durable", agentId: "worker", cwd: "/worker", pid: 1 });
+	const registration = await sender.register({ project: "durable", agentId: "worker", cwd: "/worker", pid: 1 });
 	const sent = await sender.send({ project: "durable", from: "controller", to: "worker", text: "persist me" });
 	await first.stop();
 
 	const second = await startHubServer({ port: 0, dataDir });
 	hubs.push(second);
 	const receiver = new HubClient(second.meta.baseUrl);
-	expect((await receiver.inbox("durable", "worker")).map((message) => message.msgId)).toEqual([sent.msgId]);
-	await receiver.ack("durable", "worker", [sent.msgId]);
-	expect(await receiver.inbox("durable", "worker")).toEqual([]);
+	expect((await receiver.inbox("durable", "worker", 500, registration.leaseId)).map((message) => message.msgId)).toEqual([
+		sent.msgId,
+	]);
+	await receiver.ack("durable", "worker", [sent.msgId], registration.leaseId);
+	expect(await receiver.inbox("durable", "worker", 500, registration.leaseId)).toEqual([]);
 });
 
 test("Inbox has no message-count cap", async () => {
@@ -40,7 +42,7 @@ test("Inbox has no message-count cap", async () => {
 	hubs.push(hub);
 	const client = new HubClient(hub.meta.baseUrl);
 	await client.createProject({ name: "uncapped" });
-	await client.register({ project: "uncapped", agentId: "worker", cwd: "/worker", pid: 1 });
+	const registration = await client.register({ project: "uncapped", agentId: "worker", cwd: "/worker", pid: 1 });
 
 	await Promise.all(
 		Array.from({ length: 201 }, (_, index) =>
@@ -48,7 +50,7 @@ test("Inbox has no message-count cap", async () => {
 		),
 	);
 
-	expect(await client.inbox("uncapped", "worker")).toHaveLength(201);
+	expect(await client.inbox("uncapped", "worker", 500, registration.leaseId)).toHaveLength(201);
 });
 
 test("large text is gzip-compressed on the custom Mesh wire and decoded by HubClient", async () => {
@@ -58,17 +60,19 @@ test("large text is gzip-compressed on the custom Mesh wire and decoded by HubCl
 	hubs.push(hub);
 	const client = new HubClient(hub.meta.baseUrl);
 	await client.createProject({ name: "compressed" });
-	await client.register({ project: "compressed", agentId: "worker", cwd: "/worker", pid: 1 });
+	const registration = await client.register({ project: "compressed", agentId: "worker", cwd: "/worker", pid: 1 });
 	const text = "compressible payload ".repeat(2_000);
 	await client.send({ project: "compressed", from: "controller", to: "worker", text });
 
-	const response = await fetch(`${hub.meta.baseUrl}/v1/inbox?project=compressed&agentId=worker`);
+	const response = await fetch(`${hub.meta.baseUrl}/v1/inbox?project=compressed&agentId=worker`, {
+		headers: { "x-a2a-lease": registration.leaseId },
+	});
 	const wire = (await response.json()) as {
 		messages: Array<{ payload?: { encoding?: string; data?: string } }>;
 	};
 	expect(wire.messages[0]?.payload?.encoding).toBe("gzip+base64");
 	expect(wire.messages[0]?.payload?.data?.length ?? Infinity).toBeLessThan(Buffer.byteLength(text));
-	expect((await client.inbox("compressed", "worker"))[0]?.text).toBe(text);
+	expect((await client.inbox("compressed", "worker", 500, registration.leaseId))[0]?.text).toBe(text);
 });
 
 test("small text stays uncompressed and decoded text is capped at 4 MiB", async () => {
@@ -78,10 +82,12 @@ test("small text stays uncompressed and decoded text is capped at 4 MiB", async 
 	hubs.push(hub);
 	const client = new HubClient(hub.meta.baseUrl);
 	await client.createProject({ name: "payload-limits" });
-	await client.register({ project: "payload-limits", agentId: "worker", cwd: "/worker", pid: 1 });
+	const registration = await client.register({ project: "payload-limits", agentId: "worker", cwd: "/worker", pid: 1 });
 	await client.send({ project: "payload-limits", from: "controller", to: "worker", text: "small" });
 
-	const response = await fetch(`${hub.meta.baseUrl}/v1/inbox?project=payload-limits&agentId=worker`);
+	const response = await fetch(`${hub.meta.baseUrl}/v1/inbox?project=payload-limits&agentId=worker`, {
+		headers: { "x-a2a-lease": registration.leaseId },
+	});
 	const wire = (await response.json()) as {
 		messages: Array<{ payload?: { encoding?: string } }>;
 	};
@@ -103,17 +109,17 @@ test("ack creates a durable delivery receipt without receipt loops", async () =>
 	hubs.push(first);
 	const client = new HubClient(first.meta.baseUrl);
 	await client.createProject({ name: "receipts" });
-	await client.register({ project: "receipts", agentId: "controller", cwd: "/controller", pid: 1 });
-	await client.register({ project: "receipts", agentId: "worker", cwd: "/worker", pid: 2 });
+	const controller = await client.register({ project: "receipts", agentId: "controller", cwd: "/controller", pid: 1 });
+	const worker = await client.register({ project: "receipts", agentId: "worker", cwd: "/worker", pid: 2 });
 	const sent = await client.send({ project: "receipts", from: "controller", to: "worker", text: "work" });
-	expect((await client.inbox("receipts", "worker"))[0]?.kind).toBe("message");
-	await client.ack("receipts", "worker", [sent.msgId]);
+	expect((await client.inbox("receipts", "worker", 500, worker.leaseId))[0]?.kind).toBe("message");
+	await client.ack("receipts", "worker", [sent.msgId], worker.leaseId);
 	await first.stop();
 
 	const second = await startHubServer({ port: 0, dataDir });
 	hubs.push(second);
 	const restarted = new HubClient(second.meta.baseUrl);
-	const receipts = await restarted.inbox("receipts", "controller");
+	const receipts = await restarted.inbox("receipts", "controller", 500, controller.leaseId);
 	expect(receipts).toHaveLength(1);
 	expect(receipts[0]).toMatchObject({
 		kind: "delivery_receipt",
@@ -124,9 +130,40 @@ test("ack creates a durable delivery receipt without receipt loops", async () =>
 	});
 	expect(Number.isFinite(receipts[0]?.deliveredAt)).toBe(true);
 
-	await restarted.ack("receipts", "controller", [receipts[0]!.msgId]);
-	expect(await restarted.inbox("receipts", "controller")).toEqual([]);
-	expect(await restarted.inbox("receipts", "worker")).toEqual([]);
+	await restarted.ack("receipts", "controller", [receipts[0]!.msgId], controller.leaseId);
+	expect(await restarted.inbox("receipts", "controller", 500, controller.leaseId)).toEqual([]);
+	expect(await restarted.inbox("receipts", "worker", 500, worker.leaseId)).toEqual([]);
+});
+
+test("trust-on-claim send does not grant anonymous Inbox ownership", async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-inbox-"));
+	roots.push(dataDir);
+	const hub = await startHubServer({ port: 0, dataDir });
+	hubs.push(hub);
+	const client = new HubClient(hub.meta.baseUrl);
+	await client.createProject({ name: "claimed-sender" });
+	const worker = await client.register({ project: "claimed-sender", agentId: "worker", cwd: "/worker", pid: 1 });
+	const sent = await client.send({
+		project: "claimed-sender",
+		from: "controller",
+		to: "worker",
+		text: "work",
+	});
+	await client.ack("claimed-sender", "worker", [sent.msgId], worker.leaseId);
+
+	await expect(client.inbox("claimed-sender", "controller")).rejects.toThrow(
+		"not a member: controller@claimed-sender",
+	);
+
+	const controller = await client.register({
+		project: "claimed-sender",
+		agentId: "controller",
+		cwd: "/controller",
+		pid: 2,
+	});
+	expect(await client.inbox("claimed-sender", "controller", 500, controller.leaseId)).toEqual([
+		expect.objectContaining({ kind: "delivery_receipt", receiptFor: sent.msgId }),
+	]);
 });
 
 test("legacy Inbox schema migrates without losing queued messages", async () => {
@@ -157,23 +194,25 @@ test("legacy Inbox schema migrates without losing queued messages", async () => 
 	hubs.push(hub);
 	const client = new HubClient(hub.meta.baseUrl);
 	await client.createProject({ name: "legacy" });
-	await client.register({ project: "legacy", agentId: "worker", cwd: "/worker", pid: 1 });
+	const registration = await client.register({ project: "legacy", agentId: "worker", cwd: "/worker", pid: 1 });
+	const other = await client.register({ project: "legacy", agentId: "other", cwd: "/other", pid: 2 });
+	const controller = await client.register({ project: "legacy", agentId: "controller", cwd: "/controller", pid: 3 });
 
-	const workerMessages = await client.inbox("legacy", "worker");
+	const workerMessages = await client.inbox("legacy", "worker", 500, registration.leaseId);
 	expect(workerMessages.map((message) => [message.msgId, message.serverSequence])).toEqual([
 		["z-legacy-message", 1],
 		["a-legacy-message", 2],
 	]);
-	expect((await client.inbox("legacy", "other"))[0]).toMatchObject({
+	expect((await client.inbox("legacy", "other", 500, other.leaseId))[0]).toMatchObject({
 		msgId: "other-stream",
 		serverSequence: 1,
 	});
-	await client.ack("legacy", "worker", ["z-legacy-message"]);
-	expect((await client.inbox("legacy", "controller"))[0]).toMatchObject({
+	await client.ack("legacy", "worker", ["z-legacy-message"], registration.leaseId);
+	expect((await client.inbox("legacy", "controller", 500, controller.leaseId))[0]).toMatchObject({
 		kind: "delivery_receipt",
 		receiptFor: "z-legacy-message",
 	});
-	await client.unregister("legacy", "worker");
+	await client.unregister("legacy", "worker", registration.leaseId);
 	const retried = await client.send({
 		project: "legacy",
 		from: "controller",
@@ -240,7 +279,9 @@ test("global-sequence ledger migrates to project recipient sequence scopes", asy
 	const hub = await startHubServer({ port: 0, dataDir });
 	hubs.push(hub);
 	const client = new HubClient(hub.meta.baseUrl);
-	expect(await client.readInbox("old-project", "worker")).toMatchObject({
+	await client.createProject({ name: "old-project" });
+	const oldWorker = await client.register({ project: "old-project", agentId: "worker", cwd: "/worker", pid: 1 });
+	expect(await client.readInbox("old-project", "worker", 500, oldWorker.leaseId)).toMatchObject({
 		cursor: 0,
 		messages: [{ msgId: "old-message", serverSequence: 1 }],
 	});
@@ -263,13 +304,13 @@ test("deleting a project removes messages before its name can be reused", async 
 	hubs.push(hub);
 	const client = new HubClient(hub.meta.baseUrl);
 	await client.createProject({ name: "reused" });
-	await client.register({ project: "reused", agentId: "worker", cwd: "/worker", pid: 1 });
+	const registration = await client.register({ project: "reused", agentId: "worker", cwd: "/worker", pid: 1 });
 	await client.send({ project: "reused", from: "controller", to: "worker", text: "old work" });
-	await client.unregister("reused", "worker");
+	await client.unregister("reused", "worker", registration.leaseId);
 
 	expect(await client.deleteProject("reused")).toBe(true);
 	await client.createProject({ name: "reused" });
-	await client.register({ project: "reused", agentId: "worker", cwd: "/worker", pid: 2 });
+	const replacement = await client.register({ project: "reused", agentId: "worker", cwd: "/worker", pid: 2 });
 
-	expect(await client.inbox("reused", "worker")).toEqual([]);
+	expect(await client.inbox("reused", "worker", 500, replacement.leaseId)).toEqual([]);
 });

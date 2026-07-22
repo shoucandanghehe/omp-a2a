@@ -13,6 +13,12 @@ export interface A2aMember {
 	status: "online" | "offline" | "stale";
 }
 
+/** Public member data paired with the opaque token controlling that registration. */
+export interface MemberRegistration {
+	member: A2aMember;
+	leaseId: string;
+}
+
 /** Explicit collaboration domain spanning multiple project directories / omp processes. */
 export interface A2aProject {
 	name: string;

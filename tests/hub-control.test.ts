@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HubClient } from "../src/hub/client";
 import { startHubServer, type HubServerHandle } from "../src/hub/server";
-import { OFFLINE_MS } from "../src/types";
+import { OFFLINE_MS, STALE_MS } from "../src/types";
 
 const roots: string[] = [];
 const hubs: HubServerHandle[] = [];
@@ -38,7 +38,7 @@ describe("Hub project control plane", () => {
 		hubs.push(hub);
 		const client = new HubClient(hub.meta.baseUrl);
 		await client.createProject({ name: "presence" });
-		await client.register({
+		const registration = await client.register({
 			project: "presence",
 			agentId: "worker",
 			cwd: "/work",
@@ -46,7 +46,7 @@ describe("Hub project control plane", () => {
 		});
 
 		expect((await client.listMembers("presence")).map((member) => member.agentId)).toEqual(["worker"]);
-		expect((await client.heartbeat("presence", "worker")).status).toBe("online");
+		expect((await client.heartbeat("presence", "worker", registration.leaseId)).status).toBe("online");
 	});
 
 	test("heartbeat reconnects a lease-expired member but not one that explicitly left", async () => {
@@ -56,14 +56,14 @@ describe("Hub project control plane", () => {
 			hubs.push(hub);
 			const client = new HubClient(hub.meta.baseUrl);
 			await client.createProject({ name: "reconnect" });
-			await client.register({ project: "reconnect", agentId: "worker", cwd: "/work", pid: 1 });
+			const registration = await client.register({ project: "reconnect", agentId: "worker", cwd: "/work", pid: 1 });
 
 			now.mockReturnValue(1_000 + OFFLINE_MS + 1);
 			expect(await client.listMembers("reconnect")).toEqual([]);
-			expect((await client.heartbeat("reconnect", "worker")).status).toBe("online");
+			expect((await client.heartbeat("reconnect", "worker", registration.leaseId)).status).toBe("online");
 
-			await client.unregister("reconnect", "worker");
-			await expect(client.heartbeat("reconnect", "worker")).rejects.toThrow("member is offline");
+			await client.unregister("reconnect", "worker", registration.leaseId);
+			await expect(client.heartbeat("reconnect", "worker", registration.leaseId)).rejects.toThrow("member is offline");
 		} finally {
 			now.mockRestore();
 		}
@@ -106,13 +106,63 @@ describe("Hub project control plane", () => {
 		hubs.push(hub);
 		const client = new HubClient(hub.meta.baseUrl);
 		await client.createProject({ name: "active" });
-		await client.register({ project: "active", agentId: "worker", cwd: "/worker", pid: 1 });
+		const registration = await client.register({ project: "active", agentId: "worker", cwd: "/worker", pid: 1 });
 
 		await expect(client.deleteProject("active")).rejects.toThrow("active members: worker");
 		expect((await client.listProjects()).map((project) => project.name)).toEqual(["active"]);
 
-		await client.unregister("active", "worker");
+		await client.unregister("active", "worker", registration.leaseId);
 		expect(await client.deleteProject("active")).toBe(true);
+	});
+
+	test("stale takeover fences the prior owner and public members omit the lease", async () => {
+		const now = spyOn(Date, "now").mockReturnValue(1_000);
+		try {
+			const hub = await startHubServer({ port: 0, dataDir: dataDir() });
+			hubs.push(hub);
+			const prior = new HubClient(hub.meta.baseUrl);
+			const replacement = new HubClient(hub.meta.baseUrl);
+			await prior.createProject({ name: "takeover" });
+			const first = await prior.register({
+				project: "takeover",
+				agentId: "worker",
+				cwd: "/first",
+				pid: 1,
+			});
+			const sent = await prior.send({
+				project: "takeover",
+				from: "controller",
+				to: "worker",
+				text: "owned work",
+			});
+
+			expect(first.member).not.toHaveProperty("leaseId");
+			expect((await prior.listMembers("takeover", true))[0]).not.toHaveProperty("leaseId");
+			now.mockReturnValue(1_000 + STALE_MS + 1);
+			const second = await replacement.register({
+				project: "takeover",
+				agentId: "worker",
+				cwd: "/second",
+				pid: 2,
+			});
+			expect(second.leaseId).not.toBe(first.leaseId);
+
+			await expect(prior.heartbeat("takeover", "worker", first.leaseId)).rejects.toThrow("lease ownership mismatch");
+			await expect(prior.unregister("takeover", "worker", first.leaseId)).rejects.toThrow("lease ownership mismatch");
+			await expect(prior.readInbox("takeover", "worker", 500, first.leaseId)).rejects.toThrow(
+				"lease ownership mismatch",
+			);
+			await expect(prior.ack("takeover", "worker", [sent.msgId], first.leaseId)).rejects.toThrow(
+				"lease ownership mismatch",
+			);
+
+			expect((await replacement.readInbox("takeover", "worker", 500, second.leaseId)).messages).toHaveLength(1);
+			await replacement.ack("takeover", "worker", [sent.msgId], second.leaseId);
+			await replacement.unregister("takeover", "worker", second.leaseId);
+			await replacement.unregister("takeover", "worker", second.leaseId);
+		} finally {
+			now.mockRestore();
+		}
 	});
 
 });

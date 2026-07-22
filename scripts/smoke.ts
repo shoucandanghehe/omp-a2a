@@ -26,9 +26,15 @@ try {
 	assert(listProjects(dataDir).length === 2, "two projects");
 
 	console.log("\n== heartbeat-owned presence ==");
-	joinProject({ project: "billing-rewrite", agentId: "api", cwd: "/code/api", pid: 2_147_483_647, dataDir });
+	const api = joinProject({
+		project: "billing-rewrite",
+		agentId: "api",
+		cwd: "/code/api",
+		pid: 2_147_483_647,
+		dataDir,
+	});
 	joinProject({ project: "billing-rewrite", agentId: "web", cwd: "/code/web", pid: 2_147_483_646, dataDir });
-	heartbeat("billing-rewrite", "api", dataDir);
+	heartbeat("billing-rewrite", "api", api.leaseId, dataDir);
 	const online = listMembers({ project: "billing-rewrite", dataDir });
 	console.log(formatMembersTable(online));
 	assert(online.length === 2, "diagnostic PIDs do not control presence");
@@ -44,8 +50,8 @@ try {
 	assert(duplicateRejected, "online duplicate rejected");
 
 	console.log("\n== idempotent leave ==");
-	leaveProject("billing-rewrite", "api", dataDir);
-	leaveProject("billing-rewrite", "api", dataDir);
+	leaveProject("billing-rewrite", "api", api.leaseId, dataDir);
+	leaveProject("billing-rewrite", "api", api.leaseId, dataDir);
 	assert(
 		listMembers({ project: "billing-rewrite", dataDir }).every((member) => member.agentId !== "api"),
 		"left member is not online",

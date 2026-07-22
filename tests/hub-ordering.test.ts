@@ -67,7 +67,7 @@ test("messageId makes retries idempotent even after delivery", async () => {
 	hub = await startHubServer({ port: 0, dataDir });
 	const client = new HubClient(hub.meta.baseUrl);
 	await client.createProject({ name: "dedup" });
-	await client.register({ project: "dedup", agentId: "receiver", cwd: "/receiver", pid: 1 });
+	const registration = await client.register({ project: "dedup", agentId: "receiver", cwd: "/receiver", pid: 1 });
 	const input = {
 		project: "dedup",
 		from: "sender",
@@ -82,12 +82,12 @@ test("messageId makes retries idempotent even after delivery", async () => {
 	expect(await client.inbox("dedup", "receiver")).toHaveLength(1);
 
 	await client.ack("dedup", "receiver", [first.msgId]);
-	await client.unregister("dedup", "receiver");
+	await client.unregister("dedup", "receiver", registration.leaseId);
 	await hub.stop();
 	hub = await startHubServer({ port: 0, dataDir });
 	const restarted = new HubClient(hub.meta.baseUrl);
 	expect(await restarted.send(input)).toEqual(first);
-	expect(await restarted.inbox("dedup", "receiver")).toEqual([]);
+	await expect(restarted.inbox("dedup", "receiver", 500, registration.leaseId)).rejects.toThrow("member is offline");
 	await expect(restarted.send({ ...input, text: "different work" })).rejects.toThrow("messageId already used");
 });
 
@@ -395,7 +395,12 @@ test("acknowledged cursor survives Hub reconnect", async () => {
 	hub = await startHubServer({ port: 0, dataDir });
 	const firstClient = new HubClient(hub.meta.baseUrl);
 	await firstClient.createProject({ name: "reconnect" });
-	await firstClient.register({ project: "reconnect", agentId: "receiver", cwd: "/receiver", pid: 1 });
+	const registration = await firstClient.register({
+		project: "reconnect",
+		agentId: "receiver",
+		cwd: "/receiver",
+		pid: 1,
+	});
 	const first = await firstClient.send({
 		project: "reconnect",
 		from: "sender",
@@ -416,7 +421,7 @@ test("acknowledged cursor survives Hub reconnect", async () => {
 
 	hub = await startHubServer({ port: 0, dataDir });
 	const reconnected = new HubClient(hub.meta.baseUrl);
-	const remaining = await reconnected.readInbox("reconnect", "receiver");
+	const remaining = await reconnected.readInbox("reconnect", "receiver", 500, registration.leaseId);
 	expect(remaining.messages.map((message) => message.msgId)).toEqual([second.msgId]);
 	expect(remaining.cursor).toBe(first.serverSequence);
 });

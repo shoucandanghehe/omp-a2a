@@ -29,11 +29,11 @@ The transport, HTTP server, inbox, and wire-envelope implementation live under `
 
 - **Adapter pattern:** `a2aExtension` adapts OMP command, tool, event, timer, UI, logger, and message-injection APIs to one `A2aOperations` instance.
 - **Command dispatcher:** `A2aOperationRequest.action` is the discriminant handled by `A2aOperations.execute`.
-- **Session-scoped client cache:** `ensureClient` lazily connects a `HubClient` and replaces it when the resolved base URL changes.
-- **Explicit membership state:** `A2aOperations.#membership` is either `null` or `{ project, agentId }`. Join establishes or replaces it; leave clears it before attempting remote unregister.
-- **Heartbeat/lease presence:** stored members are classified from `lastSeenAt` using `STALE_MS` and `OFFLINE_MS`; periodic client heartbeats renew online presence.
-- **Polling consumer:** the extension polls the inbox every second, prevents overlapping polls with `polling`, injects each message, and acknowledges it after delivery.
-- **File-backed registry:** projects have metadata files and members have one JSON file each. `writeJsonAtomic` writes a process/UUID-specific temporary file, renames it into place, and best-effort applies mode `0600`.
+- **Session-scoped client cache:** `ensureClient` lazily connects a `HubClient` and replaces it when the selected base URL changes.
+- **Hub-bound membership state:** `A2aOperations.#membership` retains the accepting `HubClient`, its base URL, and the opaque lease token. Public membership details expose only project, agent, and Hub URL.
+- **Fenced presence:** stored members receive a fresh lease at registration. Heartbeat, unregister, Inbox read, and acknowledgment require the current lease; stale/offline takeover invalidates the predecessor.
+- **Abortable polling consumer:** the extension keeps one active Inbox request, aborts and awaits it before membership transitions, injects each message, and acknowledges only while the polling generation remains active.
+- **File-backed registry:** projects have metadata files and members have one JSON file each. Stored member records include the private lease, while member listings strip it. `writeJsonAtomic` writes a process/UUID-specific temporary file, renames it into place, and best-effort applies mode `0600`.
 
 ## Entry Points and Extension Lifecycle
 
@@ -60,9 +60,9 @@ The transport, HTTP server, inbox, and wire-envelope implementation live under `
 
 ### Active-session background flow
 
-- Every `HEARTBEAT_MS` (5 seconds), `A2aOperations.heartbeat` calls `HubClient.heartbeat` for the current membership. Failures are logged.
-- Every second, the inbox timer calls `A2aOperations.receive` unless a prior poll is active.
-- `receive` calls `HubClient.readInbox`, invokes the supplied delivery callback for each envelope in order, then calls `HubClient.ack` for that message.
+- Every `HEARTBEAT_MS` (5 seconds), `A2aOperations.heartbeat` renews the bound membership with its lease. Failures are logged.
+- Every second, the Inbox timer starts a poll only when no prior poll is active.
+- `receive` calls `HubClient.readInbox` with the lease and abort signal, invokes the delivery callback in order, rechecks cancellation, then acknowledges with the same lease.
 - A `delivery_receipt` becomes an informational UI notification.
 - A message envelope goes through `injectEnvelope` to `pi.sendMessage` as custom type `a2a-inbound`, with `triggerTurn: true`. Delivery is `"followUp"` while the agent is idle and `"steer"` otherwise.
 
@@ -74,9 +74,9 @@ The transport, HTTP server, inbox, and wire-envelope implementation live under `
 
 ### Leave and shutdown
 
-- Explicit join or leave first stops existing timers.
-- Leave copies and clears local membership before calling `HubClient.unregister`. If unregister fails, it returns `cleanupPending: true` and relies on Hub lease expiry rather than restoring local membership.
-- `session_shutdown` stops background work and executes leave. A shutdown leave failure is logged.
+- Explicit join or leave clears future timers, aborts the active Inbox request, and waits for it to settle before changing membership.
+- Leave clears local membership and calls `unregister` through the bound Hub client and lease. If cleanup fails, it returns `cleanupPending: true` and relies on lease expiry.
+- A failed join restores background work for the retained membership. `session_shutdown` stops background work and executes leave.
 
 ## Data and Control Flow
 
@@ -88,18 +88,18 @@ The transport, HTTP server, inbox, and wire-envelope implementation live under `
 
 ### Membership operations
 
-- Join: validate request → optionally unregister the previous identity → `HubClient.register` → Hub server → `registry.joinProject` → member JSON → retain `{ project, agentId }` locally → list online members.
-- Rejoining the same identity does not re-register; it calls `HubClient.heartbeat`.
-- Registry join rejects an already-online identity with `RegistryConflictError`, but permits takeover of an offline or stale stored identity by writing a fresh member record.
-- Heartbeat rewrites `lastSeenAt` and `status: "online"`; a member explicitly stored as offline cannot heartbeat.
-- Registry leave preserves the member record but writes `status: "offline"` and a new `lastSeenAt`.
-- `listMembers` returns only online members by default; `all` includes stale and offline members. Results are sorted by `agentId`.
+- Join validates the request, registers through the selected Hub, verifies member listing, commits the new bound membership, then best-effort unregisters any predecessor through its original Hub and lease.
+- Rejoining the same identity on the same Hub heartbeats with the retained lease rather than registering again.
+- Registry join rejects an already-online identity, but permits takeover of an offline or stale stored identity by issuing a fresh lease and member record.
+- Heartbeat requires the current lease before rewriting `lastSeenAt` and `status: "online"`; an explicitly offline member cannot heartbeat.
+- Registry leave requires the current lease, preserves the record, and writes `status: "offline"` plus a new `lastSeenAt`.
+- `listMembers` returns only public online member data by default; `all` includes stale and offline members. Lease tokens never appear and results are sorted by `agentId`.
 
 ### Messaging operations
 
-- Send requires a membership, non-self recipient, and non-empty text. It forwards optional `messageId`, `replyTo`, and `replyToRef` to `HubClient.send`.
+- Send requires a bound membership, non-self recipient, and non-empty text. Sender identity remains a trusted claim and the call forwards optional `messageId`, `replyTo`, and `replyToRef`.
 - The returned queued envelope supplies `msgId`, optional agent-friendly `messageRef`, and causal reply metadata. `ASYNC_REPLY_GUIDANCE` tells callers not to wait or poll for replies because the extension injects inbound work.
-- Manual inbox inspection calls `HubClient.readInbox`, formats messages and delivery receipts, and acknowledges the returned message IDs as one batch. `receive` instead delivers and acknowledges each envelope sequentially.
+- Manual Inbox inspection and background receive both use the bound Hub and lease. Manual inspection acknowledges one batch; `receive` delivers and acknowledges each envelope sequentially and abortably.
 
 ### Configuration flow
 

@@ -102,8 +102,8 @@ The ledger intentionally survives acknowledgment. Therefore:
 
 1. `HubClient.register` posts `HubRegisterBody` to `/v1/register`.
 2. The server verifies required fields and calls `getProject`.
-3. For an existing project it calls `joinProject`, defaulting an omitted PID to `0`, and returns both the `A2aMember` and current `HubMeta`.
-4. Later `heartbeat`, `unregister`, and `listMembers` client calls map directly to the registry-backed routes.
+3. For an existing project it calls `joinProject`, defaulting an omitted PID to `0`, and returns public `A2aMember`, current `HubMeta`, and a new opaque `leaseId`.
+4. `heartbeat` and `unregister` require the current lease. Member listings expose only public member data.
 
 ### Sending a message
 
@@ -119,9 +119,9 @@ Error mapping is explicit: unavailable recipient is `404`, message-ID or causal-
 
 ### Reading, acknowledging, and delivery receipts
 
-1. `HubClient.readInbox` posts project/agent/limit to `/v1/inbox/read`. It falls back to legacy `GET /v1/inbox` only when that route returns `404`. `HubClient.inbox` directly uses the GET form.
-2. `InboxStore.read` transactionally reads the current cursor (default `0`) and returns up to the clamped server limit of 1,000 rows whose sequence is greater than that cursor, ordered ascending. Reading does not remove rows or advance the cursor.
-3. `HubClient.ack` posts an ordered array of message IDs to `/v1/inbox/ack`.
+1. `HubClient.readInbox` posts project, agent, limit, and lease to `/v1/inbox/read`. It falls back to legacy `GET /v1/inbox` only when that route returns `404`; the fallback and direct `inbox` method carry the lease in `x-a2a-lease`, never in the request URL.
+2. Before storage access, the Hub requires the recipient's current non-offline member lease. `InboxStore.read` then transactionally reads the current cursor and returns ordered rows without removing them or advancing the cursor.
+3. `HubClient.ack` posts an ordered array of message IDs with the same lease to `/v1/inbox/ack`.
 4. `InboxStore.acknowledge` processes the entire batch in one transaction. A previously removed ID with an acknowledgment record returns `already_acknowledged`. An unknown ID raises `UnknownMessageError`.
 5. For a pending ID, the store compares it with the first row after the current cursor. Any gap or reordering raises `OutOfOrderAcknowledgmentError`, rolling back the batch.
 6. A valid acknowledgment deletes the pending row, records its sequence and acknowledgment time, and advances the stream cursor.

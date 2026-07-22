@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import type { Server } from "node:http";
 import * as path from "node:path";
 import {
+	authorizeInboxAccess,
 	createProject,
 	deleteProject,
 	getProject,
@@ -31,7 +32,15 @@ import {
 	UnknownMessageError,
 } from "./inbox";
 import { decodeTextPayload, PayloadTooLargeError } from "./payload";
-import type { HubMeta, HubRegisterBody, HubSendBody, HubWireMessageDraft } from "./types";
+import type {
+	HubInboxAckBody,
+	HubInboxReadBody,
+	HubMeta,
+	HubOwnedMemberBody,
+	HubRegisterBody,
+	HubSendBody,
+	HubWireMessageDraft,
+} from "./types";
 
 const DEFAULT_PORT = 4173;
 class RecipientUnavailableError extends Error {}
@@ -120,8 +129,8 @@ export async function startHubServer(opts?: {
 			if (!getProject(body.project, dataDir)) {
 				return void response.status(404).json({ error: `unknown project: ${body.project}` });
 			}
-			const member = joinProject({ ...body, pid: body.pid ?? 0, dataDir });
-			response.json({ member, hub: meta });
+			const { member, leaseId } = joinProject({ ...body, pid: body.pid ?? 0, dataDir });
+			response.json({ member, hub: meta, leaseId });
 		} catch (error) {
 			const status = error instanceof RegistryConflictError ? 409 : 400;
 			response.status(status).json({ error: error instanceof Error ? error.message : String(error) });
@@ -130,11 +139,11 @@ export async function startHubServer(opts?: {
 
 	app.post("/v1/heartbeat", (request, response) => {
 		try {
-			const body = request.body as { project?: string; agentId?: string };
-			if (!body.project || !body.agentId) {
-				return void response.status(400).json({ error: "project and agentId required" });
+			const body = request.body as Partial<HubOwnedMemberBody>;
+			if (!body.project || !body.agentId || !body.leaseId) {
+				return void response.status(400).json({ error: "project, agentId, leaseId required" });
 			}
-			response.json({ member: heartbeat(body.project, body.agentId, dataDir) });
+			response.json({ member: heartbeat(body.project, body.agentId, body.leaseId, dataDir) });
 		} catch (error) {
 			response.status(400).json({ error: error instanceof Error ? error.message : String(error) });
 		}
@@ -142,11 +151,11 @@ export async function startHubServer(opts?: {
 
 	app.post("/v1/unregister", (request, response) => {
 		try {
-			const body = request.body as { project?: string; agentId?: string };
-			if (!body.project || !body.agentId) {
-				return void response.status(400).json({ error: "project and agentId required" });
+			const body = request.body as Partial<HubOwnedMemberBody>;
+			if (!body.project || !body.agentId || !body.leaseId) {
+				return void response.status(400).json({ error: "project, agentId, leaseId required" });
 			}
-			leaveProject(body.project, body.agentId, dataDir);
+			leaveProject(body.project, body.agentId, body.leaseId, dataDir);
 			response.json({ ok: true });
 		} catch (error) {
 			response.status(400).json({ error: error instanceof Error ? error.message : String(error) });
@@ -222,25 +231,36 @@ export async function startHubServer(opts?: {
 	});
 
 	app.get("/v1/inbox", (request, response) => {
-		const project = String(request.query.project ?? "");
-		const agentId = String(request.query.agentId ?? "");
-		if (!project || !agentId) return void response.status(400).json({ error: "project and agentId required" });
-		const limit = Math.min(Math.max(Number(request.query.limit) || 500, 1), 1_000);
-		response.json(inboxes.read(project, agentId, limit));
+		try {
+			const project = String(request.query.project ?? "");
+			const agentId = String(request.query.agentId ?? "");
+			if (!project || !agentId) return void response.status(400).json({ error: "project and agentId required" });
+			const leaseId = request.get("x-a2a-lease");
+			authorizeInboxAccess(project, agentId, leaseId, dataDir);
+			const limit = Math.min(Math.max(Number(request.query.limit) || 500, 1), 1_000);
+			response.json(inboxes.read(project, agentId, limit));
+		} catch (error) {
+			response.status(400).json({ error: error instanceof Error ? error.message : String(error) });
+		}
 	});
 
 	app.post("/v1/inbox/read", (request, response) => {
-		const body = request.body as { project?: string; agentId?: string; limit?: number };
-		if (!body.project || !body.agentId) {
-			return void response.status(400).json({ error: "project and agentId required" });
+		try {
+			const body = request.body as Partial<HubInboxReadBody>;
+			if (!body.project || !body.agentId) {
+				return void response.status(400).json({ error: "project and agentId required" });
+			}
+			authorizeInboxAccess(body.project, body.agentId, body.leaseId, dataDir);
+			const limit = Math.min(Math.max(Number(body.limit) || 500, 1), 1_000);
+			response.json(inboxes.read(body.project, body.agentId, limit));
+		} catch (error) {
+			response.status(400).json({ error: error instanceof Error ? error.message : String(error) });
 		}
-		const limit = Math.min(Math.max(Number(body.limit) || 500, 1), 1_000);
-		response.json(inboxes.read(body.project, body.agentId, limit));
 	});
 
 	app.post("/v1/inbox/ack", (request, response) => {
 		try {
-			const body = request.body as { project?: string; agentId?: string; messageIds?: unknown };
+			const body = request.body as Partial<HubInboxAckBody>;
 			if (
 				!body.project ||
 				!body.agentId ||
@@ -249,6 +269,7 @@ export async function startHubServer(opts?: {
 			) {
 				return void response.status(400).json({ error: "project, agentId, string messageIds required" });
 			}
+			authorizeInboxAccess(body.project, body.agentId, body.leaseId, dataDir);
 			const result = inboxes.acknowledge(body.project, body.agentId, body.messageIds);
 			response.json({ ok: true, ...result });
 		} catch (error) {

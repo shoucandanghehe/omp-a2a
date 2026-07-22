@@ -2,7 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { a2aRoot } from "../paths";
-import type { A2aMember, A2aProject } from "../types";
+import type { A2aMember, A2aProject, MemberRegistration } from "../types";
 import { decodeWireEnvelope, encodeTextPayload } from "./payload";
 import type {
 	HubAckBatch,
@@ -95,6 +95,7 @@ export async function connectHub(opts?: { hubUrl?: string; home?: string }): Pro
 
 export class HubClient {
 	#baseUrl: string;
+	#leases = new Map<string, string>();
 
 	constructor(baseUrl: string) {
 		this.#baseUrl = stripTrailingSlash(baseUrl);
@@ -140,28 +141,30 @@ export class HubClient {
 		return response.projects;
 	}
 
-	async register(body: HubRegisterBody): Promise<{ member: A2aMember; hub: HubMeta }> {
-		return await fetchJson<{ member: A2aMember; hub: HubMeta }>(`${this.#baseUrl}/v1/register`, {
+	async register(body: HubRegisterBody): Promise<MemberRegistration & { hub: HubMeta }> {
+		const registration = await fetchJson<MemberRegistration & { hub: HubMeta }>(`${this.#baseUrl}/v1/register`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify(body),
 		});
+		this.#leases.set(`${body.project}\0${body.agentId}`, registration.leaseId);
+		return registration;
 	}
 
-	async heartbeat(project: string, agentId: string): Promise<A2aMember> {
+	async heartbeat(project: string, agentId: string, leaseId: string): Promise<A2aMember> {
 		const response = await fetchJson<{ member: A2aMember }>(`${this.#baseUrl}/v1/heartbeat`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ project, agentId }),
+			body: JSON.stringify({ project, agentId, leaseId }),
 		});
 		return response.member;
 	}
 
-	async unregister(project: string, agentId: string): Promise<void> {
+	async unregister(project: string, agentId: string, leaseId: string): Promise<void> {
 		await fetchJson<{ ok: true }>(`${this.#baseUrl}/v1/unregister`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ project, agentId }),
+			body: JSON.stringify({ project, agentId, leaseId }),
 		});
 	}
 
@@ -189,18 +192,29 @@ export class HubClient {
 		return decodeWireEnvelope(response.message);
 	}
 
-	async inbox(project: string, agentId: string, limit = 500): Promise<HubEnvelope[]> {
+	async inbox(project: string, agentId: string, limit = 500, leaseId?: string): Promise<HubEnvelope[]> {
 		const query = new URLSearchParams({ project, agentId, limit: String(limit) });
-		const response = await fetchJson<{ messages: HubWireEnvelope[] }>(`${this.#baseUrl}/v1/inbox?${query}`);
+		const ownership = leaseId ?? this.#leases.get(`${project}\0${agentId}`);
+		const response = await fetchJson<{ messages: HubWireEnvelope[] }>(`${this.#baseUrl}/v1/inbox?${query}`, {
+			headers: ownership ? { "x-a2a-lease": ownership } : undefined,
+		});
 		return response.messages.map(decodeWireEnvelope);
 	}
 
-	async readInbox(project: string, agentId: string, limit = 500): Promise<HubInboxBatch> {
+	async readInbox(
+		project: string,
+		agentId: string,
+		limit = 500,
+		leaseId?: string,
+		signal?: AbortSignal,
+	): Promise<HubInboxBatch> {
+		const ownership = leaseId ?? this.#leases.get(`${project}\0${agentId}`);
 		try {
 			const response = await fetchJson<HubWireInboxBatch>(`${this.#baseUrl}/v1/inbox/read`, {
 				method: "POST",
 				headers: { "content-type": "application/json" },
-				body: JSON.stringify({ project, agentId, limit }),
+				body: JSON.stringify({ project, agentId, limit, leaseId: ownership }),
+				signal,
 			});
 			return {
 				messages: response.messages.map(decodeWireEnvelope),
@@ -211,6 +225,10 @@ export class HubClient {
 			const query = new URLSearchParams({ project, agentId, limit: String(limit) });
 			const response = await fetchJson<{ messages: HubWireEnvelope[]; cursor?: number }>(
 				`${this.#baseUrl}/v1/inbox?${query}`,
+				{
+					headers: ownership ? { "x-a2a-lease": ownership } : undefined,
+					signal,
+				},
 			);
 			return {
 				messages: response.messages.map(decodeWireEnvelope),
@@ -219,11 +237,19 @@ export class HubClient {
 		}
 	}
 
-	async ack(project: string, agentId: string, messageIds: string[]): Promise<HubAckBatch | null> {
+	async ack(
+		project: string,
+		agentId: string,
+		messageIds: string[],
+		leaseId?: string,
+		signal?: AbortSignal,
+	): Promise<HubAckBatch | null> {
+		const ownership = leaseId ?? this.#leases.get(`${project}\0${agentId}`);
 		const response = await fetchJson<Partial<HubAckBatch> & { ok: true }>(`${this.#baseUrl}/v1/inbox/ack`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ project, agentId, messageIds }),
+			body: JSON.stringify({ project, agentId, messageIds, leaseId: ownership }),
+			signal,
 		});
 		if (!Array.isArray(response.acknowledgments) || !Number.isSafeInteger(response.cursor)) return null;
 		return { acknowledgments: response.acknowledgments, cursor: response.cursor! };

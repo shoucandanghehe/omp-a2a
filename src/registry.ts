@@ -9,10 +9,17 @@ import {
 	projectMetaPath,
 	projectsRoot,
 } from "./paths";
-import type { A2aMember, A2aProject, JoinOptions, ListMembersOptions } from "./types";
+import type { A2aMember, A2aProject, JoinOptions, ListMembersOptions, MemberRegistration } from "./types";
 import { AGENT_ID_RE, OFFLINE_MS, PROJECT_NAME_RE, STALE_MS } from "./types";
 
 export class RegistryConflictError extends Error {}
+
+type StoredMember = A2aMember & { leaseId: string };
+
+function publicMember(member: StoredMember): A2aMember {
+	const { leaseId: _leaseId, ...publicValue } = member;
+	return publicValue;
+}
 
 function readJson<T>(file: string): T | null {
 	try {
@@ -46,7 +53,7 @@ function assertAgentId(id: string): void {
 	}
 }
 
-function refreshMember(member: A2aMember, now = Date.now()): A2aMember {
+function refreshMember<T extends A2aMember>(member: T, now = Date.now()): T {
 	if (member.status === "offline") return member;
 	const age = now - member.lastSeenAt;
 	const status = age > OFFLINE_MS ? "offline" : age > STALE_MS ? "stale" : "online";
@@ -103,15 +110,15 @@ export function listProjects(dataDir?: string): A2aProject[] {
 	return projects.sort((left, right) => left.name.localeCompare(right.name));
 }
 
-function readStoredMember(project: string, agentId: string, dataDir?: string): A2aMember | null {
-	return readJson<A2aMember>(memberPath(project, agentId, dataDir));
+function readStoredMember(project: string, agentId: string, dataDir?: string): StoredMember | null {
+	return readJson<StoredMember>(memberPath(project, agentId, dataDir));
 }
 
 export function readMember(project: string, agentId: string, dataDir?: string): A2aMember | null {
 	assertProjectName(project);
 	assertAgentId(agentId);
 	const stored = readStoredMember(project, agentId, dataDir);
-	return stored ? refreshMember(stored) : null;
+	return stored ? publicMember(refreshMember(stored)) : null;
 }
 
 export function listMembers(opts: ListMembersOptions & { dataDir?: string }): A2aMember[] {
@@ -123,15 +130,15 @@ export function listMembers(opts: ListMembersOptions & { dataDir?: string }): A2
 	const members: A2aMember[] = [];
 	const now = Date.now();
 	for (const file of fs.readdirSync(dir).filter((name) => name.endsWith(".json"))) {
-		const stored = readJson<A2aMember>(path.join(dir, file));
+		const stored = readJson<StoredMember>(path.join(dir, file));
 		if (!stored?.agentId) continue;
-		const member = refreshMember(stored, now);
+		const member = publicMember(refreshMember(stored, now));
 		if (opts.all || member.status === "online") members.push(member);
 	}
 	return members.sort((left, right) => left.agentId.localeCompare(right.agentId));
 }
 
-export function joinProject(opts: JoinOptions & { dataDir?: string }): A2aMember {
+export function joinProject(opts: JoinOptions & { dataDir?: string }): MemberRegistration {
 	assertProjectName(opts.project);
 	assertAgentId(opts.agentId);
 	if (!getProject(opts.project, opts.dataDir)) {
@@ -146,6 +153,7 @@ export function joinProject(opts: JoinOptions & { dataDir?: string }): A2aMember
 	}
 
 	const now = Date.now();
+	const leaseId = crypto.randomUUID();
 	const member: A2aMember = {
 		agentId: opts.agentId,
 		project: opts.project,
@@ -158,31 +166,49 @@ export function joinProject(opts: JoinOptions & { dataDir?: string }): A2aMember
 		lastSeenAt: now,
 		status: "online",
 	};
-	writeJsonAtomic(memberPath(opts.project, opts.agentId, opts.dataDir), member);
-	return member;
+	writeJsonAtomic(memberPath(opts.project, opts.agentId, opts.dataDir), { ...member, leaseId } satisfies StoredMember);
+	return { member, leaseId };
 }
 
-export function heartbeat(project: string, agentId: string, dataDir?: string): A2aMember {
+export function heartbeat(project: string, agentId: string, leaseId: string, dataDir?: string): A2aMember {
 	assertProjectName(project);
 	assertAgentId(agentId);
 	const stored = readStoredMember(project, agentId, dataDir);
 	if (!stored) throw new Error(`not a member: ${agentId}@${project}`);
+	if (!leaseId || stored.leaseId !== leaseId) throw new Error(`lease ownership mismatch: ${agentId}@${project}`);
 	if (stored.status === "offline") throw new Error(`member is offline: ${agentId}@${project}`);
-	const next: A2aMember = { ...stored, lastSeenAt: Date.now(), status: "online" };
+	const next: StoredMember = { ...stored, lastSeenAt: Date.now(), status: "online" };
 	writeJsonAtomic(memberPath(project, agentId, dataDir), next);
-	return next;
+	return publicMember(next);
 }
 
-export function leaveProject(project: string, agentId: string, dataDir?: string): void {
+export function leaveProject(project: string, agentId: string, leaseId: string, dataDir?: string): void {
 	assertProjectName(project);
 	assertAgentId(agentId);
-	const member = readMember(project, agentId, dataDir);
-	if (!member) return;
+	const stored = readStoredMember(project, agentId, dataDir);
+	if (!stored) throw new Error(`not a member: ${agentId}@${project}`);
+	if (!leaseId || stored.leaseId !== leaseId) throw new Error(`lease ownership mismatch: ${agentId}@${project}`);
+	if (stored.status === "offline") return;
 	writeJsonAtomic(memberPath(project, agentId, dataDir), {
-		...member,
+		...stored,
 		status: "offline",
 		lastSeenAt: Date.now(),
-	} satisfies A2aMember);
+	} satisfies StoredMember);
+}
+
+export function authorizeInboxAccess(
+	project: string,
+	agentId: string,
+	leaseId?: string,
+	dataDir?: string,
+): void {
+	assertProjectName(project);
+	assertAgentId(agentId);
+	const stored = readStoredMember(project, agentId, dataDir);
+	if (!stored) throw new Error(`not a member: ${agentId}@${project}`);
+	const member = refreshMember(stored);
+	if (member.status === "offline") throw new Error(`member is offline: ${agentId}@${project}`);
+	if (!leaseId || member.leaseId !== leaseId) throw new Error(`lease ownership mismatch: ${agentId}@${project}`);
 }
 
 export function formatMembersTable(members: A2aMember[]): string {

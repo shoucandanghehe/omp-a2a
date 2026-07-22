@@ -89,6 +89,26 @@ export type HubRegisterBody = {
 	sessionId?: string;
 };
 
+export type HubOwnedMemberBody = {
+	project: string;
+	agentId: string;
+	leaseId: string;
+};
+
+export type HubInboxReadBody = {
+	project: string;
+	agentId: string;
+	limit?: number;
+	leaseId?: string;
+};
+
+export type HubInboxAckBody = {
+	project: string;
+	agentId: string;
+	messageIds: string[];
+	leaseId?: string;
+};
+
 export type HubSendBody = {
 	project: string;
 	from: string;

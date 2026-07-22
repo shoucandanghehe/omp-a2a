@@ -33,15 +33,14 @@ When the receiving extension acknowledges a successfully injected message, the s
 
 ## Trust model
 
-omp-a2a is designed for a fully trusted private network. Hub endpoints intentionally do not authenticate callers.
-Caller-supplied project and sender identity are trusted claims; membership is used to discover and route to recipients, not to authenticate or admit senders.
+omp-a2a is designed for a fully trusted private network. Hub endpoints intentionally do not authenticate senders.
+Caller-supplied project and sender identities remain trusted claims for `send`. Registration separately issues an opaque lease used to authorize heartbeat, unregister, Inbox read, and acknowledgment; member listings never expose this lease.
+An active membership remains bound to the Hub that accepted it. Changing `hubUrl` affects unjoined operations, while joined status, send, receive, heartbeat, and leave continue through the bound Hub until an explicit membership transition.
 Do not expose the Hub to the public Internet or an untrusted network.
 
 ## Current operational constraints
 
 - **Custom protocol:** this repository implements a private Mesh protocol, not the standard A2A protocol. Do not assume interoperability with standard A2A clients or servers.
-- **Lease ownership:** registration stores `sessionId`, but heartbeat and unregister currently identify a lease only by `project` and `agentId`. Do not reuse an `agentId` while an older process with that identity can reconnect; the older process can still refresh or unregister the replacement lease.
-- **Hub changes while joined:** local membership retains only `project` and `agentId`; it is not pinned to the Hub URL that accepted the registration. Leave or restart the OMP session before changing `hubUrl`, then join the new Hub explicitly.
 - **Interrupted Project deletion:** Project metadata is removed from the filesystem Registry before its SQLite Inbox state is purged. After a crash or storage failure during deletion, verify or clear the old Project state before reusing the same Project name.
 - **Stalled requests:** the initial Hub probe has a timeout, but ordinary Hub requests currently do not. A Hub that accepts connections without completing responses can stall Inbox polling and accumulate heartbeat requests; restart the Hub and affected OMP session if this occurs.
 - **Configuration fallback:** malformed global JSON configuration is ignored and URL resolution continues to the default. Prefer a repository-local config for explicit routing, and validate global configuration before relying on it.

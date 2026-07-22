@@ -38,7 +38,7 @@ Execution is synchronous and begins directly in the module-level `try` block.
 
 2. **Heartbeat-owned presence**
    - Calls `joinProject` for agents `api` and `web` in `billing-rewrite`, with distinct working directories and deliberately diagnostic PID values.
-   - Calls `heartbeat("billing-rewrite", "api", dataDir)`.
+   - Retains the `api` registration lease and calls `heartbeat("billing-rewrite", "api", leaseId, dataDir)`.
    - Reads members with `listMembers`, prints them through `formatMembersTable`, and requires both joined agents to remain listed.
    - Separately requires `other-mesh` to have no members.
    - This proves that member presence is represented by registry/heartbeat state rather than treating the supplied PID as an authoritative liveness check, and that membership is isolated by project.
@@ -49,7 +49,7 @@ Execution is synchronous and begins directly in the module-level `try` block.
    - This proves that an online agent ID cannot be claimed again within the project.
 
 4. **Idempotent leave**
-   - Calls `leaveProject` twice for `api`.
+   - Calls `leaveProject` twice for `api` with the same registration lease.
    - Calls `listMembers` and requires that no returned member has `agentId === "api"`.
    - This proves that leaving removes the member from online results and that repeating the leave operation is safe.
 
@@ -90,11 +90,11 @@ The module invokes asynchronous `main()`. Every started handle is appended to `h
 
 3. **Trust-on-claim send and durable delivery receipt**
    - Sends `hello` from unregistered sender name `controller` to registered recipient `web`.
-   - Reads `web`'s inbox and requires the original text, proving that send accepts the sender claim without prior sender registration.
-   - Acknowledges the message by `msgId`, then requires `web`'s inbox to be empty.
-   - Reads `controller`'s inbox and requires a `delivery_receipt` whose `receiptFor` points to the original `msgId`.
-   - Acknowledges the receipt and verifies that this does not create another receipt in `web`'s inbox.
-   - Together these calls prove recipient acknowledgement removes the queued message, creates a durable receipt for the claimed sender, and terminates rather than forming a receipt loop.
+   - Reads `web`'s Inbox with its registration lease and requires the original text, proving that `send` accepts the sender claim without prior sender registration.
+   - Acknowledges the message, then requires `web`'s Inbox to be empty.
+   - Requires anonymous consumption of `controller`'s receipt stream to fail, registers `controller`, then reads the queued `delivery_receipt` with its lease.
+   - Acknowledges the receipt and verifies that this does not create another receipt in `web`'s Inbox.
+   - Together these calls prove trust-on-claim send, lease-fenced Inbox consumption, durable receipts, and receipt-loop prevention.
 
 4. **Gzip large payload**
    - Builds a large, compressible string by repeating `compressible diff line\n` 2,000 times.
@@ -112,8 +112,8 @@ The module invokes asynchronous `main()`. Every started handle is appended to `h
    - This proves that the Hub does not silently enqueue a message for an unknown recipient.
 
 7. **Safe project deletion**
-   - Attempts to delete `mesh-demo` while `api` and `web` are still online and requires rejection.
-   - Unregisters both members, deletes the project, and requires a `true` result.
+   - Attempts to delete `mesh-demo` while `api`, `web`, and the subsequently registered `controller` are still online and requires rejection.
+   - Unregisters all three members with their leases, deletes the project, and requires a `true` result.
    - Requires the project list to become empty, then repeats deletion and requires `false`.
    - This proves deletion is blocked while members are online, succeeds once the project is inactive, removes it from enumeration, and is idempotent for an absent project.
 
