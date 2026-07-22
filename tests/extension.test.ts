@@ -100,7 +100,7 @@ async function configureRepository(project: string) {
 	writeFileSync(
 		join(root, ".omp", "a2a.json"),
 		JSON.stringify({
-			hubUrl: hub.meta.baseUrl,
+			hubUrl: hub.listenUrl,
 			project,
 			agentId: "worker",
 			autoJoin: false,
@@ -134,7 +134,7 @@ test("the model-facing tool contract forbids polling for replies", () => {
 test("a failed join restores heartbeat and Inbox polling", async () => {
 	root = mkdtempSync(join(tmpdir(), "omp-a2a-extension-"));
 	hub = await startHubServer({ port: 0, dataDir: join(root, "hub") });
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "stable" });
 	await configureRepository("stable");
 	const { commandHandler } = extensionHarness();
@@ -153,7 +153,7 @@ test("a failed join restores heartbeat and Inbox polling", async () => {
 test("leave aborts and waits for an active Inbox request", async () => {
 	root = mkdtempSync(join(tmpdir(), "omp-a2a-extension-"));
 	hub = await startHubServer({ port: 0, dataDir: join(root, "hub") });
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "active" });
 	await configureRepository("active");
 	const { commandHandler } = extensionHarness();
@@ -190,6 +190,63 @@ test("leave aborts and waits for an active Inbox request", async () => {
 		await readStarted;
 		await commandHandler("leave", context);
 		expect(readAborted).toBe(true);
+		expect(context.timers.size).toBe(0);
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
+
+test("heartbeat ticks are single-flight and leave awaits heartbeat abortion before unregister", async () => {
+	root = mkdtempSync(join(tmpdir(), "omp-a2a-extension-"));
+	hub = await startHubServer({ port: 0, dataDir: join(root, "hub") });
+	const client = new HubClient(hub.listenUrl);
+	await client.createProject({ name: "heartbeat" });
+	await configureRepository("heartbeat");
+	const { commandHandler } = extensionHarness();
+	const context = timerContext();
+	await commandHandler("join heartbeat --as worker", context);
+	const heartbeatTimer = [...context.timers.values()].find((timer) => timer.milliseconds === 5_000);
+	if (!heartbeatTimer) throw new Error("heartbeat timer was not started");
+
+	const originalFetch = globalThis.fetch;
+	let heartbeatRequests = 0;
+	let unregisterStarted = false;
+	let abortObservedResolve: (() => void) | undefined;
+	const abortObserved = new Promise<void>((resolve) => {
+		abortObservedResolve = resolve;
+	});
+	let rejectHeartbeat: ((reason?: unknown) => void) | undefined;
+	globalThis.fetch = ((input: RequestInfo | URL, init?: RequestInit) => {
+		const url = String(input);
+		if (url.endsWith("/v1/heartbeat")) {
+			heartbeatRequests += 1;
+			return new Promise<Response>((_resolve, reject) => {
+				rejectHeartbeat = reject;
+				init?.signal?.addEventListener(
+					"abort",
+					() => {
+						abortObservedResolve?.();
+					},
+					{ once: true },
+				);
+			});
+		}
+		if (url.endsWith("/v1/unregister")) unregisterStarted = true;
+		return originalFetch(input, init);
+	}) as typeof fetch;
+
+	try {
+		heartbeatTimer.callback();
+		heartbeatTimer.callback();
+		expect(heartbeatRequests).toBe(1);
+
+		const leaving = commandHandler("leave", context);
+		await abortObserved;
+		expect(unregisterStarted).toBe(false);
+		rejectHeartbeat?.(new Error("heartbeat aborted"));
+		await leaving;
+
+		expect(unregisterStarted).toBe(true);
 		expect(context.timers.size).toBe(0);
 	} finally {
 		globalThis.fetch = originalFetch;

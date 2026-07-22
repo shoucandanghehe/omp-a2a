@@ -17,8 +17,8 @@ async function main() {
 	const first = await startHubServer({ dataDir: firstDataDir, port: 0 });
 	const second = await startHubServer({ dataDir: secondDataDir, port: 0 });
 	handles.push(first, second);
-	const client = new HubClient(first.meta.baseUrl);
-	const otherClient = new HubClient(second.meta.baseUrl);
+	const client = new HubClient(first.listenUrl);
+	const otherClient = new HubClient(second.listenUrl);
 	await client.createProject({ name: "mesh-demo" });
 	assert((await otherClient.listProjects()).length === 0, "Hub registries are isolated");
 
@@ -71,7 +71,7 @@ async function main() {
 	await first.stop();
 	const restarted = await startHubServer({ dataDir: firstDataDir, port: 0 });
 	handles.push(restarted);
-	const restartedClient = new HubClient(restarted.meta.baseUrl);
+	const restartedClient = new HubClient(restarted.listenUrl);
 	assert(
 		(await restartedClient.inbox("mesh-demo", "web", 500, web.leaseId))[0]?.msgId === durable.msgId,
 		"message survives restart",

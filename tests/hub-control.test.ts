@@ -33,17 +33,80 @@ describe("Hub project control plane", () => {
 		const second = await startHubServer({ port: 0, dataDir: dataDir() });
 		hubs.push(first, second);
 
-		const firstClient = new HubClient(first.meta.baseUrl);
-		const secondClient = new HubClient(second.meta.baseUrl);
+		const firstClient = new HubClient(first.listenUrl);
+		const secondClient = new HubClient(second.listenUrl);
 		await firstClient.createProject({ name: "alpha" });
 
 		expect((await firstClient.listProjects()).map((project) => project.name)).toEqual(["alpha"]);
 		expect(await secondClient.listProjects()).toEqual([]);
 	});
+
+	test("deployment public URL does not redirect programmatic project control", async () => {
+		const previousPublicUrl = process.env.OMP_A2A_HUB_PUBLIC_URL;
+		const publicUrl = "http://127.0.0.1:1";
+		process.env.OMP_A2A_HUB_PUBLIC_URL = publicUrl;
+		try {
+			const hub = await startHubServer({ port: 0, dataDir: dataDir() });
+			hubs.push(hub);
+			expect(hub.meta.baseUrl).toBe(hub.listenUrl);
+			expect(hub.listenUrl).not.toBe(publicUrl);
+
+			const client = new HubClient(hub.listenUrl);
+			await client.createProject({ name: "local-control" });
+			expect((await client.listProjects()).map((project) => project.name)).toEqual(["local-control"]);
+			expect(await client.deleteProject("local-control")).toBe(true);
+			expect(await client.listProjects()).toEqual([]);
+		} finally {
+			if (previousPublicUrl === undefined) delete process.env.OMP_A2A_HUB_PUBLIC_URL;
+			else process.env.OMP_A2A_HUB_PUBLIC_URL = previousPublicUrl;
+		}
+	});
+
+	test("wildcard binds require an explicit validated public URL", async () => {
+		const previousPublicUrl = process.env.OMP_A2A_HUB_PUBLIC_URL;
+		delete process.env.OMP_A2A_HUB_PUBLIC_URL;
+		try {
+			const root = dataDir();
+			await expect(startHubServer({ port: 0, host: "0.0.0.0", dataDir: root })).rejects.toThrow(
+				"public URL is required",
+			);
+			await expect(
+				startHubServer({ port: 0, host: "0:0:0:0:0:0:0:0", dataDir: root }),
+			).rejects.toThrow("public URL is required");
+
+			const hub = await startHubServer({
+				port: 0,
+				host: "0.0.0.0",
+				publicUrl: "https://mesh.example.internal/base/",
+				dataDir: root,
+			});
+			hubs.push(hub);
+			expect(hub.meta.baseUrl).toBe("https://mesh.example.internal/base");
+			expect(hub.listenUrl).toMatch(/^http:\/\/127\.0\.0\.1:/);
+
+			const invalidRoot = dataDir();
+			await expect(
+				startHubServer({ port: 0, publicUrl: "ftp://mesh.example.internal", dataDir: invalidRoot }),
+			).rejects.toThrow("invalid Hub public URL");
+			await expect(
+				startHubServer({ port: 0, publicUrl: "http://0.0.0.0:4173", dataDir: invalidRoot }),
+			).rejects.toThrow("invalid Hub public URL");
+			for (const publicUrl of ["http://mesh.example.internal?", "http://mesh.example.internal#"]) {
+				await expect(startHubServer({ port: 0, publicUrl, dataDir: invalidRoot })).rejects.toThrow(
+					"query, or fragment",
+				);
+			}
+			const recovered = await startHubServer({ port: 0, dataDir: invalidRoot });
+			hubs.push(recovered);
+		} finally {
+			if (previousPublicUrl === undefined) delete process.env.OMP_A2A_HUB_PUBLIC_URL;
+			else process.env.OMP_A2A_HUB_PUBLIC_URL = previousPublicUrl;
+		}
+	});
 	test("presence is derived from heartbeat even when the diagnostic PID is not visible", async () => {
 		const hub = await startHubServer({ port: 0, dataDir: dataDir() });
 		hubs.push(hub);
-		const client = new HubClient(hub.meta.baseUrl);
+		const client = new HubClient(hub.listenUrl);
 		await client.createProject({ name: "presence" });
 		const registration = await client.register({
 			project: "presence",
@@ -61,7 +124,7 @@ describe("Hub project control plane", () => {
 		try {
 			const hub = await startHubServer({ port: 0, dataDir: dataDir() });
 			hubs.push(hub);
-			const client = new HubClient(hub.meta.baseUrl);
+			const client = new HubClient(hub.listenUrl);
 			await client.createProject({ name: "reconnect" });
 			const registration = await client.register({ project: "reconnect", agentId: "worker", cwd: "/work", pid: 1 });
 
@@ -79,7 +142,7 @@ describe("Hub project control plane", () => {
 	test("an online agent ID cannot be replaced implicitly", async () => {
 		const hub = await startHubServer({ port: 0, dataDir: dataDir() });
 		hubs.push(hub);
-		const client = new HubClient(hub.meta.baseUrl);
+		const client = new HubClient(hub.listenUrl);
 		await client.createProject({ name: "conflicts" });
 		await client.register({ project: "conflicts", agentId: "api", cwd: "/first", pid: 1 });
 
@@ -100,7 +163,7 @@ describe("Hub project control plane", () => {
 	test("deleting an empty project is idempotent", async () => {
 		const hub = await startHubServer({ port: 0, dataDir: dataDir() });
 		hubs.push(hub);
-		const client = new HubClient(hub.meta.baseUrl);
+		const client = new HubClient(hub.listenUrl);
 		await client.createProject({ name: "retired" });
 
 		expect(await client.deleteProject("retired")).toBe(true);
@@ -112,7 +175,7 @@ describe("Hub project control plane", () => {
 		const root = dataDir();
 		const first = await startHubServer({ port: 0, dataDir: root });
 		hubs.push(first);
-		const firstClient = new HubClient(first.meta.baseUrl);
+		const firstClient = new HubClient(first.listenUrl);
 		await firstClient.createProject({ name: "reused" });
 		const worker = await firstClient.register({ project: "reused", agentId: "worker", cwd: "/worker", pid: 1 });
 		await firstClient.send({
@@ -132,7 +195,7 @@ describe("Hub project control plane", () => {
 
 		const restarted = await startHubServer({ port: 0, dataDir: root });
 		hubs.push(restarted);
-		const client = new HubClient(restarted.meta.baseUrl);
+		const client = new HubClient(restarted.listenUrl);
 		expect(existsSync(markerPath)).toBe(false);
 		await client.createProject({ name: "reused" });
 		expect(await client.listMembers("reused", true)).toEqual([]);
@@ -167,18 +230,18 @@ describe("Hub project control plane", () => {
 		rmSync(hubPidPath(root), { recursive: true });
 		const recovered = await startHubServer({ port: fixedPort, dataDir: root });
 		hubs.push(recovered);
-		expect((await new HubClient(recovered.meta.baseUrl).meta()).dataDir).toBe(root);
+		expect((await new HubClient(recovered.listenUrl).meta()).dataDir).toBe(root);
 	});
 
 	test("HTTP acknowledgment rejects batches above the storage cap", async () => {
 		const root = dataDir();
 		const hub = await startHubServer({ port: 0, dataDir: root });
 		hubs.push(hub);
-		const client = new HubClient(hub.meta.baseUrl);
+		const client = new HubClient(hub.listenUrl);
 		await client.createProject({ name: "ack-cap" });
 		const worker = await client.register({ project: "ack-cap", agentId: "worker", cwd: "/worker", pid: 1 });
 
-		const response = await fetch(`${hub.meta.baseUrl}/v1/inbox/ack`, {
+		const response = await fetch(`${hub.listenUrl}/v1/inbox/ack`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({
@@ -198,7 +261,7 @@ describe("Hub project control plane", () => {
 	test("a project cannot be deleted while a member is active", async () => {
 		const hub = await startHubServer({ port: 0, dataDir: dataDir() });
 		hubs.push(hub);
-		const client = new HubClient(hub.meta.baseUrl);
+		const client = new HubClient(hub.listenUrl);
 		await client.createProject({ name: "active" });
 		const registration = await client.register({ project: "active", agentId: "worker", cwd: "/worker", pid: 1 });
 
@@ -214,8 +277,8 @@ describe("Hub project control plane", () => {
 		try {
 			const hub = await startHubServer({ port: 0, dataDir: dataDir() });
 			hubs.push(hub);
-			const prior = new HubClient(hub.meta.baseUrl);
-			const replacement = new HubClient(hub.meta.baseUrl);
+			const prior = new HubClient(hub.listenUrl);
+			const replacement = new HubClient(hub.listenUrl);
 			await prior.createProject({ name: "takeover" });
 			const first = await prior.register({
 				project: "takeover",

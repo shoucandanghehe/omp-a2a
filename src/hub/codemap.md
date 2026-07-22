@@ -96,9 +96,9 @@ Inbox reads first load bounded payload-size metadata, then materialize only the 
 ### Hub discovery and connection
 
 1. `HubClient.connect` calls `connectHub`.
-2. `connectHub` calls `resolveHubUrl`, whose precedence is explicit `hubUrl`, `OMP_A2A_HUB_URL`, the first matching `config.yml`/`config.yaml`/`config.json` under `a2aRoot(home)`, then `http://127.0.0.1:4173`.
+2. `connectHub` calls `resolveHubUrl`, whose precedence is explicit `hubUrl`, `OMP_A2A_HUB_URL`, the first matching global config, then `http://127.0.0.1:4173`.
 3. `probeHub` requests `GET /v1/meta` with a 1.5-second timeout and returns `null` on failure.
-4. A successful probe supplies the advertised `meta.baseUrl` to the new `HubClient`; failure raises an instruction to start the Hub or configure its URL.
+4. A successful probe supplies the validated advertised `meta.baseUrl` to the new `HubClient`. All ordinary client requests combine caller cancellation with a configurable 15-second default deadline.
 
 ### Registration and membership
 
@@ -135,8 +135,8 @@ This separates non-destructive polling from explicit consumption while preservin
 ### CLI and server lifecycle
 
 1. `cli.ts` parses `--port`, `--host`, `--public-url`/`--publicUrl`, and `--data-dir` in split or `--key=value` forms; unknown or incomplete arguments throw.
-2. It calls `startHubServer`, which resolves option/environment/default values, acquires `HubDataLock`, opens `InboxStore`, installs routes, and listens. Port `0` is valid.
-3. After binding, the server derives the advertised URL from `publicUrl`, `OMP_A2A_HUB_PUBLIC_URL`, or the actual port; writes `HubMeta` atomically with mode `0600`; and writes the PID file with mode `0600`.
+2. The CLI resolves option/environment/default values and passes explicit options to `startHubServer`; programmatic server calls never read deployment environment variables. Port `0` is valid.
+3. After binding, the server validates or derives the advertised URL, records a separate process-reachable `listenUrl` on its handle, writes `HubMeta` atomically with mode `0600`, and writes the PID file with mode `0600`. Wildcard binds require an explicit public URL.
 4. The CLI prints a one-line JSON startup record.
 5. `SIGINT` or `SIGTERM` calls the idempotent `handle.stop()`, then exits. An unresolved promise keeps the process alive between startup and a signal.
 
@@ -145,7 +145,7 @@ This separates non-destructive polling from explicit consumption while preservin
 - `../registry`: `createProject`, `deleteProject`, `getProject`, `joinProject`, `leaveProject`, `heartbeat`, `listProjects`, `listMembers`, and `readMember` provide project/member persistence and online-status validation. `RegistryConflictError` controls relevant HTTP `409` responses.
 - `../paths`: `a2aRoot` supplies client configuration lookup; `defaultDataDir`, `hubLockPath`, `inboxDatabasePath`, `hubMetaPath`, and `hubPidPath` define server storage; `ensureDir` prepares SQLite and metadata parent directories.
 - `../types`: the client exposes registry domain types `A2aProject` and `A2aMember`.
-- Bun runtime: `bun:sqlite` supplies `Database`, prepared queries, and transactions; global `fetch`, `crypto.randomUUID`, and `AbortSignal.timeout` are used by the client/server.
+- Bun runtime: `bun:sqlite` supplies `Database`, prepared queries, and transactions; global `fetch`, `crypto.randomUUID`, `AbortSignal.timeout`, and `AbortSignal.any` are used by the client/server.
 - Express: owns HTTP routing and JSON parsing; Node HTTP `Server` supplies listen/close lifecycle.
 - Node libraries: `fs`, `path`, and `os` handle configuration and lifecycle files; `zlib` handles gzip payloads.
 - Environment contract: `OMP_A2A_HUB_URL`, `OMP_A2A_HUB_PORT`, `OMP_A2A_HUB_HOST`, `OMP_A2A_HUB_DATA_DIR`, and `OMP_A2A_HUB_PUBLIC_URL`.

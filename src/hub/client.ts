@@ -16,6 +16,7 @@ import type {
 } from "./types";
 
 const DEFAULT_HUB_URL = "http://127.0.0.1:4173";
+export const DEFAULT_HUB_REQUEST_TIMEOUT_MS = 15_000;
 
 class HubHttpError extends Error {
 	constructor(
@@ -26,13 +27,53 @@ class HubHttpError extends Error {
 	}
 }
 
-async function fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
-	const response = await fetch(url, init);
-	const body = (await response.json().catch(() => ({}))) as T & { error?: string };
-	if (!response.ok) {
-		throw new HubHttpError(response.status, body.error ? String(body.error) : `HTTP ${response.status} ${url}`);
+function composeRequestSignal(caller: AbortSignal | null | undefined, timeout: AbortSignal) {
+	const controller = new AbortController();
+	const sources = caller ? [caller, timeout] : [timeout];
+	const listeners: Array<{ signal: AbortSignal; listener: () => void }> = [];
+	for (const source of sources) {
+		if (source.aborted) {
+			controller.abort(source.reason);
+			break;
+		}
+		const listener = () => controller.abort(source.reason);
+		source.addEventListener("abort", listener, { once: true });
+		listeners.push({ signal: source, listener });
 	}
-	return body;
+	return {
+		signal: controller.signal,
+		cleanup() {
+			for (const entry of listeners) {
+				entry.signal.removeEventListener("abort", entry.listener);
+			}
+		},
+	};
+}
+
+async function fetchJson<T>(
+	url: string,
+	init: RequestInit | undefined,
+	requestTimeoutMs: number,
+): Promise<T> {
+	const timeoutSignal = AbortSignal.timeout(Math.ceil(requestTimeoutMs));
+	const composed = composeRequestSignal(init?.signal, timeoutSignal);
+	try {
+		const response = await fetch(url, { ...init, signal: composed.signal });
+		let body: T & { error?: string };
+		try {
+			body = (await response.json()) as T & { error?: string };
+		} catch (error) {
+			if (composed.signal.aborted) throw composed.signal.reason ?? error;
+			if (response.ok) throw new Error(`Hub returned invalid JSON for ${url}`);
+			body = {} as T & { error?: string };
+		}
+		if (!response.ok) {
+			throw new HubHttpError(response.status, body.error ? String(body.error) : `HTTP ${response.status} ${url}`);
+		}
+		return body;
+	} finally {
+		composed.cleanup();
+	}
 }
 
 function stripTrailingSlash(url: string): string {
@@ -74,9 +115,11 @@ export function resolveHubUrl(opts?: { hubUrl?: string; home?: string }): string
 
 export async function probeHub(baseUrl: string): Promise<HubMeta | null> {
 	try {
-		return await fetchJson<HubMeta>(`${stripTrailingSlash(baseUrl)}/v1/meta`, {
-			signal: AbortSignal.timeout(1_500),
-		});
+		return await fetchJson<HubMeta>(
+			`${stripTrailingSlash(baseUrl)}/v1/meta`,
+			undefined,
+			1_500,
+		);
 	} catch {
 		return null;
 	}
@@ -96,9 +139,15 @@ export async function connectHub(opts?: { hubUrl?: string; home?: string }): Pro
 export class HubClient {
 	#baseUrl: string;
 	#leases = new Map<string, string>();
+	#requestTimeoutMs: number;
 
-	constructor(baseUrl: string) {
+	constructor(baseUrl: string, options: { requestTimeoutMs?: number } = {}) {
 		this.#baseUrl = stripTrailingSlash(baseUrl);
+		const requestTimeoutMs = options.requestTimeoutMs ?? DEFAULT_HUB_REQUEST_TIMEOUT_MS;
+		if (!Number.isFinite(requestTimeoutMs) || requestTimeoutMs <= 0) {
+			throw new RangeError("requestTimeoutMs must be a positive finite number");
+		}
+		this.#requestTimeoutMs = requestTimeoutMs;
 	}
 
 	static async connect(opts?: { hubUrl?: string; home?: string }): Promise<HubClient> {
@@ -110,8 +159,12 @@ export class HubClient {
 		return this.#baseUrl;
 	}
 
+	#fetchJson<T>(url: string, init?: RequestInit): Promise<T> {
+		return fetchJson<T>(url, init, this.#requestTimeoutMs);
+	}
+
 	async meta(): Promise<HubMeta> {
-		return await fetchJson<HubMeta>(`${this.#baseUrl}/v1/meta`);
+		return await this.#fetchJson<HubMeta>(`${this.#baseUrl}/v1/meta`);
 	}
 
 	async createProject(body: {
@@ -120,7 +173,7 @@ export class HubClient {
 		description?: string;
 		createdByCwd?: string;
 	}): Promise<A2aProject> {
-		const response = await fetchJson<{ project: A2aProject }>(`${this.#baseUrl}/v1/projects`, {
+		const response = await this.#fetchJson<{ project: A2aProject }>(`${this.#baseUrl}/v1/projects`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify(body),
@@ -129,7 +182,7 @@ export class HubClient {
 	}
 
 	async deleteProject(name: string): Promise<boolean> {
-		const response = await fetchJson<{ ok: true; deleted: boolean }>(
+		const response = await this.#fetchJson<{ ok: true; deleted: boolean }>(
 			`${this.#baseUrl}/v1/projects/${encodeURIComponent(name)}`,
 			{ method: "DELETE" },
 		);
@@ -137,31 +190,35 @@ export class HubClient {
 	}
 
 	async listProjects(): Promise<A2aProject[]> {
-		const response = await fetchJson<{ projects: A2aProject[] }>(`${this.#baseUrl}/v1/projects`);
+		const response = await this.#fetchJson<{ projects: A2aProject[] }>(`${this.#baseUrl}/v1/projects`);
 		return response.projects;
 	}
 
 	async register(body: HubRegisterBody): Promise<MemberRegistration & { hub: HubMeta }> {
-		const registration = await fetchJson<MemberRegistration & { hub: HubMeta }>(`${this.#baseUrl}/v1/register`, {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify(body),
-		});
+		const registration = await this.#fetchJson<MemberRegistration & { hub: HubMeta }>(
+			`${this.#baseUrl}/v1/register`,
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(body),
+			},
+		);
 		this.#leases.set(`${body.project}\0${body.agentId}`, registration.leaseId);
 		return registration;
 	}
 
-	async heartbeat(project: string, agentId: string, leaseId: string): Promise<A2aMember> {
-		const response = await fetchJson<{ member: A2aMember }>(`${this.#baseUrl}/v1/heartbeat`, {
+	async heartbeat(project: string, agentId: string, leaseId: string, signal?: AbortSignal): Promise<A2aMember> {
+		const response = await this.#fetchJson<{ member: A2aMember }>(`${this.#baseUrl}/v1/heartbeat`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({ project, agentId, leaseId }),
+			signal,
 		});
 		return response.member;
 	}
 
 	async unregister(project: string, agentId: string, leaseId: string): Promise<void> {
-		await fetchJson<{ ok: true }>(`${this.#baseUrl}/v1/unregister`, {
+		await this.#fetchJson<{ ok: true }>(`${this.#baseUrl}/v1/unregister`, {
 			method: "POST",
 			headers: { "content-type": "application/json" },
 			body: JSON.stringify({ project, agentId, leaseId }),
@@ -171,31 +228,34 @@ export class HubClient {
 	async listMembers(project: string, all = false): Promise<A2aMember[]> {
 		const query = new URLSearchParams({ project });
 		if (all) query.set("all", "1");
-		const response = await fetchJson<{ members: A2aMember[] }>(`${this.#baseUrl}/v1/members?${query}`);
+		const response = await this.#fetchJson<{ members: A2aMember[] }>(`${this.#baseUrl}/v1/members?${query}`);
 		return response.members;
 	}
 
 	async send(input: HubSendInput): Promise<HubEnvelope> {
-		const response = await fetchJson<{ ok: true; message: HubWireEnvelope }>(`${this.#baseUrl}/v1/send`, {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({
-				project: input.project,
-				from: input.from,
-				to: input.to,
-				messageId: input.messageId ?? crypto.randomUUID(),
-				replyTo: input.replyTo,
-				replyToRef: input.replyToRef,
-				payload: encodeTextPayload(input.text),
-			}),
-		});
+		const response = await this.#fetchJson<{ ok: true; message: HubWireEnvelope }>(
+			`${this.#baseUrl}/v1/send`,
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					project: input.project,
+					from: input.from,
+					to: input.to,
+					messageId: input.messageId ?? crypto.randomUUID(),
+					replyTo: input.replyTo,
+					replyToRef: input.replyToRef,
+					payload: encodeTextPayload(input.text),
+				}),
+			},
+		);
 		return decodeWireEnvelope(response.message);
 	}
 
 	async inbox(project: string, agentId: string, limit = 500, leaseId?: string): Promise<HubEnvelope[]> {
 		const query = new URLSearchParams({ project, agentId, limit: String(limit) });
 		const ownership = leaseId ?? this.#leases.get(`${project}\0${agentId}`);
-		const response = await fetchJson<{ messages: HubWireEnvelope[] }>(`${this.#baseUrl}/v1/inbox?${query}`, {
+		const response = await this.#fetchJson<{ messages: HubWireEnvelope[] }>(`${this.#baseUrl}/v1/inbox?${query}`, {
 			headers: ownership ? { "x-a2a-lease": ownership } : undefined,
 		});
 		return response.messages.map(decodeWireEnvelope);
@@ -210,7 +270,7 @@ export class HubClient {
 	): Promise<HubInboxBatch> {
 		const ownership = leaseId ?? this.#leases.get(`${project}\0${agentId}`);
 		try {
-			const response = await fetchJson<HubWireInboxBatch>(`${this.#baseUrl}/v1/inbox/read`, {
+			const response = await this.#fetchJson<HubWireInboxBatch>(`${this.#baseUrl}/v1/inbox/read`, {
 				method: "POST",
 				headers: { "content-type": "application/json" },
 				body: JSON.stringify({ project, agentId, limit, leaseId: ownership }),
@@ -223,7 +283,7 @@ export class HubClient {
 		} catch (error) {
 			if (!(error instanceof HubHttpError) || error.status !== 404) throw error;
 			const query = new URLSearchParams({ project, agentId, limit: String(limit) });
-			const response = await fetchJson<{ messages: HubWireEnvelope[]; cursor?: number }>(
+			const response = await this.#fetchJson<{ messages: HubWireEnvelope[]; cursor?: number }>(
 				`${this.#baseUrl}/v1/inbox?${query}`,
 				{
 					headers: ownership ? { "x-a2a-lease": ownership } : undefined,
@@ -245,12 +305,15 @@ export class HubClient {
 		signal?: AbortSignal,
 	): Promise<HubAckBatch | null> {
 		const ownership = leaseId ?? this.#leases.get(`${project}\0${agentId}`);
-		const response = await fetchJson<Partial<HubAckBatch> & { ok: true }>(`${this.#baseUrl}/v1/inbox/ack`, {
-			method: "POST",
-			headers: { "content-type": "application/json" },
-			body: JSON.stringify({ project, agentId, messageIds, leaseId: ownership }),
-			signal,
-		});
+		const response = await this.#fetchJson<Partial<HubAckBatch> & { ok: true }>(
+			`${this.#baseUrl}/v1/inbox/ack`,
+			{
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({ project, agentId, messageIds, leaseId: ownership }),
+				signal,
+			},
+		);
 		if (!Array.isArray(response.acknowledgments) || !Number.isSafeInteger(response.cursor)) return null;
 		return { acknowledgments: response.acknowledgments, cursor: response.cursor! };
 	}

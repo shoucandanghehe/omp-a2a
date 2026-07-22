@@ -41,7 +41,6 @@ Do not expose the Hub to the public Internet or an untrusted network.
 ## Current operational constraints
 
 - **Custom protocol:** this repository implements a private Mesh protocol, not the standard A2A protocol. Do not assume interoperability with standard A2A clients or servers.
-- **Stalled requests:** the initial Hub probe has a timeout, but ordinary Hub requests currently do not. A Hub that accepts connections without completing responses can stall Inbox polling and accumulate heartbeat requests; restart the Hub and affected OMP session if this occurs.
 - **Configuration fallback:** malformed global JSON configuration is ignored and URL resolution continues to the default. Prefer a repository-local config for explicit routing, and validate global configuration before relying on it.
 
 These are current implementation boundaries, not delivery guarantees. The most important deployment boundary remains the trusted-network requirement above.
@@ -62,7 +61,7 @@ Restart `omp` after linking.
 ```bash
 cd ~/code/omp-a2a
 
-# optional: copy .env.example → .env and edit the published port/URL
+# optional: copy .env.example → .env and edit the published port
 docker compose up -d --build
 
 curl -s http://127.0.0.1:4173/healthz
@@ -84,14 +83,12 @@ ports:
 Each Compose project receives its own named volume. Use different Compose project names and published ports to run independent Hubs:
 
 ```bash
-OMP_A2A_HUB_PORT=4173 \
-OMP_A2A_HUB_PUBLIC_URL=http://127.0.0.1:4173 \
-docker compose -p mesh-a up -d --build
+OMP_A2A_HUB_PORT=4173 docker compose -p mesh-a up -d --build
 
-OMP_A2A_HUB_PORT=4174 \
-OMP_A2A_HUB_PUBLIC_URL=http://127.0.0.1:4174 \
-docker compose -p mesh-b up -d --build
+OMP_A2A_HUB_PORT=4174 docker compose -p mesh-b up -d --build
 ```
+
+Compose derives the default advertised loopback URL from `OMP_A2A_HUB_PORT`. Set `OMP_A2A_HUB_PUBLIC_URL` only when clients use a different hostname, scheme, or reverse-proxy path.
 
 ### Local process
 
@@ -106,6 +103,10 @@ bun run hub -- \
   --public-url http://127.0.0.1:4174 \
   --data-dir /absolute/path/to/mesh-b
 ```
+
+Programmatic `startHubServer` calls use only explicit options and return `listenUrl` for in-process clients, so Bun-loaded deployment environment variables cannot redirect tests or embedded servers. The CLI owns environment-variable resolution. A wildcard `--host` requires an explicit `--public-url`; concrete bind hosts derive a reachable advertised URL automatically.
+
+Hub probes time out after 1.5 seconds. Ordinary client requests default to a 15-second deadline, accept caller cancellation, and background heartbeat requests are single-flight.
 
 Equivalent environment variables:
 
@@ -173,7 +174,7 @@ Project deletion is idempotent and rejected until every member is offline. Befor
 bun run smoke
 ```
 
-This runs the Bun tests, Registry smoke, and a real Hub/HubClient smoke covering lease fencing, abortable extension lifecycle transitions, per-stream monotonic FIFO ordering, byte-bounded Inbox pages, acknowledgment batch limits, friendly message references, concurrent writes and duplicate reads, idempotent message IDs, causal replies, acknowledgment-driven persistent cursors, pre-ack failure and post-ack restart behavior, durable delivery receipts, legacy Inbox migration, gzip payloads, recoverable Project deletion, and startup resource cleanup.
+This runs the Bun tests, Registry smoke, and a real Hub/HubClient smoke covering lease fencing, abortable extension lifecycle transitions, request deadlines, single-flight heartbeat, deployment-environment isolation, advertised/listener URL separation, per-stream monotonic FIFO ordering, byte-bounded Inbox pages, acknowledgment batch limits, friendly message references, concurrent writes and duplicate reads, idempotent message IDs, causal replies, acknowledgment-driven persistent cursors, pre-ack failure and post-ack restart behavior, durable delivery receipts, legacy Inbox migration, gzip payloads, recoverable Project deletion, and startup resource cleanup.
 
 The verification command does not run a standalone TypeScript type check, a linter, or a Docker image/network smoke. Those remain separate release checks, and extension lifecycle behavior currently has substantially less automated coverage than the Hub persistence path.
 

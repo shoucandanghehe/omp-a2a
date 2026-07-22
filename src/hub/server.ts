@@ -1,6 +1,7 @@
 import express from "express";
 import * as fs from "node:fs";
 import type { Server } from "node:http";
+import { isIP } from "node:net";
 import * as path from "node:path";
 import {
 	assertProjectDeletable,
@@ -54,6 +55,7 @@ class RecipientUnavailableError extends Error {}
 
 export type HubServerHandle = {
 	meta: HubMeta;
+	listenUrl: string;
 	stop: () => Promise<void>;
 };
 
@@ -172,11 +174,56 @@ async function closeListeningServer(server: Server): Promise<void> {
 }
 
 function requestedPort(value: number | undefined): number {
-	const configured = value ?? (process.env.OMP_A2A_HUB_PORT ? Number(process.env.OMP_A2A_HUB_PORT) : DEFAULT_PORT);
+	const configured = value ?? DEFAULT_PORT;
 	if (!Number.isInteger(configured) || configured < 0 || configured > 65_535) {
 		throw new Error(`invalid Hub port: ${configured}`);
 	}
 	return configured;
+}
+
+function canonicalHost(host: string): string {
+	const unwrapped = host.startsWith("[") && host.endsWith("]") ? host.slice(1, -1) : host;
+	if (isIP(unwrapped) !== 6) return unwrapped.toLowerCase();
+	const hostname = new URL(`http://[${unwrapped}]`).hostname;
+	return hostname.slice(1, -1);
+}
+
+function formatUrlHost(host: string): string {
+	const canonical = canonicalHost(host);
+	return isIP(canonical) === 6 ? `[${canonical}]` : canonical;
+}
+
+function isWildcardHost(host: string): boolean {
+	const canonical = canonicalHost(host);
+	return canonical === "0.0.0.0" || canonical === "::";
+}
+
+function normalizePublicUrl(value: string): string {
+	const normalized = value.trim().replace(/\/+$/, "");
+	if (!normalized) throw new Error("Hub public URL cannot be empty");
+	let parsed: URL;
+	try {
+		parsed = new URL(normalized);
+	} catch {
+		throw new Error(`invalid Hub public URL: ${value}`);
+	}
+	if (
+		(parsed.protocol !== "http:" && parsed.protocol !== "https:") ||
+		!parsed.hostname ||
+		isWildcardHost(parsed.hostname)
+	) {
+		throw new Error(`invalid Hub public URL: ${value}`);
+	}
+	if (parsed.username || parsed.password || parsed.search || parsed.hash || /[?#]/.test(normalized)) {
+		throw new Error(`Hub public URL must not contain credentials, query, or fragment: ${value}`);
+	}
+	return parsed.toString().replace(/\/+$/, "");
+}
+
+function listenerUrl(host: string, port: number): string {
+	const canonical = canonicalHost(host);
+	const reachableHost = canonical === "0.0.0.0" ? "127.0.0.1" : canonical === "::" ? "::1" : canonical;
+	return `http://${formatUrlHost(reachableHost)}:${port}`;
 }
 
 export async function startHubServer(opts?: {
@@ -186,8 +233,12 @@ export async function startHubServer(opts?: {
 	dataDir?: string;
 }): Promise<HubServerHandle> {
 	const port = requestedPort(opts?.port);
-	const host = (opts?.host ?? process.env.OMP_A2A_HUB_HOST ?? "127.0.0.1").trim() || "127.0.0.1";
-	const dataDir = path.resolve(opts?.dataDir ?? process.env.OMP_A2A_HUB_DATA_DIR ?? defaultDataDir());
+	const host = (opts?.host ?? "127.0.0.1").trim() || "127.0.0.1";
+	const configuredPublicUrl = opts?.publicUrl;
+	if (isWildcardHost(host) && configuredPublicUrl === undefined) {
+		throw new Error("Hub public URL is required when binding a wildcard host");
+	}
+	const dataDir = path.resolve(opts?.dataDir ?? defaultDataDir());
 	const dataLock = new HubDataLock(hubLockPath(dataDir), dataDir);
 	let inboxes: InboxStore;
 	try {
@@ -205,6 +256,7 @@ export async function startHubServer(opts?: {
 	const app = express();
 	app.use(express.json({ limit: "6mb" }));
 	let meta: HubMeta;
+	let listenUrl: string;
 	const blockedProjectCreations = new Set<string>();
 
 	app.get("/healthz", (_request, response) => response.json({ ok: true, service: "omp-a2a-hub", ...meta }));
@@ -432,9 +484,11 @@ export async function startHubServer(opts?: {
 			throw new Error("Hub did not expose a TCP address");
 		}
 		const actualPort = address.port;
-		const baseUrl = (opts?.publicUrl ?? process.env.OMP_A2A_HUB_PUBLIC_URL ?? `http://127.0.0.1:${actualPort}`)
-			.trim()
-			.replace(/\/+$/, "");
+		listenUrl = listenerUrl(host, actualPort);
+		const baseUrl =
+			configuredPublicUrl === undefined
+				? normalizePublicUrl(`http://${formatUrlHost(host)}:${actualPort}`)
+				: normalizePublicUrl(configuredPublicUrl);
 		meta = { pid: process.pid, port: actualPort, baseUrl, dataDir, startedAt: Date.now() };
 		writeJsonAtomic(hubMetaPath(dataDir), meta);
 		fs.writeFileSync(hubPidPath(dataDir), `${process.pid}\n`, { mode: 0o600 });
@@ -452,6 +506,7 @@ export async function startHubServer(opts?: {
 	let stopped = false;
 	return {
 		meta,
+		listenUrl,
 		stop: async () => {
 			if (stopped) return;
 			stopped = true;

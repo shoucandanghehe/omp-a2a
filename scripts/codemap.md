@@ -73,7 +73,7 @@ At module load, `smoke-hub.ts` creates two independent temporary data directorie
 - `HubClient` from `../src/hub/client` for all Hub-facing operations.
 - `startHubServer` and `HubServerHandle` from `../src/hub/server` for live server lifecycle management.
 
-The module invokes asynchronous `main()`. Every started handle is appended to `handles`, including the first server, the independent second server, and the later restarted server. Passing `port: 0` asks each server to bind an available port; clients use the resulting `handle.meta.baseUrl`.
+The module invokes asynchronous `main()`. Every started handle is appended to `handles`, including the first server, the independent second server, and the later restarted server. Passing `port: 0` asks each server to bind an available port; clients use the resulting process-reachable `handle.listenUrl`, never the advertised deployment URL.
 
 ### Invocation and control flow
 

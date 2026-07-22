@@ -19,7 +19,7 @@ afterEach(async () => {
 test("same-stream messages follow server acceptance order when timestamps collide", async () => {
 	dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-ordering-"));
 	hub = await startHubServer({ port: 0, dataDir });
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "ordering" });
 	await client.register({ project: "ordering", agentId: "receiver", cwd: "/receiver", pid: 1 });
 
@@ -47,7 +47,7 @@ test("same-stream messages follow server acceptance order when timestamps collid
 test("sequence is monotonic within each project recipient stream", async () => {
 	dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-ordering-"));
 	hub = await startHubServer({ port: 0, dataDir });
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "stream-a" });
 	await client.createProject({ name: "stream-b" });
 	await client.register({ project: "stream-a", agentId: "receiver", cwd: "/receiver", pid: 1 });
@@ -65,7 +65,7 @@ test("sequence is monotonic within each project recipient stream", async () => {
 test("messageId makes retries idempotent even after delivery", async () => {
 	dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-ordering-"));
 	hub = await startHubServer({ port: 0, dataDir });
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "dedup" });
 	const registration = await client.register({ project: "dedup", agentId: "receiver", cwd: "/receiver", pid: 1 });
 	const input = {
@@ -85,7 +85,7 @@ test("messageId makes retries idempotent even after delivery", async () => {
 	await client.unregister("dedup", "receiver", registration.leaseId);
 	await hub.stop();
 	hub = await startHubServer({ port: 0, dataDir });
-	const restarted = new HubClient(hub.meta.baseUrl);
+	const restarted = new HubClient(hub.listenUrl);
 	expect(await restarted.send(input)).toEqual(first);
 	await expect(restarted.inbox("dedup", "receiver", 500, registration.leaseId)).rejects.toThrow("member is offline");
 	await expect(restarted.send({ ...input, text: "different work" })).rejects.toThrow("messageId already used");
@@ -94,7 +94,7 @@ test("messageId makes retries idempotent even after delivery", async () => {
 test("cursor advances only after ordered acknowledgment", async () => {
 	dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-ordering-"));
 	hub = await startHubServer({ port: 0, dataDir });
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "cursor" });
 	await client.register({ project: "cursor", agentId: "receiver", cwd: "/receiver", pid: 1 });
 	const first = await client.send({ project: "cursor", from: "sender", to: "receiver", text: "first" });
@@ -120,7 +120,7 @@ test("cursor advances only after ordered acknowledgment", async () => {
 test("acknowledgment state is ordered, idempotent, and observable", async () => {
 	dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-ordering-"));
 	hub = await startHubServer({ port: 0, dataDir });
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "ack-state" });
 	await client.register({ project: "ack-state", agentId: "receiver", cwd: "/receiver", pid: 1 });
 	const first = await client.send({ project: "ack-state", from: "sender", to: "receiver", text: "first" });
@@ -148,7 +148,7 @@ test("acknowledgment state is ordered, idempotent, and observable", async () => 
 test("replyTo preserves and validates the causal parent", async () => {
 	dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-ordering-"));
 	hub = await startHubServer({ port: 0, dataDir });
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "causal" });
 	await client.register({ project: "causal", agentId: "controller", cwd: "/controller", pid: 1 });
 	await client.register({ project: "causal", agentId: "worker", cwd: "/worker", pid: 2 });
@@ -207,7 +207,7 @@ test("replyTo preserves and validates the causal parent", async () => {
 test("friendly message references resolve causal parents", async () => {
 	dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-ordering-"));
 	hub = await startHubServer({ port: 0, dataDir });
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "friendly-ref" });
 	await client.register({ project: "friendly-ref", agentId: "controller", cwd: "/controller", pid: 1 });
 	await client.register({ project: "friendly-ref", agentId: "worker", cwd: "/worker", pid: 2 });
@@ -288,7 +288,7 @@ test("friendly message references resolve causal parents", async () => {
 test("concurrent sends are returned in authoritative server sequence", async () => {
 	dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-ordering-"));
 	hub = await startHubServer({ port: 0, dataDir });
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "concurrent" });
 	await client.register({ project: "concurrent", agentId: "receiver", cwd: "/receiver", pid: 1 });
 
@@ -313,7 +313,7 @@ test("concurrent sends are returned in authoritative server sequence", async () 
 test("a delayed stale reply remains distinguishable by its causal parent", async () => {
 	dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-ordering-"));
 	hub = await startHubServer({ port: 0, dataDir });
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "delayed-reply" });
 	await client.register({ project: "delayed-reply", agentId: "controller", cwd: "/controller", pid: 1 });
 	await client.register({ project: "delayed-reply", agentId: "worker", cwd: "/worker", pid: 2 });
@@ -360,7 +360,7 @@ test("a delayed stale reply remains distinguishable by its causal parent", async
 test("concurrent reads expose at-least-once duplicates until acknowledgment", async () => {
 	dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-ordering-"));
 	hub = await startHubServer({ port: 0, dataDir });
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "consume-concurrent" });
 	await client.register({ project: "consume-concurrent", agentId: "receiver", cwd: "/receiver", pid: 1 });
 	await Promise.all(
@@ -393,7 +393,7 @@ test("concurrent reads expose at-least-once duplicates until acknowledgment", as
 test("acknowledged cursor survives Hub reconnect", async () => {
 	dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-ordering-"));
 	hub = await startHubServer({ port: 0, dataDir });
-	const firstClient = new HubClient(hub.meta.baseUrl);
+	const firstClient = new HubClient(hub.listenUrl);
 	await firstClient.createProject({ name: "reconnect" });
 	const registration = await firstClient.register({
 		project: "reconnect",
@@ -420,7 +420,7 @@ test("acknowledged cursor survives Hub reconnect", async () => {
 	await hub.stop();
 
 	hub = await startHubServer({ port: 0, dataDir });
-	const reconnected = new HubClient(hub.meta.baseUrl);
+	const reconnected = new HubClient(hub.listenUrl);
 	const remaining = await reconnected.readInbox("reconnect", "receiver", 500, registration.leaseId);
 	expect(remaining.messages.map((message) => message.msgId)).toEqual([second.msgId]);
 	expect(remaining.cursor).toBe(first.serverSequence);
@@ -429,7 +429,7 @@ test("acknowledged cursor survives Hub reconnect", async () => {
 test("failed delivery remains pending after Agent restart", async () => {
 	dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-ordering-"));
 	hub = await startHubServer({ port: 0, dataDir });
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	const firstAgent = new A2aOperations({ getClient: async () => client, pid: 1 });
 	await firstAgent.execute({ action: "project_create", project: "agent-restart" }, { cwd: "/receiver" });
 	await firstAgent.execute(
@@ -463,7 +463,7 @@ test("failed delivery remains pending after Agent restart", async () => {
 test("successful delivery is retried when acknowledgment fails before restart", async () => {
 	dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-ordering-"));
 	hub = await startHubServer({ port: 0, dataDir });
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	const firstAgent = new A2aOperations({ getClient: async () => client, pid: 1 });
 	await firstAgent.execute({ action: "project_create", project: "ack-crash" }, { cwd: "/receiver" });
 	await firstAgent.execute(

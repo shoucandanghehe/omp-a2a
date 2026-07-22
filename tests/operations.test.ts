@@ -19,7 +19,7 @@ afterEach(async () => {
 test("A2aOperations creates and lists projects through the connected Hub", async () => {
 	root = mkdtempSync(join(tmpdir(), "omp-a2a-operations-"));
 	hub = await startHubServer({ port: 0, dataDir: root });
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	const operations = new A2aOperations({ getClient: async () => client, pid: 123 });
 
 	await operations.execute({ action: "project_create", project: "shared" }, { cwd: "/repo" });
@@ -32,7 +32,7 @@ test("A2aOperations creates and lists projects through the connected Hub", async
 test("A2aOperations deletes an inactive project through the connected Hub", async () => {
 	root = mkdtempSync(join(tmpdir(), "omp-a2a-operations-"));
 	hub = await startHubServer({ port: 0, dataDir: root });
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	const operations = new A2aOperations({ getClient: async () => client, pid: 123 });
 	await operations.execute({ action: "project_create", project: "retired" }, { cwd: "/repo" });
 
@@ -45,7 +45,7 @@ test("A2aOperations deletes an inactive project through the connected Hub", asyn
 test("leave uses the Hub that accepted the membership", async () => {
 	root = mkdtempSync(join(tmpdir(), "omp-a2a-operations-"));
 	hub = await startHubServer({ port: 0, dataDir: root });
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	let selectedClientAvailable = true;
 	const operations = new A2aOperations({
 		getClient: async () => {
@@ -71,7 +71,7 @@ test("leave uses the Hub that accepted the membership", async () => {
 test("leave reports pending cleanup when the bound Hub is unavailable", async () => {
 	root = mkdtempSync(join(tmpdir(), "omp-a2a-operations-"));
 	hub = await startHubServer({ port: 0, dataDir: root });
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	const operations = new A2aOperations({ getClient: async () => client, pid: 123 });
 	await operations.execute({ action: "project_create", project: "leave" }, { cwd: "/repo" });
 	await operations.execute(
@@ -91,7 +91,7 @@ test("leave reports pending cleanup when the bound Hub is unavailable", async ()
 test("failed delivery remains pending until a successful delivery is acknowledged", async () => {
 	root = mkdtempSync(join(tmpdir(), "omp-a2a-operations-"));
 	hub = await startHubServer({ port: 0, dataDir: root });
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	const operations = new A2aOperations({ getClient: async () => client, pid: 123 });
 	await operations.execute({ action: "project_create", project: "delivery" }, { cwd: "/repo" });
 	await operations.execute(
@@ -118,7 +118,7 @@ test("failed delivery remains pending until a successful delivery is acknowledge
 test("aborting delivery before acknowledgment leaves the message pending", async () => {
 	root = mkdtempSync(join(tmpdir(), "omp-a2a-operations-"));
 	hub = await startHubServer({ port: 0, dataDir: root });
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	const operations = new A2aOperations({ getClient: async () => client, pid: 123 });
 	await operations.execute({ action: "project_create", project: "abort-delivery" }, { cwd: "/repo" });
 	await operations.execute(
@@ -196,7 +196,7 @@ test("aborting a stalled Inbox read terminates receive promptly", async () => {
 test("send uses the joined membership as the claimed sender", async () => {
 	root = mkdtempSync(join(tmpdir(), "omp-a2a-operations-"));
 	hub = await startHubServer({ port: 0, dataDir: root });
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	const operations = new A2aOperations({ getClient: async () => client, pid: 123 });
 	await operations.execute({ action: "project_create", project: "send" }, { cwd: "/repo" });
 	await client.register({ project: "send", agentId: "worker", cwd: "/worker", pid: 456 });
@@ -223,7 +223,7 @@ test("send uses the joined membership as the claimed sender", async () => {
 test("read-only operations report the connected Hub and joined membership", async () => {
 	root = mkdtempSync(join(tmpdir(), "omp-a2a-operations-"));
 	hub = await startHubServer({ port: 0, dataDir: root });
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	const operations = new A2aOperations({ getClient: async () => client, pid: 123 });
 	await operations.execute({ action: "project_create", project: "status" }, { cwd: "/repo" });
 	await operations.execute({ action: "join", project: "status", agentId: "controller" }, { cwd: "/repo" });
@@ -232,7 +232,7 @@ test("read-only operations report the connected Hub and joined membership", asyn
 	const status = await operations.execute({ action: "status" }, { cwd: "/repo" });
 	const members = await operations.execute({ action: "list" }, { cwd: "/repo" });
 
-	expect(hubResult.text).toContain(hub.meta.baseUrl);
+	expect(hubResult.text).toContain(hub.listenUrl);
 	expect(status.text).toContain("controller");
 	expect(members.text).toContain("controller");
 });
@@ -242,8 +242,8 @@ test("membership operations stay bound when the selected Hub changes", async () 
 	const otherRoot = mkdtempSync(join(tmpdir(), "omp-a2a-operations-other-"));
 	hub = await startHubServer({ port: 0, dataDir: root });
 	const otherHub = await startHubServer({ port: 0, dataDir: otherRoot });
-	const firstClient = new HubClient(hub.meta.baseUrl);
-	const otherClient = new HubClient(otherHub.meta.baseUrl);
+	const firstClient = new HubClient(hub.listenUrl);
+	const otherClient = new HubClient(otherHub.listenUrl);
 	let selectedClient = firstClient;
 	const operations = new A2aOperations({ getClient: async () => selectedClient, pid: 123 });
 	try {
@@ -268,7 +268,7 @@ test("membership operations stay bound when the selected Hub changes", async () 
 test("a failed membership switch keeps the previous membership", async () => {
 	root = mkdtempSync(join(tmpdir(), "omp-a2a-operations-"));
 	hub = await startHubServer({ port: 0, dataDir: root });
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	const operations = new A2aOperations({ getClient: async () => client, pid: 123 });
 	await client.createProject({ name: "stable" });
 	await operations.execute({ action: "join", project: "stable", agentId: "worker" }, { cwd: "/repo" });
@@ -284,7 +284,7 @@ test("a failed membership switch keeps the previous membership", async () => {
 test("manual inbox displays and acknowledges messages", async () => {
 	root = mkdtempSync(join(tmpdir(), "omp-a2a-operations-"));
 	hub = await startHubServer({ port: 0, dataDir: root });
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	const operations = new A2aOperations({ getClient: async () => client, pid: 123 });
 	await operations.execute({ action: "project_create", project: "inbox" }, { cwd: "/repo" });
 	await operations.execute({ action: "join", project: "inbox", agentId: "worker" }, { cwd: "/repo" });
@@ -299,7 +299,7 @@ test("manual inbox displays and acknowledges messages", async () => {
 test("manual inbox identifies and acknowledges delivery receipts", async () => {
 	root = mkdtempSync(join(tmpdir(), "omp-a2a-operations-"));
 	hub = await startHubServer({ port: 0, dataDir: root });
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	const operations = new A2aOperations({ getClient: async () => client, pid: 123 });
 	await operations.execute({ action: "project_create", project: "receipts" }, { cwd: "/repo" });
 	await client.register({ project: "receipts", agentId: "worker", cwd: "/worker", pid: 456 });
@@ -313,4 +313,98 @@ test("manual inbox identifies and acknowledges delivery receipts", async () => {
 	expect(result.text).toContain("Inbox cursor=");
 	expect(result.text).toContain(`msg=${message.msgId} to=worker`);
 	expect(await client.inbox("receipts", "controller")).toEqual([]);
+});
+
+test("HubClient times out an ordinary stalled request", async () => {
+	// Native AbortSignal.timeout is the behavior under test; a fake clock cannot drive this fetch signal.
+	const originalFetch = globalThis.fetch;
+	let requestCount = 0;
+	globalThis.fetch = ((_input: RequestInfo | URL, init?: RequestInit) => {
+		requestCount += 1;
+		return new Promise<Response>((_resolve, reject) => {
+			const signal = init?.signal;
+			if (!signal) throw new Error("request signal was not provided");
+			if (signal.aborted) {
+				reject(signal.reason);
+				return;
+			}
+			signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+		});
+	}) as typeof fetch;
+
+	try {
+		const client = new HubClient("http://hub.invalid", { requestTimeoutMs: 1 });
+		await expect(client.meta()).rejects.toMatchObject({ name: "TimeoutError" });
+		expect(requestCount).toBe(1);
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
+
+test("HubClient preserves caller cancellation ahead of its request timeout", async () => {
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = ((_input: RequestInfo | URL, init?: RequestInit) => {
+		return new Promise<Response>((_resolve, reject) => {
+			const signal = init?.signal;
+			if (!signal) throw new Error("request signal was not provided");
+			if (signal.aborted) {
+				reject(signal.reason);
+				return;
+			}
+			signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+		});
+	}) as typeof fetch;
+
+	try {
+		const client = new HubClient("http://hub.invalid", { requestTimeoutMs: 1_000 });
+		const controller = new AbortController();
+		const reason = new Error("caller stopped request");
+		const request = client.heartbeat("project", "agent", "lease", controller.signal);
+		controller.abort(reason);
+		await expect(request).rejects.toBe(reason);
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
+
+test("HubClient propagates cancellation during response body parsing", async () => {
+	const originalFetch = globalThis.fetch;
+	let bodyStartedResolve: (() => void) | undefined;
+	const bodyStarted = new Promise<void>((resolve) => {
+		bodyStartedResolve = resolve;
+	});
+	globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
+		return {
+			ok: true,
+			status: 200,
+			json() {
+				bodyStartedResolve?.();
+				return new Promise<never>((_resolve, reject) => {
+					const signal = init?.signal;
+					if (!signal) throw new Error("request signal was not provided");
+					signal.addEventListener("abort", () => reject(signal.reason), { once: true });
+				});
+			},
+		} as Response;
+	}) as typeof fetch;
+
+	try {
+		const client = new HubClient("http://hub.invalid", { requestTimeoutMs: 1_000 });
+		const controller = new AbortController();
+		const reason = new Error("caller stopped body");
+		const request = client.heartbeat("project", "agent", "lease", controller.signal);
+		await bodyStarted;
+		controller.abort(reason);
+		await expect(request).rejects.toBe(reason);
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
+
+test("HubClient rejects invalid request timeouts", () => {
+	for (const requestTimeoutMs of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
+		expect(() => new HubClient("http://hub.invalid", { requestTimeoutMs })).toThrow(
+			"requestTimeoutMs must be a positive finite number",
+		);
+	}
 });

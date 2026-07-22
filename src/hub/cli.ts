@@ -34,12 +34,22 @@ for (let index = 0; index < args.length; index++) {
 	}
 }
 
-const handle = await startHubServer({ port, host, publicUrl, dataDir });
+const environmentPort = process.env.OMP_A2A_HUB_PORT?.trim();
+const configuredPort = port ?? (environmentPort ? Number(environmentPort) : undefined);
+const configuredHost = host ?? process.env.OMP_A2A_HUB_HOST;
+const configuredPublicUrl = publicUrl ?? process.env.OMP_A2A_HUB_PUBLIC_URL;
+const configuredDataDir = dataDir ?? process.env.OMP_A2A_HUB_DATA_DIR;
+const handle = await startHubServer({
+	port: configuredPort,
+	host: configuredHost,
+	publicUrl: configuredPublicUrl,
+	dataDir: configuredDataDir,
+});
 console.log(
 	JSON.stringify({
 		ok: true,
 		service: "omp-a2a-hub",
-		host: host ?? process.env.OMP_A2A_HUB_HOST ?? "127.0.0.1",
+		host: configuredHost?.trim() || "127.0.0.1",
 		...handle.meta,
 	}),
 );

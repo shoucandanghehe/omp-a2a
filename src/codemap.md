@@ -32,7 +32,7 @@ The transport, HTTP server, inbox, and wire-envelope implementation live under `
 - **Session-scoped client cache:** `ensureClient` lazily connects a `HubClient` and replaces it when the selected base URL changes.
 - **Hub-bound membership state:** `A2aOperations.#membership` retains the accepting `HubClient`, its base URL, and the opaque lease token. Public membership details expose only project, agent, and Hub URL.
 - **Fenced presence:** stored members receive a fresh lease at registration. Heartbeat, unregister, Inbox read, and acknowledgment require the current lease; stale/offline takeover invalidates the predecessor.
-- **Abortable polling consumer:** the extension keeps one active Inbox request, aborts and awaits it before membership transitions, injects each message, and acknowledges only while the polling generation remains active.
+- **Abortable background work:** the extension keeps at most one Inbox request and one heartbeat in flight. Both share a background abort signal and settle before membership transitions; delivery acknowledges only while the generation remains active.
 - **File-backed registry:** projects have metadata files and members have one JSON file each. Stored member records include the private lease, while member listings strip it. `writeJsonAtomic` writes a process/UUID-specific temporary file, renames it into place, and best-effort applies mode `0600`.
 
 ## Entry Points and Extension Lifecycle
@@ -60,9 +60,9 @@ The transport, HTTP server, inbox, and wire-envelope implementation live under `
 
 ### Active-session background flow
 
-- Every `HEARTBEAT_MS` (5 seconds), `A2aOperations.heartbeat` renews the bound membership with its lease. Failures are logged.
+- Every `HEARTBEAT_MS` (5 seconds), the extension starts `A2aOperations.heartbeat` only when no prior heartbeat is active. It passes the shared abort signal and logs non-cancellation failures.
 - Every second, the Inbox timer starts a poll only when no prior poll is active.
-- `receive` calls `HubClient.readInbox` with the lease and abort signal, invokes the delivery callback in order, rechecks cancellation, then acknowledges with the same lease.
+- `receive` calls `HubClient.readInbox` with the lease and abort signal, invokes the delivery callback in order, rechecks cancellation, then acknowledges with the same lease. Ordinary Hub requests have a 15-second default deadline.
 - A `delivery_receipt` becomes an informational UI notification.
 - A message envelope goes through `injectEnvelope` to `pi.sendMessage` as custom type `a2a-inbound`, with `triggerTurn: true`. Delivery is `"followUp"` while the agent is idle and `"steer"` otherwise.
 
@@ -74,7 +74,7 @@ The transport, HTTP server, inbox, and wire-envelope implementation live under `
 
 ### Leave and shutdown
 
-- Explicit join or leave clears future timers, aborts the active Inbox request, and waits for it to settle before changing membership.
+- Explicit join or leave clears future timers, aborts active Inbox and heartbeat requests, and waits for both to settle before changing membership.
 - Leave clears local membership and calls `unregister` through the bound Hub client and lease. If cleanup fails, it returns `cleanupPending: true` and relies on lease expiry.
 - A failed join restores background work for the retained membership. `session_shutdown` stops background work and executes leave.
 

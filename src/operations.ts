@@ -311,13 +311,14 @@ export class A2aOperations {
 		}
 	}
 
-	async heartbeat(): Promise<A2aMember | null> {
+	async heartbeat(signal?: AbortSignal): Promise<A2aMember | null> {
 		const membership = this.#membership;
 		if (!membership) return null;
 		return await membership.client.heartbeat(
 			membership.project,
 			membership.agentId,
 			membership.leaseId,
+			signal,
 		);
 	}
 

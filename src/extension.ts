@@ -141,6 +141,7 @@ export default function a2aExtension(pi: ExtensionAPI) {
 	let inboxTimer: unknown = null;
 	let clearTimer: ((handle: unknown) => void) | null = null;
 	let activePoll: Promise<void> | null = null;
+	let activeHeartbeat: Promise<void> | null = null;
 	let backgroundAbort: AbortController | null = null;
 
 	const refreshHubUrl = (cwd: string) => {
@@ -162,11 +163,14 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		if (clearTimer && inboxTimer != null) clearTimer(inboxTimer);
 		heartbeatTimer = null;
 		inboxTimer = null;
-		backgroundAbort?.abort(new Error("A2A background work stopped"));
+		const controller = backgroundAbort;
+		controller?.abort(new Error("A2A background work stopped"));
 		const poll = activePoll;
-		if (poll) await poll.catch(() => undefined);
+		const heartbeat = activeHeartbeat;
+		await Promise.all([poll?.catch(() => undefined), heartbeat?.catch(() => undefined)]);
 		if (activePoll === poll) activePoll = null;
-		backgroundAbort = null;
+		if (activeHeartbeat === heartbeat) activeHeartbeat = null;
+		if (backgroundAbort === controller) backgroundAbort = null;
 	};
 
 	const injectEnvelope = (message: HubMessageEnvelope, deliverAs: "steer" | "followUp") => {
@@ -187,9 +191,21 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		const controller = new AbortController();
 		backgroundAbort = controller;
 		heartbeatTimer = context.setInterval(() => {
-			void operations.heartbeat().catch((error) => {
-				pi.logger?.warn?.(`a2a heartbeat failed: ${error instanceof Error ? error.message : String(error)}`);
-			});
+			if (activeHeartbeat) return;
+			const heartbeat = operations
+				.heartbeat(controller.signal)
+				.then(() => undefined)
+				.catch((error) => {
+					if (!controller.signal.aborted) {
+						pi.logger?.warn?.(
+							`a2a heartbeat failed: ${error instanceof Error ? error.message : String(error)}`,
+						);
+					}
+				})
+				.finally(() => {
+					if (activeHeartbeat === heartbeat) activeHeartbeat = null;
+				});
+			activeHeartbeat = heartbeat;
 		}, HEARTBEAT_MS);
 		inboxTimer = context.setInterval(() => {
 			if (activePoll) return;
