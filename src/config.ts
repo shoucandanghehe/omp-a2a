@@ -33,7 +33,7 @@ export function parseSimpleYaml(text: string): Record<string, unknown> {
 		const listItem = line.match(/^\s*-\s+(.+)$/);
 		if (listItem) {
 			if (!listKey) throw new Error("list item has no preceding key");
-			list.push(parseYamlString(listItem[1].trim()));
+			list.push(parseYamlString(listItem[1]!.trim()));
 			continue;
 		}
 

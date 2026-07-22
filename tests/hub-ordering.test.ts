@@ -24,7 +24,7 @@ test("same-stream messages follow server acceptance order when timestamps collid
 	await client.register({ project: "ordering", agentId: "receiver", cwd: "/receiver", pid: 1 });
 
 	const now = spyOn(Date, "now").mockReturnValue(1_000);
-	const messageIds = [
+	const messageIds: Array<ReturnType<typeof crypto.randomUUID>> = [
 		"ffffffff-ffff-4fff-8fff-ffffffffffff",
 		"00000000-0000-4000-8000-000000000000",
 		"88888888-8888-4888-8888-888888888888",
@@ -456,7 +456,11 @@ test("failed delivery remains pending after Agent restart", async () => {
 		{ cwd: "/receiver", sessionId: "second" },
 	);
 	const repeated: string[] = [];
-	expect(await restartedAgent.receive((envelope) => repeated.push(envelope.msgId))).toBe(1);
+	expect(
+		await restartedAgent.receive((envelope) => {
+			repeated.push(envelope.msgId);
+		}),
+	).toBe(1);
 	expect(repeated).toEqual([message.msgId]);
 });
 
@@ -479,9 +483,11 @@ test("successful delivery is retried when acknowledgment fails before restart", 
 	});
 	const ack = spyOn(client, "ack").mockRejectedValueOnce(new Error("process stopped before ack"));
 	const delivered: string[] = [];
-	await expect(firstAgent.receive((envelope) => delivered.push(envelope.msgId))).rejects.toThrow(
-		"process stopped before ack",
-	);
+	await expect(
+		firstAgent.receive((envelope) => {
+			delivered.push(envelope.msgId);
+		}),
+	).rejects.toThrow("process stopped before ack");
 	expect(delivered).toEqual([message.msgId]);
 	ack.mockRestore();
 	await firstAgent.execute({ action: "leave" }, { cwd: "/receiver" });
@@ -492,7 +498,11 @@ test("successful delivery is retried when acknowledgment fails before restart", 
 		{ cwd: "/receiver", sessionId: "second" },
 	);
 	const retried: string[] = [];
-	expect(await restartedAgent.receive((envelope) => retried.push(envelope.msgId))).toBe(1);
+	expect(
+		await restartedAgent.receive((envelope) => {
+			retried.push(envelope.msgId);
+		}),
+	).toBe(1);
 	expect(retried).toEqual([message.msgId]);
 });
 

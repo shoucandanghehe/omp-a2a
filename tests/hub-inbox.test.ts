@@ -121,6 +121,8 @@ test("ack creates a durable delivery receipt without receipt loops", async () =>
 	const restarted = new HubClient(second.listenUrl);
 	const receipts = await restarted.inbox("receipts", "controller", 500, controller.leaseId);
 	expect(receipts).toHaveLength(1);
+	const receipt = receipts[0];
+	if (receipt?.kind !== "delivery_receipt") throw new Error("expected a delivery receipt");
 	expect(receipts[0]).toMatchObject({
 		kind: "delivery_receipt",
 		project: "receipts",
@@ -128,7 +130,7 @@ test("ack creates a durable delivery receipt without receipt loops", async () =>
 		to: "controller",
 		receiptFor: sent.msgId,
 	});
-	expect(Number.isFinite(receipts[0]?.deliveredAt)).toBe(true);
+	expect(Number.isFinite(receipt.deliveredAt)).toBe(true);
 
 	await restarted.ack("receipts", "controller", [receipts[0]!.msgId], controller.leaseId);
 	expect(await restarted.inbox("receipts", "controller", 500, controller.leaseId)).toEqual([]);

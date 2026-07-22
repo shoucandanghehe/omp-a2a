@@ -149,6 +149,104 @@ test("the model-facing tool contract forbids polling for replies", () => {
 	expect(description).toContain("Never wait, sleep, or poll inbox for a reply after send");
 });
 
+test("session lifecycle auto-joins and shuts down membership and timers", async () => {
+	const testRoot = mkdtempSync(join(tmpdir(), "omp-a2a-extension-lifecycle-"));
+	const testHub = await startHubServer({ port: 0, dataDir: join(testRoot, "hub-data") });
+	try {
+		const client = new HubClient(testHub.listenUrl);
+		await client.createProject({ name: "auto-join" });
+		mkdirSync(join(testRoot, ".omp"), { recursive: true });
+		writeFileSync(
+			join(testRoot, ".omp", "a2a.json"),
+			JSON.stringify({
+				hubUrl: testHub.listenUrl,
+				project: "auto-join",
+				agentId: "lifecycle-worker",
+				autoJoin: true,
+			}),
+		);
+		const { sessionHandlers } = extensionHarness();
+		const context = timerContext(testRoot);
+		const sessionStart = sessionHandlers.get("session_start");
+		const sessionShutdown = sessionHandlers.get("session_shutdown");
+		if (!sessionStart || !sessionShutdown) throw new Error("session lifecycle handlers were not registered");
+
+		await sessionStart({}, context);
+
+		expect((await client.listMembers("auto-join")).map(({ agentId }) => agentId)).toEqual(["lifecycle-worker"]);
+		expect([...context.timers.values()].map(({ milliseconds }) => milliseconds).sort()).toEqual([1_000, 5_000]);
+
+		await sessionShutdown();
+
+		expect(context.timers.size).toBe(0);
+		expect(await client.listMembers("auto-join")).toEqual([]);
+		expect((await client.listMembers("auto-join", true)).map(({ agentId, status }) => ({ agentId, status }))).toEqual([
+			{ agentId: "lifecycle-worker", status: "offline" },
+		]);
+	} finally {
+		try {
+			await testHub.stop();
+		} finally {
+			rmSync(testRoot, { recursive: true, force: true });
+		}
+	}
+});
+
+test("explicit join moves membership to a newly configured Hub without duplicating timers", async () => {
+	const testRoot = mkdtempSync(join(tmpdir(), "omp-a2a-extension-hub-move-"));
+	const hubA = await startHubServer({ port: 0, dataDir: join(testRoot, "hub-a-data") });
+	let hubB: HubServerHandle | null = null;
+	try {
+		hubB = await startHubServer({ port: 0, dataDir: join(testRoot, "hub-b-data") });
+		const clientA = new HubClient(hubA.listenUrl);
+		const clientB = new HubClient(hubB.listenUrl);
+		await clientA.createProject({ name: "project-a" });
+		await clientB.createProject({ name: "project-b" });
+		mkdirSync(join(testRoot, ".omp"), { recursive: true });
+		writeFileSync(
+			join(testRoot, ".omp", "a2a.json"),
+			JSON.stringify({
+				hubUrl: hubA.listenUrl,
+				project: "project-a",
+				agentId: "worker-a",
+				autoJoin: false,
+			}),
+		);
+		const { commandHandler } = extensionHarness();
+		const context = timerContext(testRoot);
+
+		await commandHandler("join project-a --as worker-a", context);
+		expect((await clientA.listMembers("project-a")).map(({ agentId }) => agentId)).toEqual(["worker-a"]);
+
+		writeFileSync(
+			join(testRoot, ".omp", "a2a.json"),
+			JSON.stringify({
+				hubUrl: hubB.listenUrl,
+				project: "project-b",
+				agentId: "worker-b",
+				autoJoin: false,
+			}),
+		);
+		await commandHandler("join project-b --as worker-b", context);
+
+		expect(await clientA.listMembers("project-a")).toEqual([]);
+		expect((await clientB.listMembers("project-b")).map(({ agentId }) => agentId)).toEqual(["worker-b"]);
+		expect([...context.timers.values()].map(({ milliseconds }) => milliseconds).sort()).toEqual([1_000, 5_000]);
+
+		await commandHandler("leave", context);
+	} finally {
+		try {
+			await hubB?.stop();
+		} finally {
+			try {
+				await hubA.stop();
+			} finally {
+				rmSync(testRoot, { recursive: true, force: true });
+			}
+		}
+	}
+});
+
 test("a failed join restores heartbeat and Inbox polling", async () => {
 	root = mkdtempSync(join(tmpdir(), "omp-a2a-extension-"));
 	hub = await startHubServer({ port: 0, dataDir: join(root, "hub") });

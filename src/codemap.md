@@ -50,13 +50,13 @@ The transport, HTTP server, inbox, and wire-envelope implementation live under `
 ### Session start and automatic join
 
 1. `session_start` records `context.cwd`.
-2. `refreshHubUrl` calls `loadLocalConfig(cwd)` and takes its optional `hubUrl`.
+2. `refreshHubUrl` loads local configuration once and takes its optional `hubUrl`; parse failures become an error notification and end the hook cleanly.
 3. `ensureClient` resolves the target with `resolveHubUrl`, reuses a matching `HubClient`, or calls `HubClient.connect`.
 4. Hub connection failure produces a warning but does not abort the hook.
-5. The config is loaded again. Missing config or `autoJoin === false` ends auto-join.
+5. Missing config or `autoJoin === false` ends auto-join.
 6. Otherwise `run({ action: "join", ... }, context)` calls `A2aOperations.execute`.
 7. Join calls `HubClient.register` (or `heartbeat` for the same identity), stores membership, and calls `listMembers`.
-8. `membershipChanged: "joined"` causes `startBackground` to install heartbeat and inbox timers.
+8. `membershipChanged: "joined"` causes `startBackground` to install exactly one heartbeat and one Inbox timer.
 
 ### Active-session background flow
 
@@ -68,8 +68,8 @@ The transport, HTTP server, inbox, and wire-envelope implementation live under `
 
 ### Interactive command and tool flow
 
-- `/a2a` input passes through `parseArgs` and `commandRequest`, then through `run` to `A2aOperations.execute`. Results are shown through `context.ui.notify`; parsing and operation errors become error notifications.
-- The registered `a2a` tool validates a structured Zod object, builds the same `A2aOperationRequest`, and uses the same `run` function. It returns result text and details, or an `isError` tool result.
+- Non-send `/a2a` input passes through `parseArgs`; `send` uses `parseSendRequest` so unknown flag-like tokens remain text and bare `--` ends recognized-option parsing. `commandRequest` then calls `run` and `A2aOperations.execute`. Results are shown through `context.ui.notify`; configuration, parsing, and operation errors become error notifications.
+- The registered `a2a` tool validates a structured Zod object, builds the same `A2aOperationRequest`, and uses the same `run` function. It returns result text and details, while configuration or operation failures become an `isError` tool result.
 - Supported operations are `project_create`, `project_delete`, `project_list`, `join`, `leave`, `list`, `status`, `send`, `inbox`, and `hub`. The command also accepts `help`; its parser maps the same operational set from command syntax.
 
 ### Leave and shutdown

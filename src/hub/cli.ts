@@ -1,3 +1,4 @@
+#!/usr/bin/env bun
 import { startHubServer } from "./server";
 
 const args = process.argv.slice(2);

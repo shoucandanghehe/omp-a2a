@@ -78,13 +78,15 @@ The first existing global config candidate is authoritative: read, parse, schema
 
 | Asset | Responsibility |
 | --- | --- |
-| `package.json` | Bun package metadata, OMP extension registration, Hub executable, and smoke command. |
-| `bun.lock` | Locked dependency graph. |
+| `package.json` | Bun package metadata, OMP extension registration, executable Hub bin, and `typecheck`/`lint`/`smoke`/`check` scripts. |
+| `bun.lock` | Locked production and static-check dependency graph. |
+| `tsconfig.json` | Strict no-emit TypeScript contract covering source, smoke scripts, and tests against Bun and the installed OMP API. |
 | `README.md` | Architecture, trust model, installation, operation, configuration, usage, and verification contract. |
 | `config.example.yml` | Minimal global Hub URL configuration example. |
 | `.env.example` | Docker Compose environment example. |
 | `Dockerfile` | Standalone Hub production image. |
 | `docker-compose.yml` | Single-Hub service, port publication, health check, restart policy, and named persistent volume. |
+| `.github/workflows/ci.yml` | Pinned-Bun CI with frozen dependency install and the complete `bun run check` contract. |
 
 ## Repository Directory Map
 
@@ -95,12 +97,13 @@ The first existing global config candidate is authoritative: read, parse, schema
 | `scripts/` | Assertion-driven direct-registry and live-Hub smoke scenarios. | [View map](scripts/codemap.md) |
 | `tests/` | Bun behavior tests for control-plane isolation, inbox durability, ordering, idempotency, causality, delivery semantics, operations, and the extension tool contract. | No generated codemap; tests are excluded from codemap state. |
 | `docs/` | Historical review material and remediation traceability. | No generated codemap; documentation is excluded from codemap state. |
+| `.github/` | Continuous integration workflow. | No generated codemap; workflow configuration is mapped in the root asset table. |
 
 ## Verification
 
-`bun run smoke` runs the Bun test suite followed by both executable smoke scenarios. The suite covers Hub/data-directory isolation, lease ownership and stale-owner fencing, Hub-bound membership, active-poll cancellation, failed-join timer recovery, request deadlines, malformed successful responses, single-flight heartbeat, deployment-environment isolation, advertised/listener URL separation, fail-closed configuration, quote-aware YAML, Slash message parsing, blank data-directory rejection, registration and identity validation, bounded shutdown, online identity conflicts, durable Inbox restart, byte/count-bounded pages, acknowledgment batch limits, receipt ID reservation, gzip boundaries, batched schema migration, stream ordering, idempotent message IDs, causal references, explicit acknowledgments, cursor durability, at-least-once redelivery, delivery receipts, storage-error mapping, recoverable project deletion, startup cleanup, and the shared operations layer.
+`bun run check` runs strict TypeScript no-emit checking, Oxlint, the complete Bun test suite, and both executable smoke scenarios. The 99-test suite covers Hub/data-directory isolation, lease ownership and stale-owner fencing, Hub-bound membership, successful and failed Extension lifecycle transitions, active-request cancellation, configured Hub changes, request deadlines, malformed successful responses, single-flight heartbeat, deployment-environment isolation, advertised/listener URL separation, fail-closed configuration, quote-aware YAML, Slash message parsing, blank data-directory rejection, registration and identity validation, bounded shutdown, online identity conflicts, durable Inbox restart, byte/count-bounded pages, acknowledgment batch limits, receipt ID reservation, gzip boundaries, batched schema migration, stream ordering, idempotent message IDs, causal references, explicit acknowledgments, cursor durability, at-least-once redelivery, delivery receipts, storage-error mapping, recoverable project deletion, startup cleanup, and the shared operations layer.
 
-This command does not perform a standalone TypeScript type check, linting, or a real Docker image/network smoke. Automated coverage remains concentrated in Hub persistence and ordering; real container/network behavior is not covered end to end.
+CI installs the locked dependency graph under Bun 1.3.14 and runs the same `bun run check` command. Docker image and real container/network behavior remain separate release checks.
 
 ## Operational Boundary
 

@@ -135,7 +135,7 @@ This separates non-destructive polling from explicit consumption while preservin
 
 ### CLI and server lifecycle
 
-1. `cli.ts` parses `--port`, `--host`, `--public-url`/`--publicUrl`, and `--data-dir` in split or `--key=value` forms; unknown or incomplete arguments throw.
+1. Executable `cli.ts` starts with `#!/usr/bin/env bun`, is exposed as package bin `omp-a2a-hub`, and parses `--port`, `--host`, `--public-url`/`--publicUrl`, and `--data-dir` in split or `--key=value` forms; unknown or incomplete arguments throw.
 2. The CLI resolves option/environment/default values and passes explicit options to `startHubServer`; programmatic server calls never read deployment environment variables. Port `0` is valid, while an explicitly blank data directory is rejected before locking or filesystem creation.
 3. After binding, the server validates or derives the advertised URL, records a separate process-reachable `listenUrl` on its handle, writes `HubMeta` atomically with mode `0600`, and writes the PID file with mode `0600`. Wildcard binds require an explicit public URL.
 4. The CLI prints a one-line JSON startup record.
@@ -162,4 +162,4 @@ This separates non-destructive polling from explicit consumption while preservin
 | `payload.ts` | `TEXT_COMPRESSION_THRESHOLD_BYTES`, `MAX_TEXT_BYTES`, `PayloadTooLargeError`, `encodeTextPayload`, `decodeTextPayload`, and `decodeWireEnvelope`; bounded text codec and wire-to-domain conversion. |
 | `server.ts` | `HubServerHandle`, `writeJsonAtomic`, `requestedPort`, `RecipientUnavailableError`, and `startHubServer`; Express routes, resource lifecycle, registry/store orchestration, status mapping, and metadata publication. |
 | `types.ts` | Hub metadata, encoded payload, wire/domain envelope unions, inbox/ack batches, and register/send request types; shared protocol contract. |
-| `cli.ts` | Top-level argument parser, `startHubServer` invocation, startup JSON output, signal-driven shutdown, and process keepalive. |
+| `cli.ts` | Executable Bun/package-bin entry, top-level argument parser, `startHubServer` invocation, startup JSON output, signal-driven shutdown, and process keepalive. |

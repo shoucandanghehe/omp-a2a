@@ -110,7 +110,11 @@ test("failed delivery remains pending until a successful delivery is acknowledge
 	expect(await client.inbox("delivery", "controller")).toEqual([]);
 
 	const repeated: string[] = [];
-	expect(await operations.receive((message) => repeated.push(message.text))).toBe(1);
+	expect(
+		await operations.receive((message) => {
+			repeated.push(message.text);
+		}),
+	).toBe(1);
 	expect(repeated).toEqual(["work"]);
 	expect(await client.inbox("delivery", "controller")).toHaveLength(1);
 });
@@ -373,20 +377,22 @@ test("HubClient propagates cancellation during response body parsing", async () 
 	const bodyStarted = new Promise<void>((resolve) => {
 		bodyStartedResolve = resolve;
 	});
-	globalThis.fetch = (async (_input: RequestInfo | URL, init?: RequestInit) => {
-		return {
-			ok: true,
-			status: 200,
-			json() {
+	const mockedFetch = Object.assign(
+		async (_input: RequestInfo | URL, init?: RequestInit): Promise<Response> => {
+			const response = new Response(null, { status: 200 });
+			response.json = () => {
 				bodyStartedResolve?.();
 				return new Promise<never>((_resolve, reject) => {
 					const signal = init?.signal;
 					if (!signal) throw new Error("request signal was not provided");
 					signal.addEventListener("abort", () => reject(signal.reason), { once: true });
 				});
-			},
-		} as Response;
-	}) as typeof fetch;
+			};
+			return response;
+		},
+		{ preconnect: originalFetch.preconnect },
+	);
+	globalThis.fetch = mockedFetch;
 
 	try {
 		const client = new HubClient("http://hub.invalid", { requestTimeoutMs: 1_000 });
@@ -403,7 +409,10 @@ test("HubClient propagates cancellation during response body parsing", async () 
 
 test("HubClient rejects malformed JSON from successful responses", async () => {
 	const originalFetch = globalThis.fetch;
-	globalThis.fetch = (async () => new Response("not-json", { status: 200 })) as typeof fetch;
+	globalThis.fetch = Object.assign(
+		async (): Promise<Response> => new Response("not-json", { status: 200 }),
+		{ preconnect: originalFetch.preconnect },
+	);
 
 	try {
 		const client = new HubClient("http://hub.invalid");

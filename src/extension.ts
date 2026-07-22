@@ -1,16 +1,11 @@
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { loadLocalConfig } from "./config";
 import { HubClient, resolveHubUrl } from "./hub/client";
 import type { HubEnvelope, HubMessageEnvelope } from "./hub/types";
 import { A2aOperations, ASYNC_REPLY_GUIDANCE, type A2aOperationRequest } from "./operations";
 import { AGENT_ID_RE, HEARTBEAT_MS, PROJECT_NAME_RE } from "./types";
 
-type TimerContext = {
-	setInterval: (fn: () => void, ms: number) => unknown;
-	clearTimer: (handle: unknown) => void;
-	isIdle: () => boolean;
-	ui: { notify: (message: string, type?: "info" | "warning" | "error") => void };
-};
+type TimerContext = Pick<ExtensionContext, "setInterval" | "clearTimer" | "isIdle" | "ui">;
 
 function parseArgs(raw: string): { positional: string[]; flags: Record<string, string | boolean> } {
 	const tokens = raw.trim().length === 0 ? [] : raw.trim().split(/\s+/);
@@ -175,9 +170,9 @@ export default function a2aExtension(pi: ExtensionAPI) {
 	let hub: HubClient | null = null;
 	let configuredHubUrl: string | undefined;
 	let sessionCwd = process.cwd();
-	let heartbeatTimer: unknown = null;
-	let inboxTimer: unknown = null;
-	let clearTimer: ((handle: unknown) => void) | null = null;
+	let heartbeatTimer: ReturnType<ExtensionContext["setInterval"]> | null = null;
+	let inboxTimer: ReturnType<ExtensionContext["setInterval"]> | null = null;
+	let clearTimer: ExtensionContext["clearTimer"] | null = null;
 	let activePoll: Promise<void> | null = null;
 	let activeHeartbeat: Promise<void> | null = null;
 	let backgroundAbort: AbortController | null = null;

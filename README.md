@@ -41,9 +41,8 @@ Do not expose the Hub to the public Internet or an untrusted network.
 ## Current operational constraints
 
 - **Custom protocol:** this repository implements a private Mesh protocol, not the standard A2A protocol. Do not assume interoperability with standard A2A clients or servers.
-- **Configuration fallback:** malformed global JSON configuration is ignored and URL resolution continues to the default. Prefer a repository-local config for explicit routing, and validate global configuration before relying on it.
 
-These are current implementation boundaries, not delivery guarantees. The most important deployment boundary remains the trusted-network requirement above.
+This is a current implementation boundary, not a delivery guarantee. The most important deployment boundary remains the trusted-network requirement above.
 
 ## Install
 
@@ -105,6 +104,8 @@ bun run hub -- \
 ```
 
 Programmatic `startHubServer` calls use only explicit options and return `listenUrl` for in-process clients, so Bun-loaded deployment environment variables cannot redirect tests or embedded servers. The CLI owns environment-variable resolution. Explicit blank or whitespace-only data directories are rejected before any lock or persistent file is created. A wildcard `--host` requires an explicit `--public-url`; concrete bind hosts derive a reachable advertised URL automatically.
+
+`src/hub/cli.ts` is an executable Bun script and is published as the `omp-a2a-hub` package bin when this package is installed or linked.
 
 Hub probes time out after 1.5 seconds. Ordinary client requests default to a 15-second deadline, accept caller cancellation, and background heartbeat requests are single-flight.
 
@@ -173,12 +174,12 @@ Project deletion is idempotent and rejected until every member is offline. Befor
 ## Verify
 
 ```bash
-bun run smoke
+bun run check
 ```
 
-This runs the Bun tests, Registry smoke, and a real Hub/HubClient smoke covering lease fencing, abortable extension lifecycle transitions, request deadlines, malformed successful responses, single-flight heartbeat, deployment-environment isolation, advertised/listener URL separation, fail-closed global/local configuration, quote-aware YAML values, Slash flag-like message text, blank data-directory rejection, validated registration and send identities, bounded shutdown, per-stream monotonic FIFO ordering, byte- and count-bounded Inbox pages, acknowledgment batch limits, receipt ID reservation, friendly message references, concurrent writes and duplicate reads, idempotent message IDs, causal replies, acknowledgment-driven persistent cursors, pre-ack failure and post-ack restart behavior, durable delivery receipts, batched legacy Inbox migration, gzip payload limits, storage-error status mapping, recoverable Project deletion, and startup resource cleanup.
+This runs strict TypeScript checking against the installed OMP extension API, Oxlint, the Bun test suite, Registry smoke, and a real Hub/HubClient smoke. The 99-test suite covers lease fencing, abortable Extension lifecycle transitions, Hub target changes, request deadlines, malformed successful responses, single-flight heartbeat, deployment-environment isolation, advertised/listener URL separation, fail-closed global/local configuration, quote-aware YAML values, Slash flag-like message text, blank data-directory rejection, validated registration and send identities, bounded shutdown, per-stream monotonic FIFO ordering, byte- and count-bounded Inbox pages, acknowledgment batch limits, receipt ID reservation, friendly message references, concurrent writes and duplicate reads, idempotent message IDs, causal replies, acknowledgment-driven persistent cursors, pre-ack failure and post-ack restart behavior, durable delivery receipts, batched legacy Inbox migration, gzip payload limits, storage-error status mapping, recoverable Project deletion, and startup resource cleanup.
 
-The verification command does not run a standalone TypeScript type check, a linter, or a Docker image/network smoke. Those remain separate release checks, and extension lifecycle behavior currently has substantially less automated coverage than the Hub persistence path.
+`bun run smoke` remains the runtime-only subset. Neither command builds a Docker image or exercises a real container/network boundary; keep that as a separate release check.
 
 ## Layout
 

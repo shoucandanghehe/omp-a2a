@@ -9,74 +9,36 @@
 
 ## Current-State Follow-up — 2026-07-23
 
-This section reviews the current working tree and is separate from the fixed `ad6d8aa206fe96282e5f22390a3831308eeba1c8` snapshot preserved below. The nine original findings remain useful remediation history and are not reopened by this follow-up.
+This section reviews the remediated current tree and is separate from the fixed `ad6d8aa206fe96282e5f22390a3831308eeba1c8` snapshot preserved below. The original nine findings remain historical evidence for the architecture changes and are not rewritten.
 
 ### Current verification
 
-The following commands were observed against the current tree:
+The following checks were observed against the remediated tree:
 
-- `bun run smoke`: 39 tests passed, followed by successful Registry and live Hub/HubClient smoke scenarios.
-- `bun test --coverage`: 77.23% line coverage and 69.04% function coverage overall. `src/hub/inbox.ts` reached 99.75% line coverage and `src/operations.ts` reached 95.09%; `src/extension.ts` reached 19.26%.
-- `docker compose config`: the Compose model is syntactically valid.
+- `bun run check`: strict `tsc --noEmit`, Oxlint, 99 passing Bun tests, Registry smoke, and live Hub/HubClient smoke.
+- Direct execution of `src/hub/cli.ts`: the shebang/package-bin target started a Hub, emitted startup metadata, served `/healthz`, and stopped cleanly.
+- Focused failure-path tests cover stale-owner fencing, Hub-bound membership and target changes, active request cancellation, failed joins, configuration corruption, Project deletion recovery, storage errors, bounded shutdown, and legacy Inbox migration.
+- `docker compose config`: the Compose model is syntactically valid and alternate published ports propagate to the advertised URL.
 
-The Docker image and a real container/network boundary were not started. The public verification command also does not run a standalone TypeScript type check or linter.
+The Docker image and a real container/network boundary were not started. That remains a separate release check.
 
-### Current findings
+### Remediation status
 
-| ID | Priority | Finding | Operational impact |
+| ID | Priority | Status | Current invariant |
 | --- | --- | --- | --- |
-| C-01 | P1 | Member leases are not fenced to the registering session. | After a stale identity is replaced, the old process can resume heartbeat or unregister calls and mutate the replacement lease. |
-| C-02 | P1 | Local membership is not bound to the selected Hub. | Changing `hubUrl` while joined can apply the old `{ project, agentId }` identity to another Hub without registration. |
-| C-03 | P1 | Project deletion is not crash-atomic across the Registry and Inbox stores. | A crash after filesystem deletion but before SQLite purge can leave old messages and ledger entries for a later Project with the same name. |
-| C-04 | P1 | Ordinary Hub requests have no timeout, and heartbeat calls are not single-flight. | A Hub that accepts connections without completing responses can permanently stall Inbox polling and accumulate heartbeat requests. |
-| C-05 | P2 | Malformed global JSON configuration falls through silently. | A configuration error can route the client to the default Hub instead of failing closed. |
-| C-06 | P2 | Slash-command parsing consumes flag-like message tokens. | `/a2a send web run --dry-run now` does not preserve the intended message body. |
-| C-07 | P3 | Static API checking and CI are absent from the repository contract. | Extension API drift and cross-module type errors are not rejected by `bun run smoke`. |
+| C-01 | P1 | Resolved | Registration issues an opaque lease; heartbeat, unregister, Inbox read, and acknowledgment require the current owner lease. |
+| C-02 | P1 | Resolved | Membership retains its accepting `HubClient`, URL, and lease; a configured target change requires a successful new registration before local state moves. |
+| C-03 | P1 | Resolved | Project deletion persists a durable marker and startup reconciliation completes Registry and Inbox cleanup before name reuse. |
+| C-04 | P1 | Resolved | Ordinary requests have a default deadline; heartbeat and Inbox work are single-flight, abortable, and awaited during transitions. |
+| C-05 | P2 | Resolved | The first existing global config candidate is authoritative and parse/schema failures are path-contextual errors. |
+| C-06 | P2 | Resolved | Slash `send` extracts only recognized options, preserves unknown flag-like text, and supports bare `--` as an option delimiter. |
+| C-07 | P3 | Resolved | Strict TypeScript and Oxlint scripts resolve the installed OMP API; pinned-Bun CI runs the frozen `bun run check` contract. |
 
-### Evidence and required direction
-
-#### C-01: fence membership leases
-
-- Registration stores `sessionId` in `A2aMember`.
-- `/v1/heartbeat` and `/v1/unregister` accept only `project` and `agentId`.
-- `registry.heartbeat` and `registry.leaveProject` rewrite whichever record currently owns that identity.
-
-The Hub should issue a lease generation or session token at registration and require it for heartbeat and unregister. Inbox consumption should be subject to the same ownership boundary.
-
-#### C-02: bind membership to Hub identity
-
-- `extension.ts` can replace its cached `HubClient` when `resolveHubUrl` changes.
-- `A2aOperations` retains only `{ project, agentId }`.
-- Heartbeat, status, send, and Inbox operations resolve the client again rather than using the client that accepted the join.
-
-Membership should retain the Hub identity or bound client. A target change should force leave/rejoin rather than silently moving local state.
-
-#### C-03: make deletion recoverable
-
-`DELETE /v1/projects/:name` calls the filesystem-backed `deleteProject` before `InboxStore.deleteProject`. These persistence owners cannot participate in one atomic transaction.
-
-Use a durable deletion tombstone and startup reconciliation, or move Project metadata under the same transactional owner as Inbox state. Until then, do not reuse a Project name after an interrupted deletion without inspecting or clearing the old data.
-
-#### C-04: bound request liveness
-
-Only `probeHub` supplies `AbortSignal.timeout`. The shared `fetchJson` path used by normal operations has no deadline, while the extension's heartbeat interval can start another request before an earlier request settles.
-
-Apply a default deadline to ordinary requests and make heartbeat single-flight or cancellable. Session shutdown should abort outstanding background requests.
-
-#### C-05 and C-06: fail explicitly at client boundaries
-
-- Once an existing global configuration candidate is selected, parse or schema errors should be returned instead of falling through to another Hub.
-- Slash parsing should preserve the raw `send` message tail while extracting only recognized options, or use a delimiter/quote-aware grammar. The structured `a2a` Tool already avoids this text-loss path.
-
-#### C-07: add reproducible static checks
-
-Add a TypeScript configuration and a `typecheck` script that resolves the OMP extension API contract, then run it in CI together with `bun run smoke`. Add targeted lifecycle scenarios for stale-owner replacement, Hub target changes, malformed configuration, stalled HTTP, and deletion recovery.
+Additional hardening now reserves delivery-receipt IDs, batches compatibility migration, validates HTTP request structures and limits, maps decompression/storage failures explicitly, reports corrupt Registry JSON, rejects blank data directories, bounds graceful shutdown, and separates advertised from process-reachable listener URLs.
 
 ### Current conclusion
 
-No P0 failure was found in the current happy path or persistence core. The FIFO, idempotency, causal-reference, acknowledgment, receipt, migration, restart, and isolation behaviors have strong automated coverage. C-01 through C-04 remain high-priority operational correctness risks and should be resolved before the corresponding boundaries are treated as production-safe.
-
-The unauthenticated API remains an intentional trusted-private-network design, not a finding. The default Compose port mapping publishes on all host interfaces, so deployment must enforce a loopback bind, firewall, VPN, or an equivalently trusted network boundary.
+No unresolved correctness finding from C-01 through C-07 remains in the reviewed implementation. The custom Mesh still intentionally trusts caller-provided project and sender claims; leases fence lifecycle and Inbox ownership but do not provide network authentication. Deployment must remain on a trusted private network, and the default Compose port publication still requires an explicit loopback bind, firewall, VPN, or equivalent boundary when broader host exposure is not intended.
 
 ## 后续处理
 
