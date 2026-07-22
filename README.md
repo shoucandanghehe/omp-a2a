@@ -37,6 +37,17 @@ omp-a2a is designed for a fully trusted private network. Hub endpoints intention
 Caller-supplied project and sender identity are trusted claims; membership is used to discover and route to recipients, not to authenticate or admit senders.
 Do not expose the Hub to the public Internet or an untrusted network.
 
+## Current operational constraints
+
+- **Custom protocol:** this repository implements a private Mesh protocol, not the standard A2A protocol. Do not assume interoperability with standard A2A clients or servers.
+- **Lease ownership:** registration stores `sessionId`, but heartbeat and unregister currently identify a lease only by `project` and `agentId`. Do not reuse an `agentId` while an older process with that identity can reconnect; the older process can still refresh or unregister the replacement lease.
+- **Hub changes while joined:** local membership retains only `project` and `agentId`; it is not pinned to the Hub URL that accepted the registration. Leave or restart the OMP session before changing `hubUrl`, then join the new Hub explicitly.
+- **Interrupted Project deletion:** Project metadata is removed from the filesystem Registry before its SQLite Inbox state is purged. After a crash or storage failure during deletion, verify or clear the old Project state before reusing the same Project name.
+- **Stalled requests:** the initial Hub probe has a timeout, but ordinary Hub requests currently do not. A Hub that accepts connections without completing responses can stall Inbox polling and accumulate heartbeat requests; restart the Hub and affected OMP session if this occurs.
+- **Configuration fallback:** malformed global JSON configuration is ignored and URL resolution continues to the default. Prefer a repository-local config for explicit routing, and validate global configuration before relying on it.
+
+These are current implementation boundaries, not delivery guarantees. The most important deployment boundary remains the trusted-network requirement above.
+
 ## Install
 
 ```bash
@@ -63,6 +74,13 @@ docker compose logs -f hub
 docker compose down
 # delete them
 docker compose down -v
+```
+
+The Compose port mapping publishes the Hub on all host interfaces by default. If only local OMP clients need access, bind the published port to loopback by changing the mapping to:
+
+```yaml
+ports:
+  - "127.0.0.1:${OMP_A2A_HUB_PORT:-4173}:4173"
 ```
 
 Each Compose project receives its own named volume. Use different Compose project names and published ports to run independent Hubs:
@@ -143,6 +161,8 @@ Inside OMP, after the selected Hub is running:
 
 The model-facing `a2a` Tool exposes the same operations through the same `A2aOperations` module.
 
+The Slash parser treats tokens beginning with `--` as command flags and does not implement shell-style quoting. For message text that must preserve flag-like tokens such as `--dry-run`, use the structured `a2a` Tool path rather than `/a2a send`.
+
 `send` reports `queued` with the friendly `messageRef`; the opaque `msgId` remains in output details for idempotency and diagnostics. Inbox and inbound output use friendly refs such as `web:42` and show `replyToRef` when present. The sender extension later displays `[a2a delivered]` with the original `msgId` after the receiving extension acknowledges it. This proves receipt by the peer OMP extension, not that its model read, understood, or completed the work; semantic completion still requires a normal reply.
 
 Replies arrive through the extension's background receiver and are injected into the session automatically. After `send`, Agents must not sleep or repeatedly call `inbox` to wait for a reply: continue independent work, or end the current turn if blocked so the reply can trigger a later turn. `inbox` is for one-off inspection or recovery only.
@@ -156,6 +176,8 @@ bun run smoke
 ```
 
 This runs the Bun tests, Registry smoke, and a real Hub/HubClient smoke covering per-stream monotonic FIFO ordering, friendly message references, concurrent writes and duplicate reads, idempotent message IDs, causal replies, acknowledgment-driven persistent cursors, pre-ack failure and post-ack restart behavior, durable delivery receipts, legacy Inbox migration, gzip payloads, and safe Project deletion.
+
+The verification command does not run a standalone TypeScript type check, a linter, or a Docker image/network smoke. Those remain separate release checks, and extension lifecycle behavior currently has substantially less automated coverage than the Hub persistence path.
 
 ## Layout
 
@@ -171,3 +193,5 @@ src/
   hub/cli.ts       # bun run hub
   extension.ts     # thin OMP adapters and background timers
 ```
+
+Detailed repository maps are available in [`codemap.md`](codemap.md), [`src/codemap.md`](src/codemap.md), [`src/hub/codemap.md`](src/hub/codemap.md), and [`scripts/codemap.md`](scripts/codemap.md).

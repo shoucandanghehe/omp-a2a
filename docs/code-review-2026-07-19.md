@@ -7,6 +7,77 @@
 
 本报告保留固定快照的历史审查事实；文中的源码和 README 行号均指向该快照。
 
+## Current-State Follow-up — 2026-07-23
+
+This section reviews the current working tree and is separate from the fixed `ad6d8aa206fe96282e5f22390a3831308eeba1c8` snapshot preserved below. The nine original findings remain useful remediation history and are not reopened by this follow-up.
+
+### Current verification
+
+The following commands were observed against the current tree:
+
+- `bun run smoke`: 39 tests passed, followed by successful Registry and live Hub/HubClient smoke scenarios.
+- `bun test --coverage`: 77.23% line coverage and 69.04% function coverage overall. `src/hub/inbox.ts` reached 99.75% line coverage and `src/operations.ts` reached 95.09%; `src/extension.ts` reached 19.26%.
+- `docker compose config`: the Compose model is syntactically valid.
+
+The Docker image and a real container/network boundary were not started. The public verification command also does not run a standalone TypeScript type check or linter.
+
+### Current findings
+
+| ID | Priority | Finding | Operational impact |
+| --- | --- | --- | --- |
+| C-01 | P1 | Member leases are not fenced to the registering session. | After a stale identity is replaced, the old process can resume heartbeat or unregister calls and mutate the replacement lease. |
+| C-02 | P1 | Local membership is not bound to the selected Hub. | Changing `hubUrl` while joined can apply the old `{ project, agentId }` identity to another Hub without registration. |
+| C-03 | P1 | Project deletion is not crash-atomic across the Registry and Inbox stores. | A crash after filesystem deletion but before SQLite purge can leave old messages and ledger entries for a later Project with the same name. |
+| C-04 | P1 | Ordinary Hub requests have no timeout, and heartbeat calls are not single-flight. | A Hub that accepts connections without completing responses can permanently stall Inbox polling and accumulate heartbeat requests. |
+| C-05 | P2 | Malformed global JSON configuration falls through silently. | A configuration error can route the client to the default Hub instead of failing closed. |
+| C-06 | P2 | Slash-command parsing consumes flag-like message tokens. | `/a2a send web run --dry-run now` does not preserve the intended message body. |
+| C-07 | P3 | Static API checking and CI are absent from the repository contract. | Extension API drift and cross-module type errors are not rejected by `bun run smoke`. |
+
+### Evidence and required direction
+
+#### C-01: fence membership leases
+
+- Registration stores `sessionId` in `A2aMember`.
+- `/v1/heartbeat` and `/v1/unregister` accept only `project` and `agentId`.
+- `registry.heartbeat` and `registry.leaveProject` rewrite whichever record currently owns that identity.
+
+The Hub should issue a lease generation or session token at registration and require it for heartbeat and unregister. Inbox consumption should be subject to the same ownership boundary.
+
+#### C-02: bind membership to Hub identity
+
+- `extension.ts` can replace its cached `HubClient` when `resolveHubUrl` changes.
+- `A2aOperations` retains only `{ project, agentId }`.
+- Heartbeat, status, send, and Inbox operations resolve the client again rather than using the client that accepted the join.
+
+Membership should retain the Hub identity or bound client. A target change should force leave/rejoin rather than silently moving local state.
+
+#### C-03: make deletion recoverable
+
+`DELETE /v1/projects/:name` calls the filesystem-backed `deleteProject` before `InboxStore.deleteProject`. These persistence owners cannot participate in one atomic transaction.
+
+Use a durable deletion tombstone and startup reconciliation, or move Project metadata under the same transactional owner as Inbox state. Until then, do not reuse a Project name after an interrupted deletion without inspecting or clearing the old data.
+
+#### C-04: bound request liveness
+
+Only `probeHub` supplies `AbortSignal.timeout`. The shared `fetchJson` path used by normal operations has no deadline, while the extension's heartbeat interval can start another request before an earlier request settles.
+
+Apply a default deadline to ordinary requests and make heartbeat single-flight or cancellable. Session shutdown should abort outstanding background requests.
+
+#### C-05 and C-06: fail explicitly at client boundaries
+
+- Once an existing global configuration candidate is selected, parse or schema errors should be returned instead of falling through to another Hub.
+- Slash parsing should preserve the raw `send` message tail while extracting only recognized options, or use a delimiter/quote-aware grammar. The structured `a2a` Tool already avoids this text-loss path.
+
+#### C-07: add reproducible static checks
+
+Add a TypeScript configuration and a `typecheck` script that resolves the OMP extension API contract, then run it in CI together with `bun run smoke`. Add targeted lifecycle scenarios for stale-owner replacement, Hub target changes, malformed configuration, stalled HTTP, and deletion recovery.
+
+### Current conclusion
+
+No P0 failure was found in the current happy path or persistence core. The FIFO, idempotency, causal-reference, acknowledgment, receipt, migration, restart, and isolation behaviors have strong automated coverage. C-01 through C-04 remain high-priority operational correctness risks and should be resolved before the corresponding boundaries are treated as production-safe.
+
+The unauthenticated API remains an intentional trusted-private-network design, not a finding. The default Compose port mapping publishes on all host interfaces, so deployment must enforce a loopback bind, firewall, VPN, or an equivalently trusted network boundary.
+
 ## 后续处理
 
 后续架构决定改为完全自定义 Mesh，并完成针对九项问题的重构：
