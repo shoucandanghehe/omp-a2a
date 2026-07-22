@@ -3,6 +3,7 @@ import * as fs from "node:fs";
 import type { Server } from "node:http";
 import * as path from "node:path";
 import {
+	assertProjectDeletable,
 	authorizeInboxAccess,
 	createProject,
 	deleteProject,
@@ -22,11 +23,16 @@ import {
 	hubMetaPath,
 	hubPidPath,
 	inboxDatabasePath,
+	projectDeletionMarkerPath,
+	projectDeletionMarkersDir,
+	projectDir,
+	projectsRoot,
 } from "../paths";
 import { HubDataLock, HubDataDirInUseError } from "./data-lock";
 import {
 	CausalParentError,
 	InboxStore,
+	MAX_ACK_BATCH_MESSAGES,
 	MessageIdConflictError,
 	OutOfOrderAcknowledgmentError,
 	UnknownMessageError,
@@ -53,11 +59,116 @@ export type HubServerHandle = {
 
 export { HubDataDirInUseError };
 
+function fsyncDirectory(directory: string): void {
+	const descriptor = fs.openSync(directory, fs.constants.O_RDONLY);
+	try {
+		fs.fsyncSync(descriptor);
+	} finally {
+		fs.closeSync(descriptor);
+	}
+}
+
 function writeJsonAtomic(file: string, data: unknown): void {
-	ensureDir(path.dirname(file));
+	const directory = path.dirname(file);
+	ensureDir(directory);
+	const parent = path.dirname(directory);
+	if (parent !== directory) fsyncDirectory(parent);
 	const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
-	fs.writeFileSync(temporary, `${JSON.stringify(data, null, 2)}\n`, { mode: 0o600 });
+	const descriptor = fs.openSync(temporary, "wx", 0o600);
+	try {
+		fs.writeFileSync(descriptor, `${JSON.stringify(data, null, 2)}\n`);
+		fs.fsyncSync(descriptor);
+	} finally {
+		fs.closeSync(descriptor);
+	}
 	fs.renameSync(temporary, file);
+	fsyncDirectory(directory);
+}
+
+type ProjectDeletionMarker = {
+	project: string;
+	startedAt: number;
+};
+
+function removeFileIfExists(file: string, durable = false): void {
+	try {
+		fs.unlinkSync(file);
+		if (durable) fsyncDirectory(path.dirname(file));
+	} catch (error) {
+		if (error instanceof Error && "code" in error && error.code === "ENOENT") return;
+		throw error;
+	}
+}
+
+function removeRuntimeFilesBestEffort(dataDir: string): void {
+	for (const file of [hubMetaPath(dataDir), hubPidPath(dataDir)]) {
+		try {
+			removeFileIfExists(file);
+		} catch {
+			// Resource ownership cleanup must continue through every step.
+		}
+	}
+}
+
+function pendingProjectDeletions(dataDir: string): ProjectDeletionMarker[] {
+	const directory = projectDeletionMarkersDir(dataDir);
+	if (!fs.existsSync(directory)) return [];
+	return fs.readdirSync(directory, { withFileTypes: true }).flatMap((entry) => {
+		if (!entry.isFile() || !entry.name.endsWith(".json")) return [];
+		const file = path.join(directory, entry.name);
+		const marker = JSON.parse(fs.readFileSync(file, "utf8")) as Partial<ProjectDeletionMarker>;
+		if (
+			typeof marker.project !== "string" ||
+			!Number.isSafeInteger(marker.startedAt) ||
+			entry.name !== `${marker.project}.json`
+		) {
+			throw new Error(`invalid Project deletion marker: ${file}`);
+		}
+		return [{ project: marker.project, startedAt: marker.startedAt! }];
+	});
+}
+
+function removeProjectRegistryState(project: string, dataDir: string, existed: boolean): void {
+	if (existed) {
+		deleteProject(project, dataDir);
+	} else {
+		fs.rmSync(projectDir(project, dataDir), { recursive: true, force: true });
+	}
+	const root = projectsRoot(dataDir);
+	if (fs.existsSync(root)) fsyncDirectory(root);
+}
+
+function deleteProjectRecoverably(
+	project: string,
+	dataDir: string,
+	inboxes: InboxStore,
+	blockedCreations: Set<string>,
+): boolean {
+	const existed = assertProjectDeletable(project, dataDir);
+	const markerPath = projectDeletionMarkerPath(project, dataDir);
+	writeJsonAtomic(markerPath, { project, startedAt: Date.now() } satisfies ProjectDeletionMarker);
+	blockedCreations.add(project);
+	removeProjectRegistryState(project, dataDir, existed);
+	inboxes.deleteProject(project);
+	removeFileIfExists(markerPath, true);
+	blockedCreations.delete(project);
+	return existed;
+}
+
+function reconcileProjectDeletions(dataDir: string, inboxes: InboxStore): void {
+	for (const marker of pendingProjectDeletions(dataDir)) {
+		const existed = assertProjectDeletable(marker.project, dataDir);
+		removeProjectRegistryState(marker.project, dataDir, existed);
+		inboxes.deleteProject(marker.project);
+		removeFileIfExists(projectDeletionMarkerPath(marker.project, dataDir), true);
+	}
+}
+
+async function closeListeningServer(server: Server): Promise<void> {
+	if (!server.listening) return;
+	await new Promise<void>((resolve, reject) => {
+		server.close((error) => (error ? reject(error) : resolve()));
+	});
 }
 
 function requestedPort(value: number | undefined): number {
@@ -81,6 +192,12 @@ export async function startHubServer(opts?: {
 	let inboxes: InboxStore;
 	try {
 		inboxes = new InboxStore(inboxDatabasePath(dataDir));
+		try {
+			reconcileProjectDeletions(dataDir, inboxes);
+		} catch (error) {
+			inboxes.close();
+			throw error;
+		}
 	} catch (error) {
 		dataLock.close();
 		throw error;
@@ -88,6 +205,7 @@ export async function startHubServer(opts?: {
 	const app = express();
 	app.use(express.json({ limit: "6mb" }));
 	let meta: HubMeta;
+	const blockedProjectCreations = new Set<string>();
 
 	app.get("/healthz", (_request, response) => response.json({ ok: true, service: "omp-a2a-hub", ...meta }));
 	app.get("/v1/meta", (_request, response) => response.json(meta));
@@ -101,6 +219,12 @@ export async function startHubServer(opts?: {
 				createdByCwd?: string;
 			};
 			if (!body.name) return void response.status(400).json({ error: "name required" });
+			if (
+				blockedProjectCreations.has(body.name) ||
+				fs.existsSync(projectDeletionMarkerPath(body.name, dataDir))
+			) {
+				return void response.status(409).json({ error: `project deletion pending: ${body.name}` });
+			}
 			const project = createProject({ ...body, name: body.name, dataDir });
 			response.status(201).json({ project });
 		} catch (error) {
@@ -111,8 +235,12 @@ export async function startHubServer(opts?: {
 
 	app.delete("/v1/projects/:name", (request, response) => {
 		try {
-			const deleted = deleteProject(request.params.name, dataDir);
-			inboxes.deleteProject(request.params.name);
+			const deleted = deleteProjectRecoverably(
+				request.params.name,
+				dataDir,
+				inboxes,
+				blockedProjectCreations,
+			);
 			response.json({ ok: true, deleted });
 		} catch (error) {
 			const status = error instanceof RegistryConflictError ? 409 : 400;
@@ -261,12 +389,15 @@ export async function startHubServer(opts?: {
 	app.post("/v1/inbox/ack", (request, response) => {
 		try {
 			const body = request.body as Partial<HubInboxAckBody>;
-			if (
-				!body.project ||
-				!body.agentId ||
-				!Array.isArray(body.messageIds) ||
-				!body.messageIds.every((value): value is string => typeof value === "string")
-			) {
+			if (!body.project || !body.agentId || !Array.isArray(body.messageIds)) {
+				return void response.status(400).json({ error: "project, agentId, string messageIds required" });
+			}
+			if (body.messageIds.length > MAX_ACK_BATCH_MESSAGES) {
+				return void response.status(413).json({
+					error: `acknowledgment batch exceeds ${MAX_ACK_BATCH_MESSAGES} messages`,
+				});
+			}
+			if (!body.messageIds.every((value): value is string => typeof value === "string")) {
 				return void response.status(400).json({ error: "project, agentId, string messageIds required" });
 			}
 			authorizeInboxAccess(body.project, body.agentId, body.leaseId, dataDir);
@@ -295,20 +426,28 @@ export async function startHubServer(opts?: {
 		throw error;
 	}
 
-	const address = server.address();
-	if (!address || typeof address === "string") {
-		server.close();
-		dataLock.close();
-		inboxes.close();
-		throw new Error("Hub did not expose a TCP address");
+	try {
+		const address = server.address();
+		if (!address || typeof address === "string") {
+			throw new Error("Hub did not expose a TCP address");
+		}
+		const actualPort = address.port;
+		const baseUrl = (opts?.publicUrl ?? process.env.OMP_A2A_HUB_PUBLIC_URL ?? `http://127.0.0.1:${actualPort}`)
+			.trim()
+			.replace(/\/+$/, "");
+		meta = { pid: process.pid, port: actualPort, baseUrl, dataDir, startedAt: Date.now() };
+		writeJsonAtomic(hubMetaPath(dataDir), meta);
+		fs.writeFileSync(hubPidPath(dataDir), `${process.pid}\n`, { mode: 0o600 });
+	} catch (error) {
+		await closeListeningServer(server).catch(() => undefined);
+		try {
+			inboxes.close();
+		} finally {
+			removeRuntimeFilesBestEffort(dataDir);
+			dataLock.close();
+		}
+		throw error;
 	}
-	const actualPort = address.port;
-	const baseUrl = (opts?.publicUrl ?? process.env.OMP_A2A_HUB_PUBLIC_URL ?? `http://127.0.0.1:${actualPort}`)
-		.trim()
-		.replace(/\/+$/, "");
-	meta = { pid: process.pid, port: actualPort, baseUrl, dataDir, startedAt: Date.now() };
-	writeJsonAtomic(hubMetaPath(dataDir), meta);
-	fs.writeFileSync(hubPidPath(dataDir), `${process.pid}\n`, { mode: 0o600 });
 
 	let stopped = false;
 	return {
@@ -317,15 +456,11 @@ export async function startHubServer(opts?: {
 			if (stopped) return;
 			stopped = true;
 			try {
-				if (server.listening) {
-					await new Promise<void>((resolve, reject) =>
-						server.close((error) => (error ? reject(error) : resolve())),
-					);
-				}
-			} finally {
+				await closeListeningServer(server);
 				inboxes.close();
-				fs.rmSync(hubMetaPath(dataDir), { force: true });
-				fs.rmSync(hubPidPath(dataDir), { force: true });
+				removeFileIfExists(hubMetaPath(dataDir));
+				removeFileIfExists(hubPidPath(dataDir));
+			} finally {
 				dataLock.close();
 			}
 		},

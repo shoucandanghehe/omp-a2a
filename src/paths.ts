@@ -48,6 +48,14 @@ export function hubLockPath(dataDir?: string): string {
 	return path.join(hubRunDir(dataDir), "hub-lock.sqlite");
 }
 
+export function projectDeletionMarkersDir(dataDir: string = defaultDataDir()): string {
+	return path.join(hubRunDir(dataDir), "project-deletions");
+}
+
+export function projectDeletionMarkerPath(project: string, dataDir?: string): string {
+	return path.join(projectDeletionMarkersDir(dataDir), `${project}.json`);
+}
+
 export function inboxDatabasePath(dataDir: string = defaultDataDir()): string {
 	return path.join(dataDir, "inbox.sqlite");
 }

@@ -12,6 +12,34 @@ import type {
 	HubWireMessageEnvelope,
 } from "./types";
 
+export const MAX_INBOX_BATCH_MESSAGES = 1000;
+export const MAX_INBOX_BATCH_ESTIMATED_BYTES = 8 * 1024 * 1024;
+export const MAX_ACK_BATCH_MESSAGES = 1000;
+
+const JSON_ENVELOPE_FIXED_ESTIMATED_BYTES = 512;
+
+type MessageSizeRow = Omit<MessageRow, "data"> & { data_bytes: number };
+
+function jsonSafeStringEstimatedBytes(value: string | null): number {
+	return value === null ? 0 : Buffer.byteLength(value, "utf8") * 6;
+}
+
+function estimatedEnvelopeBytes(row: MessageSizeRow): number {
+	const dataBytes = row.data_bytes * 6;
+	return (
+		JSON_ENVELOPE_FIXED_ESTIMATED_BYTES +
+		dataBytes +
+		jsonSafeStringEstimatedBytes(row.msg_id) +
+		jsonSafeStringEstimatedBytes(row.kind) +
+		jsonSafeStringEstimatedBytes(row.project) +
+		jsonSafeStringEstimatedBytes(row.sender) * 2 +
+		jsonSafeStringEstimatedBytes(row.recipient) * 3 +
+		jsonSafeStringEstimatedBytes(row.encoding) +
+		jsonSafeStringEstimatedBytes(row.reply_to) +
+		jsonSafeStringEstimatedBytes(row.receipt_for)
+	);
+}
+
 type MessageRow = {
 	msg_id: string;
 	kind: string;
@@ -66,6 +94,7 @@ export class InboxStore {
 	#insertLedger;
 	#get;
 	#listAfterCursor;
+	#listSizesAfterCursor;
 	#readCursor;
 	#writeCursor;
 	#getAcknowledgment;
@@ -312,6 +341,9 @@ export class InboxStore {
 		this.#listAfterCursor = this.#database.query<MessageRow, [string, string, number, number]>(
 			"SELECT msg_id, kind, project, sender, recipient, encoding, data, uncompressed_bytes, created_at, server_sequence, reply_to, receipt_for, delivered_at FROM inbox_messages WHERE project = ? AND recipient = ? AND server_sequence > ? ORDER BY server_sequence LIMIT ?",
 		);
+		this.#listSizesAfterCursor = this.#database.query<MessageSizeRow, [string, string, number, number]>(
+			"SELECT msg_id, kind, project, sender, recipient, encoding, length(CAST(data AS BLOB)) AS data_bytes, uncompressed_bytes, created_at, server_sequence, reply_to, receipt_for, delivered_at FROM inbox_messages WHERE project = ? AND recipient = ? AND server_sequence > ? ORDER BY server_sequence LIMIT ?",
+		);
 		this.#readCursor = this.#database.query<CursorRow, [string, string]>(
 			"SELECT last_sequence FROM inbox_cursors WHERE project = ? AND recipient = ?",
 		);
@@ -390,9 +422,20 @@ export class InboxStore {
 		this.#readPending = this.#database.transaction(
 			(project: string, agentId: string, limit: number): HubWireInboxBatch => {
 				const cursor = this.#readCursor.get(project, agentId)?.last_sequence ?? 0;
-				const messages = this.#listAfterCursor
-					.all(project, agentId, cursor, limit)
-					.map((row) => this.#toEnvelope(row));
+				const boundedLimit = Number.isFinite(limit)
+					? Math.max(0, Math.min(Math.trunc(limit), MAX_INBOX_BATCH_MESSAGES))
+					: MAX_INBOX_BATCH_MESSAGES;
+				const sizeRows = this.#listSizesAfterCursor.all(project, agentId, cursor, boundedLimit);
+				const messages: HubWireEnvelope[] = [];
+				let estimatedBytes = 0;
+				for (const sizeRow of sizeRows) {
+					const rowBytes = estimatedEnvelopeBytes(sizeRow);
+					if (messages.length > 0 && estimatedBytes + rowBytes > MAX_INBOX_BATCH_ESTIMATED_BYTES) break;
+					const row = this.#get.get(sizeRow.msg_id, project, agentId);
+					if (!row) throw new Error(`Inbox message disappeared during read: ${sizeRow.msg_id}`);
+					messages.push(this.#toEnvelope(row));
+					estimatedBytes += rowBytes;
+				}
 				return { messages, cursor };
 			},
 		);
@@ -567,7 +610,10 @@ export class InboxStore {
 	}
 
 	acknowledge(project: string, recipient: string, messageIds: string[]): HubAckBatch {
-		return this.#acknowledge(project, recipient, messageIds);
+		if (messageIds.length > MAX_ACK_BATCH_MESSAGES) {
+			throw new Error(`acknowledgment batch exceeds ${MAX_ACK_BATCH_MESSAGES} messages`);
+		}
+		return this.#acknowledge(project, recipient, [...new Set(messageIds)]);
 	}
 
 	deleteProject(project: string): void {

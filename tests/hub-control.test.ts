@@ -1,7 +1,14 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { MAX_ACK_BATCH_MESSAGES } from "../src/hub/inbox";
+import {
+	hubMetaPath,
+	hubPidPath,
+	projectDeletionMarkerPath,
+	projectMetaPath,
+} from "../src/paths";
 import { HubClient } from "../src/hub/client";
 import { startHubServer, type HubServerHandle } from "../src/hub/server";
 import { OFFLINE_MS, STALE_MS } from "../src/types";
@@ -99,6 +106,93 @@ describe("Hub project control plane", () => {
 		expect(await client.deleteProject("retired")).toBe(true);
 		expect(await client.listProjects()).toEqual([]);
 		expect(await client.deleteProject("retired")).toBe(false);
+	});
+
+	test("startup reconciles an interrupted cross-store project deletion", async () => {
+		const root = dataDir();
+		const first = await startHubServer({ port: 0, dataDir: root });
+		hubs.push(first);
+		const firstClient = new HubClient(first.meta.baseUrl);
+		await firstClient.createProject({ name: "reused" });
+		const worker = await firstClient.register({ project: "reused", agentId: "worker", cwd: "/worker", pid: 1 });
+		await firstClient.send({
+			project: "reused",
+			from: "controller",
+			to: "worker",
+			text: "old work",
+			messageId: "reused-id",
+		});
+		await firstClient.unregister("reused", "worker", worker.leaseId);
+		await first.stop();
+
+		rmSync(projectMetaPath("reused", root));
+		const markerPath = projectDeletionMarkerPath("reused", root);
+		mkdirSync(join(root, "run", "project-deletions"), { recursive: true });
+		writeFileSync(markerPath, JSON.stringify({ project: "reused", startedAt: Date.now() }));
+
+		const restarted = await startHubServer({ port: 0, dataDir: root });
+		hubs.push(restarted);
+		const client = new HubClient(restarted.meta.baseUrl);
+		expect(existsSync(markerPath)).toBe(false);
+		await client.createProject({ name: "reused" });
+		expect(await client.listMembers("reused", true)).toEqual([]);
+		const replacement = await client.register({
+			project: "reused",
+			agentId: "worker",
+			cwd: "/replacement",
+			pid: 2,
+		});
+		expect(await client.inbox("reused", "worker", 500, replacement.leaseId)).toEqual([]);
+		await expect(
+			client.send({
+				project: "reused",
+				from: "controller",
+				to: "worker",
+				text: "new work",
+				messageId: "reused-id",
+			}),
+		).resolves.toMatchObject({ msgId: "reused-id", serverSequence: 1 });
+	});
+
+	test("post-listen metadata failures release all Hub resources", async () => {
+		const root = dataDir();
+		const reservation = await startHubServer({ port: 0, dataDir: root });
+		const fixedPort = reservation.meta.port;
+		await reservation.stop();
+		mkdirSync(hubPidPath(root), { recursive: true });
+
+		await expect(startHubServer({ port: fixedPort, dataDir: root })).rejects.toThrow();
+		expect(existsSync(hubMetaPath(root))).toBe(false);
+
+		rmSync(hubPidPath(root), { recursive: true });
+		const recovered = await startHubServer({ port: fixedPort, dataDir: root });
+		hubs.push(recovered);
+		expect((await new HubClient(recovered.meta.baseUrl).meta()).dataDir).toBe(root);
+	});
+
+	test("HTTP acknowledgment rejects batches above the storage cap", async () => {
+		const root = dataDir();
+		const hub = await startHubServer({ port: 0, dataDir: root });
+		hubs.push(hub);
+		const client = new HubClient(hub.meta.baseUrl);
+		await client.createProject({ name: "ack-cap" });
+		const worker = await client.register({ project: "ack-cap", agentId: "worker", cwd: "/worker", pid: 1 });
+
+		const response = await fetch(`${hub.meta.baseUrl}/v1/inbox/ack`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				project: "ack-cap",
+				agentId: "worker",
+				leaseId: worker.leaseId,
+				messageIds: Array.from({ length: MAX_ACK_BATCH_MESSAGES + 1 }, () => "duplicate"),
+			}),
+		});
+
+		expect(response.status).toBe(413);
+		expect(await response.json()).toEqual({
+			error: `acknowledgment batch exceeds ${MAX_ACK_BATCH_MESSAGES} messages`,
+		});
 	});
 
 	test("a project cannot be deleted while a member is active", async () => {

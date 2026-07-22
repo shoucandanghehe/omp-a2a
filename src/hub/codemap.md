@@ -25,7 +25,7 @@ Project and member records remain owned by `../registry`; this directory exposes
 | `GET /v1/meta` | Returns `HubMeta`. |
 | `GET /v1/projects` | Calls `listProjects`. |
 | `POST /v1/projects` | Validates `name`, calls `createProject`, and returns `201`. |
-| `DELETE /v1/projects/:name` | Calls registry `deleteProject` and purges the project's inbox state. |
+| `DELETE /v1/projects/:name` | Persists a deletion marker, removes Registry state, purges all SQLite project state, then clears the marker. |
 | `POST /v1/register` | Requires `project`, `agentId`, and `cwd`; verifies the project, then calls `joinProject`. |
 | `POST /v1/heartbeat` | Calls registry `heartbeat`. |
 | `POST /v1/unregister` | Calls `leaveProject`. |
@@ -83,11 +83,13 @@ The ledger intentionally survives acknowledgment. Therefore:
 - acknowledged messages remain available as causal parents;
 - deleting a project explicitly purges pending messages, ledger entries, cursors, acknowledgments, and counters.
 
+Inbox reads first load bounded payload-size metadata, then materialize only the FIFO prefix within the 1,000-message and 8 MiB conservative estimated-response budgets. A single oversize head remains readable for forward progress. Acknowledgment requests are capped at 1,000 raw IDs and deduplicated in first-occurrence order before transactional processing.
+
 ### Data-directory locking
 
 `HubDataLock` opens a separate SQLite lock database, sets `busy_timeout = 0` and `locking_mode = EXCLUSIVE`, then holds `BEGIN EXCLUSIVE` for the server lifetime. Lock/busy failures become `HubDataDirInUseError`. `close()` is idempotent and releases the lock by rolling back and closing the database.
 
-`startHubServer` acquires this lock before opening `InboxStore`. It closes already-acquired resources if inbox initialization or TCP listening fails. Normal `stop()` closes the HTTP server, closes inbox persistence, removes the metadata/PID files, and finally releases the data lock.
+`startHubServer` acquires this lock before opening `InboxStore`, reconciles durable Project deletion markers before listening, and closes every acquired resource if Inbox initialization, listening, address discovery, or runtime metadata publication fails. Normal `stop()` closes the HTTP server, Inbox persistence, metadata/PID files, and data lock.
 
 ## Data and Control Flow
 
@@ -120,8 +122,8 @@ Error mapping is explicit: unavailable recipient is `404`, message-ID or causal-
 ### Reading, acknowledging, and delivery receipts
 
 1. `HubClient.readInbox` posts project, agent, limit, and lease to `/v1/inbox/read`. It falls back to legacy `GET /v1/inbox` only when that route returns `404`; the fallback and direct `inbox` method carry the lease in `x-a2a-lease`, never in the request URL.
-2. Before storage access, the Hub requires the recipient's current non-offline member lease. `InboxStore.read` then transactionally reads the current cursor and returns ordered rows without removing them or advancing the cursor.
-3. `HubClient.ack` posts an ordered array of message IDs with the same lease to `/v1/inbox/ack`.
+2. Before storage access, the Hub requires the recipient's current non-offline member lease. `InboxStore.read` reads size metadata for at most 1,000 ordered rows, then materializes the FIFO prefix within the estimated 8 MiB response budget without removing rows or advancing the cursor.
+3. `HubClient.ack` posts an ordered array of message IDs with the same lease to `/v1/inbox/ack`; the Hub rejects more than 1,000 raw IDs and deduplicates the accepted batch.
 4. `InboxStore.acknowledge` processes the entire batch in one transaction. A previously removed ID with an acknowledgment record returns `already_acknowledged`. An unknown ID raises `UnknownMessageError`.
 5. For a pending ID, the store compares it with the first row after the current cursor. Any gap or reordering raises `OutOfOrderAcknowledgmentError`, rolling back the batch.
 6. A valid acknowledgment deletes the pending row, records its sequence and acknowledgment time, and advances the stream cursor.

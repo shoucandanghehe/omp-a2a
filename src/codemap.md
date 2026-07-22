@@ -83,7 +83,7 @@ The transport, HTTP server, inbox, and wire-envelope implementation live under `
 ### Project operations
 
 - Create: request → `A2aOperations.execute` → `HubClient.createProject` → Hub HTTP server → `registry.createProject` → project metadata JSON.
-- Delete: request → `HubClient.deleteProject` → `registry.deleteProject`. Deletion returns `false` for a missing project and throws `RegistryConflictError` while any member is online or stale.
+- Delete: request → `HubClient.deleteProject` → durable deletion marker → filesystem Registry removal → transactional Inbox/ledger purge → marker removal. Startup reconciliation completes interrupted markers before listening or permitting name reuse.
 - List: `HubClient.listProjects` returns project metadata; `A2aOperations` calls `listMembers` for every project in parallel and reports each online count.
 
 ### Membership operations

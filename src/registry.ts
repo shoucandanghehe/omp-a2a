@@ -82,13 +82,18 @@ export function createProject(opts: {
 	return project;
 }
 
-export function deleteProject(name: string, dataDir?: string): boolean {
+export function assertProjectDeletable(name: string, dataDir?: string): boolean {
 	assertProjectName(name);
 	if (!getProject(name, dataDir)) return false;
 	const active = listMembers({ project: name, all: true, dataDir }).filter((member) => member.status !== "offline");
 	if (active.length > 0) {
 		throw new RegistryConflictError(`project has active members: ${active.map((member) => member.agentId).join(", ")}`);
 	}
+	return true;
+}
+
+export function deleteProject(name: string, dataDir?: string): boolean {
+	if (!assertProjectDeletable(name, dataDir)) return false;
 	fs.rmSync(projectDir(name, dataDir), { recursive: true });
 	return true;
 }
