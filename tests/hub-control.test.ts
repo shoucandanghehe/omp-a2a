@@ -33,6 +33,14 @@ function dataDir(): string {
 }
 
 describe("Hub project control plane", () => {
+	test("blank Hub data directories are rejected before startup", async () => {
+		for (const value of ["", " \t"]) {
+			await expect(startHubServer({ port: 0, dataDir: value })).rejects.toThrow(
+				"Hub data directory cannot be empty",
+			);
+		}
+	});
+
 	test("different Hub data directories own independent project registries", async () => {
 		const first = await startHubServer({ port: 0, dataDir: dataDir() });
 		const second = await startHubServer({ port: 0, dataDir: dataDir() });
@@ -438,6 +446,11 @@ describe("Hub project control plane", () => {
 		const client = new HubClient(hub.listenUrl);
 		await client.createProject({ name: "corrupt-registry" });
 		writeFileSync(projectMetaPath("corrupt-registry", root), "{");
+		const listResponse = await fetch(`${hub.listenUrl}/v1/projects`);
+		expect(listResponse.status).toBe(500);
+		expect(await listResponse.json()).toEqual({
+			error: expect.stringContaining("invalid Registry JSON"),
+		});
 
 		const response = await fetch(`${hub.listenUrl}/v1/register`, {
 			method: "POST",

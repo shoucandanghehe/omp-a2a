@@ -2,6 +2,7 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { a2aRoot } from "../paths";
+import { parseSimpleYaml } from "../config";
 import type { A2aMember, A2aProject, MemberRegistration } from "../types";
 import { decodeWireEnvelope, encodeTextPayload } from "./payload";
 import type {
@@ -80,6 +81,10 @@ function stripTrailingSlash(url: string): string {
 	return url.replace(/\/+$/, "");
 }
 
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 /** Resolve Hub URL without starting a process. */
 export function resolveHubUrl(opts?: { hubUrl?: string; home?: string }): string {
 	if (opts?.hubUrl?.trim()) return stripTrailingSlash(opts.hubUrl.trim());
@@ -90,24 +95,23 @@ export function resolveHubUrl(opts?: { hubUrl?: string; home?: string }): string
 	for (const name of ["config.yml", "config.yaml", "config.json"]) {
 		const file = path.join(a2aRoot(home), name);
 		if (!fs.existsSync(file)) continue;
-		if (name.endsWith(".json")) {
-			try {
-				const raw = JSON.parse(fs.readFileSync(file, "utf8")) as Record<string, unknown>;
-				const value = raw.hubUrl ?? raw.hub_url ?? raw.url;
-				if (typeof value === "string" && value.trim()) return stripTrailingSlash(value.trim());
-			} catch {
-				// Ignore malformed global config and continue to the default.
-			}
-			continue;
-		}
-		for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
-			const match = line.match(/^(?:hubUrl|hub_url|url)\s*:\s*(.+)$/);
-			if (!match) continue;
-			let value = match[1]!.trim().replace(/#.*$/, "").trim();
-			if ((value.startsWith('"') && value.endsWith('"')) || (value.startsWith("'") && value.endsWith("'"))) {
-				value = value.slice(1, -1);
-			}
-			if (value) return stripTrailingSlash(value);
+		try {
+			const text = fs.readFileSync(file, "utf8");
+			const parsed: unknown = name.endsWith(".json") ? JSON.parse(text) : parseSimpleYaml(text);
+			if (!isRecord(parsed)) throw new Error("config must be an object");
+
+			let value: unknown;
+			if ("hubUrl" in parsed) value = parsed.hubUrl;
+			else if ("hub_url" in parsed) value = parsed.hub_url;
+			else if ("url" in parsed) value = parsed.url;
+			else throw new Error("config missing required Hub URL (hubUrl, hub_url, or url)");
+
+			if (typeof value !== "string") throw new Error("Hub URL must be a string");
+			if (!value.trim()) throw new Error("Hub URL must not be blank");
+			return stripTrailingSlash(value.trim());
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			throw new Error(`Failed to load Hub config ${file}: ${message}`, { cause: error });
 		}
 	}
 	return DEFAULT_HUB_URL;

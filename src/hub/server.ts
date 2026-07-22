@@ -343,7 +343,11 @@ export async function startHubServer(opts?: {
 	if (isWildcardHost(host) && configuredPublicUrl === undefined) {
 		throw new Error("Hub public URL is required when binding a wildcard host");
 	}
-	const dataDir = path.resolve(opts?.dataDir ?? defaultDataDir());
+	const configuredDataDir = opts?.dataDir;
+	if (configuredDataDir !== undefined && configuredDataDir.trim().length === 0) {
+		throw new Error("Hub data directory cannot be empty");
+	}
+	const dataDir = path.resolve(configuredDataDir ?? defaultDataDir());
 	const dataLock = new HubDataLock(hubLockPath(dataDir), dataDir);
 	let inboxes: InboxStore;
 	try {
@@ -366,7 +370,15 @@ export async function startHubServer(opts?: {
 
 	app.get("/healthz", (_request, response) => response.json({ ok: true, service: "omp-a2a-hub", ...meta }));
 	app.get("/v1/meta", (_request, response) => response.json(meta));
-	app.get("/v1/projects", (_request, response) => response.json({ projects: listProjects(dataDir) }));
+	app.get("/v1/projects", (_request, response) => {
+		try {
+			response.json({ projects: listProjects(dataDir) });
+		} catch (error) {
+			response.status(requestFailureStatus(error)).json({
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	});
 	app.post("/v1/projects", (request, response) => {
 		try {
 			const body = request.body;

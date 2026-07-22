@@ -97,7 +97,7 @@ Inbox reads first load bounded payload-size metadata, then materialize only the 
 ### Hub discovery and connection
 
 1. `HubClient.connect` calls `connectHub`.
-2. `connectHub` calls `resolveHubUrl`, whose precedence is explicit `hubUrl`, `OMP_A2A_HUB_URL`, the first matching global config, then `http://127.0.0.1:4173`.
+2. `connectHub` calls `resolveHubUrl`, whose precedence is explicit `hubUrl`, `OMP_A2A_HUB_URL`, the first existing global config, then `http://127.0.0.1:4173`. A selected global file must parse to an object with a nonblank string URL; failures include its path and never fall through.
 3. `probeHub` requests `GET /v1/meta` with a 1.5-second timeout and returns `null` on failure.
 4. A successful probe supplies the validated advertised `meta.baseUrl` to the new `HubClient`. All ordinary client requests combine caller cancellation with a configurable 15-second default deadline.
 
@@ -136,7 +136,7 @@ This separates non-destructive polling from explicit consumption while preservin
 ### CLI and server lifecycle
 
 1. `cli.ts` parses `--port`, `--host`, `--public-url`/`--publicUrl`, and `--data-dir` in split or `--key=value` forms; unknown or incomplete arguments throw.
-2. The CLI resolves option/environment/default values and passes explicit options to `startHubServer`; programmatic server calls never read deployment environment variables. Port `0` is valid.
+2. The CLI resolves option/environment/default values and passes explicit options to `startHubServer`; programmatic server calls never read deployment environment variables. Port `0` is valid, while an explicitly blank data directory is rejected before locking or filesystem creation.
 3. After binding, the server validates or derives the advertised URL, records a separate process-reachable `listenUrl` on its handle, writes `HubMeta` atomically with mode `0600`, and writes the PID file with mode `0600`. Wildcard binds require an explicit public URL.
 4. The CLI prints a one-line JSON startup record.
 5. `SIGINT` or `SIGTERM` calls the idempotent `handle.stop()`, which enforces a bounded grace period before force-closing remaining connections, then exits. An unresolved promise keeps the process alive between startup and a signal.

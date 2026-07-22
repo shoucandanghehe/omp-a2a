@@ -68,13 +68,11 @@ Hub URL precedence is:
 3. global `~/.omp/a2a/config.yml`, `.yaml`, or `.json`;
 4. `http://127.0.0.1:4173`.
 
-The Hub runs locally with `bun run hub` or through `docker compose`. The CLI resolves deployment environment variables, while programmatic `startHubServer` calls use explicit options and expose a process-reachable `listenUrl`. `Dockerfile` installs production dependencies under the unprivileged `bun` user, exposes port `4173`, persists `/data/omp-a2a`, and supplies an HTTP health check. Compose derives the advertised loopback URL from the published port unless explicitly overridden.
+The Hub runs locally with `bun run hub` or through `docker compose`. The CLI resolves deployment environment variables, while programmatic `startHubServer` calls use explicit options, reject explicitly blank data directories, and expose a process-reachable `listenUrl`. `Dockerfile` installs production dependencies under the unprivileged `bun` user, exposes port `4173`, persists `/data/omp-a2a`, and supplies an HTTP health check. Compose derives the advertised loopback URL from the published port unless explicitly overridden.
 
-## Known Operational Constraints
+## Configuration Boundaries
 
-- Malformed global JSON Hub configuration is silently ignored before falling back. The Slash parser also consumes flag-like message tokens because it treats every `--` token as an option.
-
-Operational guidance and user-visible workarounds are documented in [`README.md`](README.md). These constraints require explicit fixes before treating the corresponding boundaries as production-safe invariants.
+The first existing global config candidate is authoritative: read, parse, schema, or missing-URL errors fail explicitly rather than falling through. The shared minimal YAML parser removes comments only outside quoted values. Extension session, Slash, and Tool adapters contain local-config failures, while Slash `send` preserves unknown flag-like text and supports bare `--` as an option delimiter.
 
 ## Root Asset Map
 
@@ -100,9 +98,9 @@ Operational guidance and user-visible workarounds are documented in [`README.md`
 
 ## Verification
 
-`bun run smoke` runs the Bun test suite followed by both executable smoke scenarios. The suite covers Hub/data-directory isolation, lease ownership and stale-owner fencing, Hub-bound membership, active-poll cancellation, failed-join timer recovery, request deadlines, malformed successful responses, single-flight heartbeat, deployment-environment isolation, advertised/listener URL separation, registration and identity validation, bounded shutdown, online identity conflicts, durable Inbox restart, byte/count-bounded pages, acknowledgment batch limits, receipt ID reservation, gzip boundaries, batched schema migration, stream ordering, idempotent message IDs, causal references, explicit acknowledgments, cursor durability, at-least-once redelivery, delivery receipts, storage-error mapping, recoverable project deletion, startup cleanup, and the shared operations layer.
+`bun run smoke` runs the Bun test suite followed by both executable smoke scenarios. The suite covers Hub/data-directory isolation, lease ownership and stale-owner fencing, Hub-bound membership, active-poll cancellation, failed-join timer recovery, request deadlines, malformed successful responses, single-flight heartbeat, deployment-environment isolation, advertised/listener URL separation, fail-closed configuration, quote-aware YAML, Slash message parsing, blank data-directory rejection, registration and identity validation, bounded shutdown, online identity conflicts, durable Inbox restart, byte/count-bounded pages, acknowledgment batch limits, receipt ID reservation, gzip boundaries, batched schema migration, stream ordering, idempotent message IDs, causal references, explicit acknowledgments, cursor durability, at-least-once redelivery, delivery receipts, storage-error mapping, recoverable project deletion, startup cleanup, and the shared operations layer.
 
-This command does not perform a standalone TypeScript type check, linting, or a real Docker image/network smoke. Automated coverage remains concentrated in Hub persistence and ordering; malformed configuration and real container/network behavior are not covered end to end.
+This command does not perform a standalone TypeScript type check, linting, or a real Docker image/network smoke. Automated coverage remains concentrated in Hub persistence and ordering; real container/network behavior is not covered end to end.
 
 ## Operational Boundary
 

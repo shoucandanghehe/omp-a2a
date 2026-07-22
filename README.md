@@ -104,7 +104,7 @@ bun run hub -- \
   --data-dir /absolute/path/to/mesh-b
 ```
 
-Programmatic `startHubServer` calls use only explicit options and return `listenUrl` for in-process clients, so Bun-loaded deployment environment variables cannot redirect tests or embedded servers. The CLI owns environment-variable resolution. A wildcard `--host` requires an explicit `--public-url`; concrete bind hosts derive a reachable advertised URL automatically.
+Programmatic `startHubServer` calls use only explicit options and return `listenUrl` for in-process clients, so Bun-loaded deployment environment variables cannot redirect tests or embedded servers. The CLI owns environment-variable resolution. Explicit blank or whitespace-only data directories are rejected before any lock or persistent file is created. A wildcard `--host` requires an explicit `--public-url`; concrete bind hosts derive a reachable advertised URL automatically.
 
 Hub probes time out after 1.5 seconds. Ordinary client requests default to a 15-second deadline, accept caller cancellation, and background heartbeat requests are single-flight.
 
@@ -127,6 +127,8 @@ First match wins:
 2. `OMP_A2A_HUB_URL`
 3. Global `~/.omp/a2a/config.yml` → `hubUrl`
 4. `http://127.0.0.1:4173`
+
+Once a global config candidate exists, read, parse, or schema errors fail explicitly instead of falling through to another file or the default Hub. The minimal YAML parser preserves `#` inside quoted scalar and list values while removing comments outside quotes. Extension session, Slash, and Tool adapters report malformed per-repository configuration through their normal error channels.
 
 Example per-repo config:
 
@@ -160,7 +162,7 @@ Inside OMP, after the selected Hub is running:
 
 The model-facing `a2a` Tool exposes the same operations through the same `A2aOperations` module.
 
-The Slash parser treats tokens beginning with `--` as command flags and does not implement shell-style quoting. For message text that must preserve flag-like tokens such as `--dry-run`, use the structured `a2a` Tool path rather than `/a2a send`.
+The Slash `send` parser extracts only `--message-id`, `--reply-to`, and `--reply-to-ref`; other flag-like tokens such as `--dry-run` remain message text. A bare `--` ends option parsing when the message must contain a recognized option literally, for example `/a2a send web -- --message-id literal`. The parser does not implement shell-style quoting.
 
 `send` reports `queued` with the friendly `messageRef`; the opaque `msgId` remains in output details for idempotency and diagnostics. Inbox and inbound output use friendly refs such as `web:42` and show `replyToRef` when present. The sender extension later displays `[a2a delivered]` with the original `msgId` after the receiving extension acknowledges it. This proves receipt by the peer OMP extension, not that its model read, understood, or completed the work; semantic completion still requires a normal reply.
 
@@ -174,7 +176,7 @@ Project deletion is idempotent and rejected until every member is offline. Befor
 bun run smoke
 ```
 
-This runs the Bun tests, Registry smoke, and a real Hub/HubClient smoke covering lease fencing, abortable extension lifecycle transitions, request deadlines, malformed successful responses, single-flight heartbeat, deployment-environment isolation, advertised/listener URL separation, validated registration and send identities, bounded shutdown, per-stream monotonic FIFO ordering, byte- and count-bounded Inbox pages, acknowledgment batch limits, receipt ID reservation, friendly message references, concurrent writes and duplicate reads, idempotent message IDs, causal replies, acknowledgment-driven persistent cursors, pre-ack failure and post-ack restart behavior, durable delivery receipts, batched legacy Inbox migration, gzip payload limits, storage-error status mapping, recoverable Project deletion, and startup resource cleanup.
+This runs the Bun tests, Registry smoke, and a real Hub/HubClient smoke covering lease fencing, abortable extension lifecycle transitions, request deadlines, malformed successful responses, single-flight heartbeat, deployment-environment isolation, advertised/listener URL separation, fail-closed global/local configuration, quote-aware YAML values, Slash flag-like message text, blank data-directory rejection, validated registration and send identities, bounded shutdown, per-stream monotonic FIFO ordering, byte- and count-bounded Inbox pages, acknowledgment batch limits, receipt ID reservation, friendly message references, concurrent writes and duplicate reads, idempotent message IDs, causal replies, acknowledgment-driven persistent cursors, pre-ack failure and post-ack restart behavior, durable delivery receipts, batched legacy Inbox migration, gzip payload limits, storage-error status mapping, recoverable Project deletion, and startup resource cleanup.
 
 The verification command does not run a standalone TypeScript type check, a linter, or a Docker image/network smoke. Those remain separate release checks, and extension lifecycle behavior currently has substantially less automated coverage than the Hub persistence path.
 

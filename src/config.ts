@@ -12,7 +12,7 @@ import { localConfigCandidates } from "./paths";
  *     - b
  * No nested maps beyond one-level lists.
  */
-function parseSimpleYaml(text: string): Record<string, unknown> {
+export function parseSimpleYaml(text: string): Record<string, unknown> {
 	const out: Record<string, unknown> = {};
 	const lines = text.split(/\r?\n/);
 	let listKey: string | null = null;
@@ -27,55 +27,138 @@ function parseSimpleYaml(text: string): Record<string, unknown> {
 	};
 
 	for (const raw of lines) {
-		const line = raw.replace(/#.*$/, "").trimEnd();
+		const line = stripYamlComment(raw).trimEnd();
 		if (!line.trim()) continue;
 
 		const listItem = line.match(/^\s*-\s+(.+)$/);
-		if (listItem && listKey) {
-			list.push(stripQuotes(listItem[1].trim()));
+		if (listItem) {
+			if (!listKey) throw new Error("list item has no preceding key");
+			list.push(parseYamlString(listItem[1].trim()));
 			continue;
 		}
 
 		flushList();
-		const m = line.match(/^([A-Za-z][A-Za-z0-9_]*)\s*:\s*(.*)$/);
-		if (!m) continue;
-		const key = m[1];
-		const val = m[2].trim();
-		if (val === "" || val === "|" || val === ">") {
+		const match = line.match(/^([A-Za-z][A-Za-z0-9_]*)\s*:\s*(.*)$/);
+		if (!match) throw new Error(`unsupported YAML line: ${line.trim()}`);
+		const key = match[1]!;
+		const value = match[2]!.trim();
+		if (value === "" || value === "|" || value === ">") {
 			listKey = key;
 			list = [];
 			continue;
 		}
-		if (val.startsWith("[") && val.endsWith("]")) {
-			const inner = val.slice(1, -1).trim();
-			out[key] = inner
-				? inner.split(",").map((s) => stripQuotes(s.trim())).filter(Boolean)
-				: [];
+		if (value.startsWith("[")) {
+			if (!value.endsWith("]")) throw new Error(`invalid inline list for ${key}`);
+			const inner = value.slice(1, -1).trim();
+			out[key] = inner ? splitYamlList(inner).map(parseYamlString).filter(Boolean) : [];
 			continue;
 		}
-		if (val === "true") {
+		if (value === "true") {
 			out[key] = true;
 			continue;
 		}
-		if (val === "false") {
+		if (value === "false") {
 			out[key] = false;
 			continue;
 		}
-		if (/^\d+$/.test(val)) {
-			out[key] = Number(val);
+		if (/^\d+$/.test(value)) {
+			out[key] = Number(value);
 			continue;
 		}
-		out[key] = stripQuotes(val);
+		out[key] = parseYamlString(value);
 	}
 	flushList();
 	return out;
 }
 
-function stripQuotes(s: string): string {
-	if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
-		return s.slice(1, -1);
+function stripYamlComment(line: string): string {
+	let quote: "'" | '"' | null = null;
+	let escaped = false;
+	for (let i = 0; i < line.length; i += 1) {
+		const char = line[i]!;
+		if (quote === '"' && escaped) {
+			escaped = false;
+			continue;
+		}
+		if (quote === '"' && char === "\\") {
+			escaped = true;
+			continue;
+		}
+		if (quote === "'" && char === "'" && line[i + 1] === "'") {
+			i += 1;
+			continue;
+		}
+		if (char === quote) {
+			quote = null;
+			continue;
+		}
+		if (
+			!quote &&
+			(char === "'" || char === '"') &&
+			[":", "-", "[", ","].includes(line.slice(0, i).trimEnd().at(-1) ?? "")
+		) {
+			quote = char;
+			continue;
+		}
+		if (!quote && char === "#") return line.slice(0, i);
 	}
-	return s;
+	if (quote) throw new Error("unterminated quoted scalar");
+	return line;
+}
+
+function splitYamlList(value: string): string[] {
+	const values: string[] = [];
+	let start = 0;
+	let quote: "'" | '"' | null = null;
+	let escaped = false;
+	for (let i = 0; i < value.length; i += 1) {
+		const char = value[i]!;
+		if (quote === '"' && escaped) {
+			escaped = false;
+			continue;
+		}
+		if (quote === '"' && char === "\\") {
+			escaped = true;
+			continue;
+		}
+		if (quote === "'" && char === "'" && value[i + 1] === "'") {
+			i += 1;
+			continue;
+		}
+		if (char === quote) {
+			quote = null;
+			continue;
+		}
+		if (!quote && (char === "'" || char === '"') && value.slice(start, i).trim().length === 0) {
+			quote = char;
+			continue;
+		}
+		if (!quote && char === ",") {
+			values.push(value.slice(start, i).trim());
+			start = i + 1;
+		}
+	}
+	if (quote) throw new Error("unterminated quoted list value");
+	values.push(value.slice(start).trim());
+	return values;
+}
+
+function parseYamlString(value: string): string {
+	if (value.startsWith('"')) {
+		if (!value.endsWith('"')) throw new Error("unterminated double-quoted scalar");
+		const parsed: unknown = JSON.parse(value);
+		if (typeof parsed !== "string") throw new Error("invalid double-quoted scalar");
+		return parsed;
+	}
+	if (value.startsWith("'")) {
+		if (!value.endsWith("'")) throw new Error("unterminated single-quoted scalar");
+		return value.slice(1, -1).replace(/''/g, "'");
+	}
+	return value;
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
 }
 
 function normalizeConfig(raw: Record<string, unknown>): A2aLocalConfig {
@@ -122,9 +205,15 @@ function normalizeConfig(raw: Record<string, unknown>): A2aLocalConfig {
 export function loadLocalConfig(cwd: string): A2aLocalConfig | null {
 	for (const p of localConfigCandidates(cwd)) {
 		if (!fs.existsSync(p)) continue;
-		const text = fs.readFileSync(p, "utf8");
-		const raw = p.endsWith(".json") ? (JSON.parse(text) as Record<string, unknown>) : parseSimpleYaml(text);
-		return normalizeConfig(raw);
+		try {
+			const text = fs.readFileSync(p, "utf8");
+			const parsed: unknown = p.endsWith(".json") ? JSON.parse(text) : parseSimpleYaml(text);
+			if (!isRecord(parsed)) throw new Error("config must be an object");
+			return normalizeConfig(parsed);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			throw new Error(`Failed to load a2a config ${p}: ${message}`, { cause: error });
+		}
 	}
 	return null;
 }

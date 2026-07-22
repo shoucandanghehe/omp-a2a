@@ -39,6 +39,56 @@ function parseArgs(raw: string): { positional: string[]; flags: Record<string, s
 	return { positional, flags };
 }
 
+const SEND_OPTION_NAMES = ["message-id", "reply-to", "reply-to-ref"] as const;
+
+function parseSendRequest(raw: string): A2aOperationRequest {
+	const tokens = raw.trim().split(/\s+/);
+	const to = tokens[1];
+	const message: string[] = [];
+	const options: Partial<Record<(typeof SEND_OPTION_NAMES)[number], string>> = {};
+	let optionsEnded = false;
+
+	for (let index = 2; index < tokens.length; index++) {
+		const token = tokens[index]!;
+		if (!optionsEnded && token === "--") {
+			optionsEnded = true;
+			continue;
+		}
+		let matched = false;
+		if (!optionsEnded) {
+			for (const name of SEND_OPTION_NAMES) {
+				const prefix = `--${name}`;
+				if (token !== prefix && !token.startsWith(`${prefix}=`)) continue;
+				let value: string;
+				if (token === prefix) {
+					const next = tokens[index + 1];
+					if (!next || next.startsWith("--")) throw new Error(`missing value for ${prefix}`);
+					value = next;
+					index += 1;
+				} else {
+					value = token.slice(prefix.length + 1);
+					if (!value) throw new Error(`missing value for ${prefix}`);
+				}
+				options[name] = value;
+				matched = true;
+				break;
+			}
+		}
+		if (!matched) message.push(token);
+	}
+
+	const text = message.join(" ").trim();
+	if (!to || !text) throw new Error("usage: /a2a send <agentId> <message...>");
+	return {
+		action: "send",
+		to,
+		text,
+		messageId: options["message-id"],
+		replyTo: options["reply-to"],
+		replyToRef: options["reply-to-ref"],
+	};
+}
+
 function usage(): string {
 	return [
 		"A2A multi-project custom mesh (standalone Hub + omp client)",
@@ -49,7 +99,7 @@ function usage(): string {
 		"/a2a join <project> --as <agentId> [--caps a,b]",
 		"/a2a leave",
 		"/a2a list [--project <name>] [--all]",
-		"/a2a send <agentId> <message...> [--message-id <id>] [--reply-to-ref <agentId:sequence>] [--reply-to <msgId>]",
+		"/a2a send <agentId> <message...> [--message-id <id>] [--reply-to-ref <agentId:sequence>] [--reply-to <msgId>] [-- <literal option-like text>]",
 		"/a2a inbox",
 		"/a2a status",
 		"/a2a hub",
@@ -58,6 +108,7 @@ function usage(): string {
 }
 
 function commandRequest(raw: string): A2aOperationRequest | null {
+	if (raw.trim().split(/\s+/, 1)[0] === "send") return parseSendRequest(raw);
 	const { positional, flags } = parseArgs(raw);
 	const command = positional[0] ?? "";
 	if (command === "hub" || command === "status" || command === "leave" || command === "inbox") {
@@ -114,19 +165,6 @@ function commandRequest(raw: string): A2aOperationRequest | null {
 			all: flags.all === true || flags.all === "true",
 		};
 	}
-	if (command === "send") {
-		const to = positional[1];
-		const text = positional.slice(2).join(" ").trim();
-		if (!to || !text) throw new Error("usage: /a2a send <agentId> <message...>");
-		return {
-			action: "send",
-			to,
-			text,
-			messageId: typeof flags["message-id"] === "string" ? flags["message-id"] : undefined,
-			replyTo: typeof flags["reply-to"] === "string" ? flags["reply-to"] : undefined,
-			replyToRef: typeof flags["reply-to-ref"] === "string" ? flags["reply-to-ref"] : undefined,
-		};
-	}
 	return null;
 }
 
@@ -145,7 +183,9 @@ export default function a2aExtension(pi: ExtensionAPI) {
 	let backgroundAbort: AbortController | null = null;
 
 	const refreshHubUrl = (cwd: string) => {
-		configuredHubUrl = loadLocalConfig(cwd)?.hubUrl;
+		const config = loadLocalConfig(cwd);
+		configuredHubUrl = config?.hubUrl;
+		return config;
 	};
 
 	const ensureClient = async (): Promise<HubClient> => {
@@ -245,16 +285,21 @@ export default function a2aExtension(pi: ExtensionAPI) {
 
 	pi.on("session_start", async (_event, context) => {
 		sessionCwd = context.cwd;
-		refreshHubUrl(context.cwd);
+		let config;
+		try {
+			config = refreshHubUrl(context.cwd);
+		} catch (error) {
+			context.ui.notify(`A2A config error: ${error instanceof Error ? error.message : String(error)}`, "error");
+			return;
+		}
 		try {
 			await ensureClient();
 		} catch (error) {
 			context.ui.notify(
-				`A2A Hub unavailable at ${resolveHubUrl({ hubUrl: configuredHubUrl })}: ${error instanceof Error ? error.message : String(error)}`,
+				`A2A Hub unavailable: ${error instanceof Error ? error.message : String(error)}`,
 				"warning",
 			);
 		}
-		const config = loadLocalConfig(context.cwd);
 		if (!config || config.autoJoin === false) return;
 		try {
 			const result = await run(
@@ -286,13 +331,13 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		description: "A2A multi-project custom mesh client",
 		handler: async (args, context) => {
 			sessionCwd = context.cwd;
-			refreshHubUrl(context.cwd);
 			const raw = args.trim();
-			if (!raw || raw === "help" || raw === "--help" || raw === "-h") {
-				context.ui.notify(usage(), "info");
-				return;
-			}
 			try {
+				refreshHubUrl(context.cwd);
+				if (!raw || raw === "help" || raw === "--help" || raw === "-h") {
+					context.ui.notify(usage(), "info");
+					return;
+				}
 				const request = commandRequest(raw);
 				if (!request) throw new Error(`unknown subcommand. ${usage()}`);
 				const result = await run(request, context);
@@ -334,8 +379,8 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		}),
 		async execute(_id, params, _signal, _onUpdate, context) {
 			sessionCwd = context.cwd;
-			refreshHubUrl(context.cwd);
 			try {
+				refreshHubUrl(context.cwd);
 				const result = await run(
 					{
 						action: params.op,

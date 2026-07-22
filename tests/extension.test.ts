@@ -34,9 +34,24 @@ type TestTimerContext = {
 	isIdle: () => boolean;
 	ui: { notify: (message: string, type?: string) => void };
 };
+type TestToolExecute = (
+	id: string,
+	params: {
+		op: "status";
+		project?: string;
+		agentId?: string;
+		to?: string;
+		text?: string;
+	},
+	signal: AbortSignal,
+	onUpdate: (update: unknown) => void,
+	context: TestTimerContext,
+) => Promise<unknown>;
+
 
 function extensionHarness() {
 	let commandHandler: ((args: string, context: TestTimerContext) => Promise<void>) | undefined;
+	let toolExecute: TestToolExecute | undefined;
 	const sessionHandlers = new Map<string, (...args: unknown[]) => unknown>();
 	const notifications: Array<{ message: string; type?: string }> = [];
 	const sentMessages: unknown[] = [];
@@ -56,14 +71,17 @@ function extensionHarness() {
 		registerCommand(_name: string, command: { handler: typeof commandHandler }) {
 			commandHandler = command.handler;
 		},
-		registerTool() {},
+		registerTool(tool: { execute: TestToolExecute }) {
+			toolExecute = tool.execute;
+		},
 		sendMessage(message: unknown) {
 			sentMessages.push(message);
 		},
 		logger: { warn() {} },
 	} as never);
 	if (!commandHandler) throw new Error("a2a command was not registered");
-	return { commandHandler, notifications, sentMessages, sessionHandlers };
+	if (!toolExecute) throw new Error("a2a tool was not registered");
+	return { commandHandler, toolExecute, notifications, sentMessages, sessionHandlers };
 }
 
 function timerContext(cwd = root ?? process.cwd()): TestTimerContext {
@@ -251,4 +269,70 @@ test("heartbeat ticks are single-flight and leave awaits heartbeat abortion befo
 	} finally {
 		globalThis.fetch = originalFetch;
 	}
+});
+
+test("extension adapters report malformed local configuration without rejecting", async () => {
+	root = mkdtempSync(join(tmpdir(), "omp-a2a-extension-"));
+	mkdirSync(join(root, ".omp"), { recursive: true });
+	writeFileSync(join(root, ".omp", "a2a.json"), "{");
+	const { commandHandler, toolExecute, sessionHandlers } = extensionHarness();
+	const context = timerContext();
+	const sessionStart = sessionHandlers.get("session_start");
+	if (!sessionStart) throw new Error("session_start handler was not registered");
+
+	await sessionStart({}, context);
+	expect(context.notifications.at(-1)).toMatchObject({
+		type: "error",
+		message: expect.stringContaining("A2A config error"),
+	});
+
+	await commandHandler("status", context);
+	expect(context.notifications.at(-1)).toMatchObject({
+		type: "error",
+		message: expect.stringContaining("a2a.json"),
+	});
+
+	const toolResult = await toolExecute(
+		"id",
+		{ op: "status" },
+		new AbortController().signal,
+		() => {},
+		context,
+	);
+	expect(toolResult).toMatchObject({
+		isError: true,
+		details: { error: expect.stringContaining("a2a.json") },
+	});
+});
+
+test("slash send preserves unknown flag-like text and supports an option delimiter", async () => {
+	root = mkdtempSync(join(tmpdir(), "omp-a2a-extension-"));
+	hub = await startHubServer({ port: 0, dataDir: join(root, "hub") });
+	const client = new HubClient(hub.listenUrl);
+	await client.createProject({ name: "slash-send" });
+	const receiver = await client.register({
+		project: "slash-send",
+		agentId: "receiver",
+		cwd: "/receiver",
+		pid: 1,
+	});
+	await configureRepository("slash-send");
+	const { commandHandler } = extensionHarness();
+	const context = timerContext();
+	await commandHandler("join slash-send --as controller", context);
+	await commandHandler("send receiver hello --message-id --reply-to parent", context);
+	expect(context.notifications.at(-1)).toMatchObject({
+		type: "error",
+		message: "missing value for --message-id",
+	});
+
+	await commandHandler("send receiver run --dry-run now --message-id slash-flag", context);
+	await commandHandler("send receiver -- --message-id literal", context);
+
+	const messages = await client.inbox("slash-send", "receiver", 500, receiver.leaseId);
+	expect(messages.map(({ msgId, text }) => ({ msgId, text }))).toEqual([
+		{ msgId: "slash-flag", text: "run --dry-run now" },
+		{ msgId: expect.not.stringMatching(/^literal$/), text: "--message-id literal" },
+	]);
+	await commandHandler("leave", context);
 });

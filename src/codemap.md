@@ -109,7 +109,7 @@ The transport, HTTP server, inbox, and wire-envelope implementation live under `
 2. `.omp/a2a.yaml`
 3. `.omp/a2a.json`
 
-The first existing file wins. JSON uses `JSON.parse`; YAML uses the private `parseSimpleYaml`, which supports scalar keys, inline arrays, and one-level dash lists. `normalizeConfig`:
+The first existing file wins. JSON must be an object. YAML uses the shared `parseSimpleYaml`, which supports scalar keys, inline arrays, one-level dash lists, and comments outside quoted values. Selected-file read, parse, and schema errors include the path and propagate to the adapter. `normalizeConfig`:
 
 - requires `project` and `agentId`;
 - accepts `agent_id` or `id` as identity aliases;
@@ -125,7 +125,7 @@ The first existing file wins. JSON uses `JSON.parse`; YAML uses the private `par
 - `projects/<project>/project.json` for `A2aProject`;
 - `projects/<project>/members/<agentId>.json` for each `A2aMember`.
 
-Reads return `null` for missing, unreadable, or invalid JSON. `refreshMember` derives presence without rewriting the file: non-offline records become stale after `STALE_MS` and offline after `OFFLINE_MS`; records already marked offline remain offline.
+Reads return `null` only for missing files. Unreadable or invalid JSON raises `RegistryPersistenceError`; `refreshMember` derives presence without rewriting the file: non-offline records become stale after `STALE_MS` and offline after `OFFLINE_MS`; records already marked offline remain offline.
 
 ## Direct File Map
 
@@ -139,10 +139,11 @@ Reads return `null` for missing, unreadable, or invalid JSON. `refreshMember` de
 
 **Important private functions:**
 
-- `parseArgs` splits command text into positional arguments and `--key`, `--key=value`, or boolean flags.
+- `parseArgs` splits non-send command text into positional arguments and `--key`, `--key=value`, or boolean flags.
+- `parseSendRequest` extracts the three recognized send options, preserves unknown flag-like message text, and treats bare `--` as end-of-options.
 - `usage` builds command help text.
 - `commandRequest` validates command syntax and translates it to `A2aOperationRequest`.
-- Inside `a2aExtension`: `refreshHubUrl`, `ensureClient`, `stopBackground`, `injectEnvelope`, `startBackground`, and `run` coordinate connection, delivery, and timers.
+- Inside `a2aExtension`: `refreshHubUrl`, `ensureClient`, `stopBackground`, `injectEnvelope`, `startBackground`, and `run` coordinate connection, delivery, and timers. Session, Slash, and Tool entry points convert local-config failures through their own error channels.
 
 **Dependencies:** `@oh-my-pi/pi-coding-agent`, `loadLocalConfig`, `A2aOperations`, shared validation/timing constants, `HubClient`, and Hub envelope types.
 
@@ -171,13 +172,14 @@ Reads return `null` for missing, unreadable, or invalid JSON. `refreshMember` de
 
 ### `config.ts`
 
-**Responsibility:** Discovery, parsing, normalization, and validation of repository-local A2A configuration.
+**Responsibility:** Discovery, minimal YAML parsing, normalization, and validation of repository-local A2A configuration.
 
-**Principal export:**
+**Principal exports:**
 
+- `parseSimpleYaml(text: string): Record<string, unknown>`.
 - `loadLocalConfig(cwd: string): A2aLocalConfig | null`.
 
-**Dependencies:** Node `fs`, `localConfigCandidates`, `A2aLocalConfig`, `PROJECT_NAME_RE`, and `AGENT_ID_RE`. It is consumed by `extension.ts`.
+**Dependencies:** Node `fs`, `localConfigCandidates`, `A2aLocalConfig`, `PROJECT_NAME_RE`, and `AGENT_ID_RE`. It is consumed by `extension.ts` and the Hub client's global configuration resolver.
 
 ### `types.ts`
 
