@@ -15,6 +15,8 @@ import type {
 export const MAX_INBOX_BATCH_MESSAGES = 1000;
 export const MAX_INBOX_BATCH_ESTIMATED_BYTES = 8 * 1024 * 1024;
 export const MAX_ACK_BATCH_MESSAGES = 1000;
+export const RECEIPT_ID_PREFIX = "receipt:";
+export const LEGACY_SEQUENCE_MIGRATION_BATCH_SIZE = 256;
 
 const JSON_ENVELOPE_FIXED_ESTIMATED_BYTES = 512;
 
@@ -93,6 +95,8 @@ export class InboxStore {
 	#getLedgerByRef;
 	#insertLedger;
 	#get;
+	#getPendingMessageId;
+	#getAcknowledgmentById;
 	#listAfterCursor;
 	#listSizesAfterCursor;
 	#readCursor;
@@ -185,16 +189,22 @@ export class InboxStore {
 			RETURNING next_sequence
 		`);
 		const assignSequence = this.#database.query("UPDATE inbox_messages SET server_sequence = ? WHERE rowid = ?");
-		const unsequenced = this.#database
-			.query<{ rowid: number; project: string; recipient: string }, []>(
-				"SELECT rowid, project, recipient FROM inbox_messages WHERE server_sequence IS NULL ORDER BY project, recipient, created_at, rowid",
-			)
-			.all();
-		this.#database.transaction(() => {
-			for (const row of unsequenced) {
-				assignSequence.run(this.#allocateSequence(row.project, row.recipient), row.rowid);
-			}
-		})();
+		const readUnsequencedBatch = this.#database.query<
+			{ rowid: number; project: string; recipient: string },
+			[number]
+		>(
+			"SELECT rowid, project, recipient FROM inbox_messages WHERE server_sequence IS NULL ORDER BY project, recipient, created_at, rowid LIMIT ?",
+		);
+		for (;;) {
+			const migrated = this.#database.transaction(() => {
+				const rows = readUnsequencedBatch.all(LEGACY_SEQUENCE_MIGRATION_BATCH_SIZE);
+				for (const row of rows) {
+					assignSequence.run(this.#allocateSequence(row.project, row.recipient), row.rowid);
+				}
+				return rows.length;
+			})();
+			if (migrated < LEGACY_SEQUENCE_MIGRATION_BATCH_SIZE) break;
+		}
 		const ledgerDefinition = this.#database
 			.query<{ sql: string | null }, []>(
 				"SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'message_ledger'",
@@ -338,6 +348,12 @@ export class InboxStore {
 		this.#get = this.#database.query<MessageRow, [string, string, string]>(
 			"SELECT msg_id, kind, project, sender, recipient, encoding, data, uncompressed_bytes, created_at, server_sequence, reply_to, receipt_for, delivered_at FROM inbox_messages WHERE msg_id = ? AND project = ? AND recipient = ?",
 		);
+		this.#getPendingMessageId = this.#database.query<{ msg_id: string }, [string]>(
+			"SELECT msg_id FROM inbox_messages WHERE msg_id = ?",
+		);
+		this.#getAcknowledgmentById = this.#database.query<{ msg_id: string }, [string]>(
+			"SELECT msg_id FROM inbox_acknowledgments WHERE msg_id = ?",
+		);
 		this.#listAfterCursor = this.#database.query<MessageRow, [string, string, number, number]>(
 			"SELECT msg_id, kind, project, sender, recipient, encoding, data, uncompressed_bytes, created_at, server_sequence, reply_to, receipt_for, delivered_at FROM inbox_messages WHERE project = ? AND recipient = ? AND server_sequence > ? ORDER BY server_sequence LIMIT ?",
 		);
@@ -393,6 +409,13 @@ export class InboxStore {
 						stored.payload.uncompressedBytes === message.payload.uncompressedBytes;
 					if (!matches) throw new MessageIdConflictError(`messageId already used: ${message.msgId}`);
 					return stored;
+				}
+				if (
+					message.msgId.startsWith(RECEIPT_ID_PREFIX) ||
+					this.#getPendingMessageId.get(message.msgId) ||
+					this.#getAcknowledgmentById.get(message.msgId)
+				) {
+					throw new MessageIdConflictError(`messageId reserved: ${message.msgId}`);
 				}
 				validateNew();
 				const serverSequence = this.#allocateSequence(message.project, message.to);
@@ -477,7 +500,7 @@ export class InboxStore {
 						const text = `Delivered msg=${message.msgId} to=${message.to}`;
 						this.#insertEnvelope({
 							kind: "delivery_receipt",
-							msgId: crypto.randomUUID(),
+							msgId: `${RECEIPT_ID_PREFIX}${crypto.randomUUID()}`,
 							project: message.project,
 							from: message.to,
 							to: message.from,
@@ -500,6 +523,12 @@ export class InboxStore {
 	}
 
 	#resolveCausalParent(message: HubWireMessageDraft): LedgerRow | null {
+		if (message.replyTo != null && message.replyTo.trim().length === 0) {
+			throw new CausalParentError("replyTo must not be blank");
+		}
+		if (message.replyToRef != null && message.replyToRef.trim().length === 0) {
+			throw new CausalParentError("replyToRef must not be blank");
+		}
 		const parentById = message.replyTo ? this.#getLedger.get(message.replyTo) : null;
 		if (message.replyTo && !parentById) throw new CausalParentError(`unknown replyTo: ${message.replyTo}`);
 

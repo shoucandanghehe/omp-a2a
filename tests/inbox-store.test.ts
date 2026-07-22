@@ -1,11 +1,16 @@
 import { afterEach, expect, test } from "bun:test";
+import { Database } from "bun:sqlite";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	CausalParentError,
 	InboxStore,
+	LEGACY_SEQUENCE_MIGRATION_BATCH_SIZE,
 	MAX_ACK_BATCH_MESSAGES,
 	MAX_INBOX_BATCH_ESTIMATED_BYTES,
+	MessageIdConflictError,
+	RECEIPT_ID_PREFIX,
 	OutOfOrderAcknowledgmentError,
 } from "../src/hub/inbox";
 import { encodeTextPayload } from "../src/hub/payload";
@@ -148,4 +153,108 @@ test("acknowledgment rejects a raw batch over the count cap", () => {
 			Array.from({ length: MAX_ACK_BATCH_MESSAGES + 1 }, () => "duplicate"),
 		),
 	).toThrow(`acknowledgment batch exceeds ${MAX_ACK_BATCH_MESSAGES} messages`);
+});
+
+test("normal message retries remain idempotent before receipt ID reservation", () => {
+	root = mkdtempSync(join(tmpdir(), "omp-a2a-store-"));
+	store = new InboxStore(join(root, "inbox.sqlite"));
+	const message = draft("normal-retry", "same payload");
+
+	const first = store.enqueue(message, () => {});
+	store.acknowledge("storage", "receiver", [first.msgId]);
+	expect(store.enqueue(message, () => {})).toEqual(first);
+	expect(store.read("storage", "receiver").messages).toEqual([]);
+});
+
+test("receipt IDs stay reserved while pending and after acknowledgment", () => {
+	root = mkdtempSync(join(tmpdir(), "omp-a2a-store-"));
+	const databasePath = join(root, "inbox.sqlite");
+	store = new InboxStore(databasePath);
+	const message = store.enqueue(draft("receipt-source", "deliver me"), () => {});
+	store.acknowledge("storage", "receiver", [message.msgId]);
+	const generatedReceipt = store.read("storage", "sender").messages[0]!;
+	expect(generatedReceipt.kind).toBe("delivery_receipt");
+	expect(generatedReceipt.msgId.startsWith(RECEIPT_ID_PREFIX)).toBe(true);
+
+	store.close();
+	const database = new Database(databasePath);
+	const legacyReceiptId = "legacy-receipt-id";
+	database
+		.query("UPDATE inbox_messages SET msg_id = ? WHERE msg_id = ?")
+		.run(legacyReceiptId, generatedReceipt.msgId);
+	database.close();
+	store = new InboxStore(databasePath);
+
+	expect(() => store!.enqueue(draft(legacyReceiptId, "reuse pending receipt"), () => {})).toThrow(
+		MessageIdConflictError,
+	);
+	store.acknowledge("storage", "sender", [legacyReceiptId]);
+	expect(() => store!.enqueue(draft(legacyReceiptId, "reuse acknowledged receipt"), () => {})).toThrow(
+		MessageIdConflictError,
+	);
+});
+
+test("reserved receipt prefix is unavailable to normal messages", () => {
+	root = mkdtempSync(join(tmpdir(), "omp-a2a-store-"));
+	store = new InboxStore(join(root, "inbox.sqlite"));
+
+	expect(() => store!.enqueue(draft(`${RECEIPT_ID_PREFIX}user-selected`, "no"), () => {})).toThrow(
+		MessageIdConflictError,
+	);
+});
+
+test("blank causal fields are rejected at the InboxStore boundary", () => {
+	root = mkdtempSync(join(tmpdir(), "omp-a2a-store-"));
+	store = new InboxStore(join(root, "inbox.sqlite"));
+
+	expect(() => store!.enqueue({ ...draft("blank-reply", "no"), replyTo: " \t\n" }, () => {})).toThrow(
+		CausalParentError,
+	);
+	expect(() =>
+		store!.enqueue({ ...draft("blank-ref", "no"), replyToRef: " \t\n" }, () => {}),
+	).toThrow(CausalParentError);
+});
+
+test("legacy sequence migration batches NULL rows in exact FIFO order", () => {
+	root = mkdtempSync(join(tmpdir(), "omp-a2a-store-"));
+	const databasePath = join(root, "inbox.sqlite");
+	const database = new Database(databasePath, { create: true });
+	database.run(`
+		CREATE TABLE inbox_messages (
+			msg_id TEXT PRIMARY KEY,
+			kind TEXT NOT NULL DEFAULT 'message',
+			project TEXT NOT NULL,
+			sender TEXT NOT NULL,
+			recipient TEXT NOT NULL,
+			encoding TEXT NOT NULL,
+			data TEXT NOT NULL,
+			uncompressed_bytes INTEGER NOT NULL,
+			created_at INTEGER NOT NULL,
+			server_sequence INTEGER,
+			reply_to TEXT,
+			receipt_for TEXT,
+			delivered_at INTEGER
+		)
+	`);
+	const insert = database.query(
+		"INSERT INTO inbox_messages(msg_id, project, sender, recipient, encoding, data, uncompressed_bytes, created_at, server_sequence) VALUES (?, ?, ?, ?, 'identity', ?, ?, ?, ?)",
+	);
+	const legacyCount = LEGACY_SEQUENCE_MIGRATION_BATCH_SIZE + 3;
+	for (let index = 0; index < legacyCount; index += 1) {
+		const text = `legacy-${index}`;
+		insert.run(text, "storage", "sender", "receiver", text, text.length, Math.floor(index / 2), null);
+	}
+	insert.run("already-sequenced", "storage", "sender", "other", "assigned", 8, 0, 9);
+	database.close();
+
+	store = new InboxStore(databasePath);
+	expect(
+		store
+			.read("storage", "receiver", legacyCount)
+			.messages.map((message) => [message.msgId, message.serverSequence]),
+	).toEqual(Array.from({ length: legacyCount }, (_, index) => [`legacy-${index}`, index + 1]));
+	expect(store.read("storage", "other").messages[0]).toMatchObject({
+		msgId: "already-sequenced",
+		serverSequence: 9,
+	});
 });

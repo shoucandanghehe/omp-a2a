@@ -1,8 +1,13 @@
 import { afterEach, describe, expect, spyOn, test } from "bun:test";
+import { Database } from "bun:sqlite";
+import { once } from "node:events";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createConnection } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { MAX_ACK_BATCH_MESSAGES } from "../src/hub/inbox";
+import { gzipSync } from "node:zlib";
+import { MAX_ACK_BATCH_MESSAGES, MAX_INBOX_BATCH_MESSAGES } from "../src/hub/inbox";
+import { MAX_TEXT_BYTES } from "../src/hub/payload";
 import {
 	hubMetaPath,
 	hubPidPath,
@@ -256,6 +261,216 @@ describe("Hub project control plane", () => {
 		expect(await response.json()).toEqual({
 			error: `acknowledgment batch exceeds ${MAX_ACK_BATCH_MESSAGES} messages`,
 		});
+	});
+
+	test("registration validates every persisted member field", async () => {
+		const hub = await startHubServer({ port: 0, dataDir: dataDir() });
+		hubs.push(hub);
+		const client = new HubClient(hub.listenUrl);
+		await client.createProject({ name: "register-shape" });
+		const invalidBodies = [
+			null,
+			{ project: "register-shape", agentId: "worker", cwd: "   " },
+			{ project: "register-shape", agentId: "worker", cwd: "/worker", pid: 1.5 },
+			{ project: "register-shape", agentId: "worker", cwd: "/worker", caps: ["tools", 1] },
+			{ project: "register-shape", agentId: "worker", cwd: "/worker", displayName: 1 },
+			{ project: "register-shape", agentId: "worker", cwd: "/worker", sessionId: [] },
+		];
+
+		for (const body of invalidBodies) {
+			const response = await fetch(`${hub.listenUrl}/v1/register`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify(body),
+			});
+			expect(response.status).toBe(400);
+		}
+		expect(await client.listMembers("register-shape", true)).toEqual([]);
+	});
+
+	test("send rejects invalid claimed sender identities", async () => {
+		const hub = await startHubServer({ port: 0, dataDir: dataDir() });
+		hubs.push(hub);
+		const client = new HubClient(hub.listenUrl);
+		await client.createProject({ name: "sender-shape" });
+		const worker = await client.register({ project: "sender-shape", agentId: "worker", cwd: "/worker", pid: 1 });
+
+		const response = await fetch(`${hub.listenUrl}/v1/send`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				project: "sender-shape",
+				from: "../controller",
+				to: "worker",
+				payload: { encoding: "identity", data: "work", uncompressedBytes: 4 },
+			}),
+		});
+
+		expect(response.status).toBe(400);
+		expect(await client.inbox("sender-shape", "worker", 500, worker.leaseId)).toEqual([]);
+	});
+
+	test("send maps malformed nonblank causal references to HTTP 400", async () => {
+		const hub = await startHubServer({ port: 0, dataDir: dataDir() });
+		hubs.push(hub);
+		const client = new HubClient(hub.listenUrl);
+		await client.createProject({ name: "causal-shape" });
+		await client.register({ project: "causal-shape", agentId: "worker", cwd: "/worker", pid: 1 });
+
+		const response = await fetch(`${hub.listenUrl}/v1/send`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				project: "causal-shape",
+				from: "controller",
+				to: "worker",
+				payload: { encoding: "identity", data: "work", uncompressedBytes: 4 },
+				replyToRef: "not-a-ref",
+			}),
+		});
+
+		expect(response.status).toBe(400);
+		expect(await response.json()).toEqual({ error: "invalid messageRef: not-a-ref" });
+	});
+
+	test("Inbox limits must be integers within the storage bound", async () => {
+		const hub = await startHubServer({ port: 0, dataDir: dataDir() });
+		hubs.push(hub);
+		const client = new HubClient(hub.listenUrl);
+		await client.createProject({ name: "limit-shape" });
+		const worker = await client.register({ project: "limit-shape", agentId: "worker", cwd: "/worker", pid: 1 });
+		const headers = { "x-a2a-lease": worker.leaseId };
+
+		for (const limit of ["0", "1.5", String(MAX_INBOX_BATCH_MESSAGES + 1), "invalid"]) {
+			const response = await fetch(
+				`${hub.listenUrl}/v1/inbox?project=limit-shape&agentId=worker&limit=${limit}`,
+				{ headers },
+			);
+			expect(response.status).toBe(400);
+		}
+		for (const limit of [0, 1.5, MAX_INBOX_BATCH_MESSAGES + 1, "1"]) {
+			const response = await fetch(`${hub.listenUrl}/v1/inbox/read`, {
+				method: "POST",
+				headers: { "content-type": "application/json" },
+				body: JSON.stringify({
+					project: "limit-shape",
+					agentId: "worker",
+					leaseId: worker.leaseId,
+					limit,
+				}),
+			});
+			expect(response.status).toBe(400);
+		}
+		expect(
+			(
+				await fetch(`${hub.listenUrl}/v1/inbox?project=limit-shape&agentId=worker&limit=1`, {
+					headers,
+				})
+			).status,
+		).toBe(200);
+	});
+
+	test("gzip expansion past the decoded limit maps to HTTP 413", async () => {
+		const hub = await startHubServer({ port: 0, dataDir: dataDir() });
+		hubs.push(hub);
+		const client = new HubClient(hub.listenUrl);
+		await client.createProject({ name: "inflate-limit" });
+		await client.register({ project: "inflate-limit", agentId: "worker", cwd: "/worker", pid: 1 });
+		const compressed = gzipSync(Buffer.from("x".repeat(MAX_TEXT_BYTES + 2))).toString("base64");
+
+		const response = await fetch(`${hub.listenUrl}/v1/send`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				project: "inflate-limit",
+				from: "controller",
+				to: "worker",
+				payload: {
+					encoding: "gzip+base64",
+					data: compressed,
+					uncompressedBytes: MAX_TEXT_BYTES,
+				},
+			}),
+		});
+
+		expect(response.status).toBe(413);
+		expect(await response.json()).toEqual({
+			error: `message text exceeds ${MAX_TEXT_BYTES} bytes after decoding`,
+		});
+	});
+
+	test("unexpected Inbox storage failures map to HTTP 500", async () => {
+		const root = dataDir();
+		const hub = await startHubServer({ port: 0, dataDir: root });
+		hubs.push(hub);
+		const client = new HubClient(hub.listenUrl);
+		await client.createProject({ name: "storage-failure" });
+		await client.register({ project: "storage-failure", agentId: "worker", cwd: "/worker", pid: 1 });
+		const database = new Database(join(root, "inbox.sqlite"));
+		database.run(`
+			CREATE TRIGGER reject_inbox_insert
+			BEFORE INSERT ON inbox_messages
+			BEGIN
+				SELECT RAISE(FAIL, 'forced storage failure');
+			END
+		`);
+		database.close();
+
+		const response = await fetch(`${hub.listenUrl}/v1/send`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				project: "storage-failure",
+				from: "controller",
+				to: "worker",
+				payload: { encoding: "identity", data: "work", uncompressedBytes: 4 },
+			}),
+		});
+
+		expect(response.status).toBe(500);
+		expect(await response.json()).toEqual({ error: "forced storage failure" });
+	});
+
+	test("corrupt Registry JSON maps to HTTP 500 instead of a domain miss", async () => {
+		const root = dataDir();
+		const hub = await startHubServer({ port: 0, dataDir: root });
+		hubs.push(hub);
+		const client = new HubClient(hub.listenUrl);
+		await client.createProject({ name: "corrupt-registry" });
+		writeFileSync(projectMetaPath("corrupt-registry", root), "{");
+
+		const response = await fetch(`${hub.listenUrl}/v1/register`, {
+			method: "POST",
+			headers: { "content-type": "application/json" },
+			body: JSON.stringify({
+				project: "corrupt-registry",
+				agentId: "worker",
+				cwd: "/worker",
+				pid: 1,
+			}),
+		});
+
+		expect(response.status).toBe(500);
+		expect(await response.json()).toEqual({ error: expect.stringContaining("invalid Registry JSON") });
+	});
+
+	test("Hub shutdown force-closes connections after its grace period", async () => {
+		const hub = await startHubServer({ port: 0, dataDir: dataDir(), shutdownGraceMs: 20 });
+		hubs.push(hub);
+		const target = new URL(hub.listenUrl);
+		const socket = createConnection(Number(target.port), target.hostname);
+		await once(socket, "connect");
+		socket.write(`GET /healthz HTTP/1.1\r\nHost: ${target.host}\r\n`);
+		const closed = once(socket, "close");
+
+		await Promise.race([
+			hub.stop(),
+			Bun.sleep(500).then(() => {
+				throw new Error("Hub shutdown exceeded its bounded grace period");
+			}),
+		]);
+		await closed;
+		expect(socket.destroyed).toBe(true);
 	});
 
 	test("a project cannot be deleted while a member is active", async () => {

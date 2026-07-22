@@ -23,11 +23,25 @@ export function encodeTextPayload(text: string): EncodedTextPayload {
 }
 
 export function decodeTextPayload(payload: EncodedTextPayload): string {
+	if (payload.uncompressedBytes > MAX_TEXT_BYTES) {
+		throw new PayloadTooLargeError(`message text exceeds ${MAX_TEXT_BYTES} bytes after decoding`);
+	}
 	let bytes: Buffer;
 	if (payload.encoding === "identity") {
 		bytes = Buffer.from(payload.data, "utf8");
 	} else if (payload.encoding === "gzip+base64") {
-		bytes = gunzipSync(Buffer.from(payload.data, "base64"), { maxOutputLength: MAX_TEXT_BYTES + 1 });
+		try {
+			bytes = gunzipSync(Buffer.from(payload.data, "base64"), { maxOutputLength: MAX_TEXT_BYTES + 1 });
+		} catch (error) {
+			if (
+				error instanceof Error &&
+				"code" in error &&
+				error.code === "ERR_BUFFER_TOO_LARGE"
+			) {
+				throw new PayloadTooLargeError(`message text exceeds ${MAX_TEXT_BYTES} bytes after decoding`);
+			}
+			throw error;
+		}
 	} else {
 		throw new Error("unsupported message text encoding");
 	}

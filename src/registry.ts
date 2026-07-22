@@ -12,7 +12,9 @@ import {
 import type { A2aMember, A2aProject, JoinOptions, ListMembersOptions, MemberRegistration } from "./types";
 import { AGENT_ID_RE, OFFLINE_MS, PROJECT_NAME_RE, STALE_MS } from "./types";
 
-export class RegistryConflictError extends Error {}
+export class RegistryOperationError extends Error {}
+export class RegistryConflictError extends RegistryOperationError {}
+export class RegistryPersistenceError extends Error {}
 
 type StoredMember = A2aMember & { leaseId: string };
 
@@ -22,10 +24,21 @@ function publicMember(member: StoredMember): A2aMember {
 }
 
 function readJson<T>(file: string): T | null {
+	let source: string;
 	try {
-		return JSON.parse(fs.readFileSync(file, "utf8")) as T;
-	} catch {
-		return null;
+		source = fs.readFileSync(file, "utf8");
+	} catch (error) {
+		if (error instanceof Error && "code" in error && error.code === "ENOENT") return null;
+		throw new RegistryPersistenceError(
+			`failed to read Registry JSON ${file}: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	try {
+		return JSON.parse(source) as T;
+	} catch (error) {
+		throw new RegistryPersistenceError(
+			`invalid Registry JSON ${file}: ${error instanceof Error ? error.message : String(error)}`,
+		);
 	}
 }
 
@@ -43,13 +56,13 @@ function writeJsonAtomic(file: string, data: unknown): void {
 
 function assertProjectName(name: string): void {
 	if (!PROJECT_NAME_RE.test(name)) {
-		throw new Error(`invalid project name "${name}" (use [a-zA-Z0-9._-], start alnum, max 64)`);
+		throw new RegistryOperationError(`invalid project name "${name}" (use [a-zA-Z0-9._-], start alnum, max 64)`);
 	}
 }
 
 function assertAgentId(id: string): void {
 	if (!AGENT_ID_RE.test(id)) {
-		throw new Error(`invalid agentId "${id}" (use [a-zA-Z0-9._-], start alnum, max 32)`);
+		throw new RegistryOperationError(`invalid agentId "${id}" (use [a-zA-Z0-9._-], start alnum, max 32)`);
 	}
 }
 
@@ -128,7 +141,7 @@ export function readMember(project: string, agentId: string, dataDir?: string): 
 
 export function listMembers(opts: ListMembersOptions & { dataDir?: string }): A2aMember[] {
 	assertProjectName(opts.project);
-	if (!getProject(opts.project, opts.dataDir)) throw new Error(`unknown project: ${opts.project}`);
+	if (!getProject(opts.project, opts.dataDir)) throw new RegistryOperationError(`unknown project: ${opts.project}`);
 	const dir = membersDir(opts.project, opts.dataDir);
 	if (!fs.existsSync(dir)) return [];
 
@@ -147,7 +160,7 @@ export function joinProject(opts: JoinOptions & { dataDir?: string }): MemberReg
 	assertProjectName(opts.project);
 	assertAgentId(opts.agentId);
 	if (!getProject(opts.project, opts.dataDir)) {
-		throw new Error(`unknown project: ${opts.project} (create it first with /a2a project create)`);
+		throw new RegistryOperationError(`unknown project: ${opts.project} (create it first with /a2a project create)`);
 	}
 
 	const existing = readMember(opts.project, opts.agentId, opts.dataDir);
@@ -179,9 +192,11 @@ export function heartbeat(project: string, agentId: string, leaseId: string, dat
 	assertProjectName(project);
 	assertAgentId(agentId);
 	const stored = readStoredMember(project, agentId, dataDir);
-	if (!stored) throw new Error(`not a member: ${agentId}@${project}`);
-	if (!leaseId || stored.leaseId !== leaseId) throw new Error(`lease ownership mismatch: ${agentId}@${project}`);
-	if (stored.status === "offline") throw new Error(`member is offline: ${agentId}@${project}`);
+	if (!stored) throw new RegistryOperationError(`not a member: ${agentId}@${project}`);
+	if (!leaseId || stored.leaseId !== leaseId) {
+		throw new RegistryOperationError(`lease ownership mismatch: ${agentId}@${project}`);
+	}
+	if (stored.status === "offline") throw new RegistryOperationError(`member is offline: ${agentId}@${project}`);
 	const next: StoredMember = { ...stored, lastSeenAt: Date.now(), status: "online" };
 	writeJsonAtomic(memberPath(project, agentId, dataDir), next);
 	return publicMember(next);
@@ -191,8 +206,10 @@ export function leaveProject(project: string, agentId: string, leaseId: string, 
 	assertProjectName(project);
 	assertAgentId(agentId);
 	const stored = readStoredMember(project, agentId, dataDir);
-	if (!stored) throw new Error(`not a member: ${agentId}@${project}`);
-	if (!leaseId || stored.leaseId !== leaseId) throw new Error(`lease ownership mismatch: ${agentId}@${project}`);
+	if (!stored) throw new RegistryOperationError(`not a member: ${agentId}@${project}`);
+	if (!leaseId || stored.leaseId !== leaseId) {
+		throw new RegistryOperationError(`lease ownership mismatch: ${agentId}@${project}`);
+	}
 	if (stored.status === "offline") return;
 	writeJsonAtomic(memberPath(project, agentId, dataDir), {
 		...stored,
@@ -210,10 +227,12 @@ export function authorizeInboxAccess(
 	assertProjectName(project);
 	assertAgentId(agentId);
 	const stored = readStoredMember(project, agentId, dataDir);
-	if (!stored) throw new Error(`not a member: ${agentId}@${project}`);
+	if (!stored) throw new RegistryOperationError(`not a member: ${agentId}@${project}`);
 	const member = refreshMember(stored);
-	if (member.status === "offline") throw new Error(`member is offline: ${agentId}@${project}`);
-	if (!leaseId || member.leaseId !== leaseId) throw new Error(`lease ownership mismatch: ${agentId}@${project}`);
+	if (member.status === "offline") throw new RegistryOperationError(`member is offline: ${agentId}@${project}`);
+	if (!leaseId || member.leaseId !== leaseId) {
+		throw new RegistryOperationError(`lease ownership mismatch: ${agentId}@${project}`);
+	}
 }
 
 export function formatMembersTable(members: A2aMember[]): string {

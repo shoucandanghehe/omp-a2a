@@ -44,20 +44,20 @@ Project CRUD, registration, heartbeat presence, member listing, and unregister o
 ### Message plane
 
 1. `HubClient.send` encodes text and posts a message with an opaque idempotency key.
-2. The Hub validates the recipient, causal parent, payload, and message ID.
+2. The Hub validates the claimed identity syntax, recipient, causal parent, payload, message ID, and request bounds.
 3. `InboxStore` transactionally allocates a sequence scoped to `(project, recipient)`, records the durable ledger entry, and enqueues the envelope.
 4. The receiving extension polls with its current membership lease without consuming, injects the envelope as an OMP `steer` or `followUp`, then acknowledges it with the same lease.
-5. The acknowledgment transaction removes the pending row, advances the cursor, records acknowledgment state, and enqueues one delivery receipt for the original sender. A trust-on-claim sender must register before consuming that receipt stream.
+5. The acknowledgment transaction removes the pending row, advances the cursor, records acknowledgment state, and enqueues one delivery receipt with a Hub-reserved `receipt:` ID for the original sender. A trust-on-claim sender must register before consuming that receipt stream.
 
 This is at-least-once delivery around the injection/acknowledgment boundary. Consumers must deduplicate by `messageId` because a crash after injection and before acknowledgment causes redelivery.
 
 ### Payload and reference contracts
 
 - Text below 32 KiB remains identity encoded; larger text uses gzip plus Base64.
-- Decoded text is capped at 4 MiB.
+- Decoded text is capped at 4 MiB before or during decompression.
 - `messageRef` uses `<recipient>:<serverSequence>` for agent-facing references.
-- `replyTo` and `replyToRef` must resolve to the same-project, same-participant-pair conversation.
-- Inbox reads are ordered only by the Hub-assigned per-stream sequence; timestamps are diagnostic.
+- `replyTo` and `replyToRef` must be non-blank and resolve to the same-project, same-participant-pair conversation.
+- Inbox read limits are integers from 1 through 1,000; reads are ordered only by the Hub-assigned per-stream sequence, while timestamps are diagnostic.
 
 ## Configuration and Deployment
 
@@ -100,7 +100,7 @@ Operational guidance and user-visible workarounds are documented in [`README.md`
 
 ## Verification
 
-`bun run smoke` runs the Bun test suite followed by both executable smoke scenarios. The suite covers Hub/data-directory isolation, lease ownership and stale-owner fencing, Hub-bound membership, active-poll cancellation, failed-join timer recovery, request deadlines, single-flight heartbeat, deployment-environment isolation, advertised/listener URL separation, online identity conflicts, durable Inbox restart, byte-bounded pages, acknowledgment batch limits, gzip boundaries, schema migration, stream ordering, idempotent message IDs, causal references, explicit acknowledgments, cursor durability, at-least-once redelivery, delivery receipts, recoverable project deletion, startup cleanup, and the shared operations layer.
+`bun run smoke` runs the Bun test suite followed by both executable smoke scenarios. The suite covers Hub/data-directory isolation, lease ownership and stale-owner fencing, Hub-bound membership, active-poll cancellation, failed-join timer recovery, request deadlines, malformed successful responses, single-flight heartbeat, deployment-environment isolation, advertised/listener URL separation, registration and identity validation, bounded shutdown, online identity conflicts, durable Inbox restart, byte/count-bounded pages, acknowledgment batch limits, receipt ID reservation, gzip boundaries, batched schema migration, stream ordering, idempotent message IDs, causal references, explicit acknowledgments, cursor durability, at-least-once redelivery, delivery receipts, storage-error mapping, recoverable project deletion, startup cleanup, and the shared operations layer.
 
 This command does not perform a standalone TypeScript type check, linting, or a real Docker image/network smoke. Automated coverage remains concentrated in Hub persistence and ordering; malformed configuration and real container/network behavior are not covered end to end.
 

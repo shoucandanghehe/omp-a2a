@@ -401,6 +401,18 @@ test("HubClient propagates cancellation during response body parsing", async () 
 	}
 });
 
+test("HubClient rejects malformed JSON from successful responses", async () => {
+	const originalFetch = globalThis.fetch;
+	globalThis.fetch = (async () => new Response("not-json", { status: 200 })) as typeof fetch;
+
+	try {
+		const client = new HubClient("http://hub.invalid");
+		await expect(client.meta()).rejects.toThrow("Hub returned invalid JSON for http://hub.invalid/v1/meta");
+	} finally {
+		globalThis.fetch = originalFetch;
+	}
+});
+
 test("HubClient rejects invalid request timeouts", () => {
 	for (const requestTimeoutMs of [0, -1, Number.NaN, Number.POSITIVE_INFINITY]) {
 		expect(() => new HubClient("http://hub.invalid", { requestTimeoutMs })).toThrow(

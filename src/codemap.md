@@ -218,7 +218,7 @@ Reads return `null` for missing, unreadable, or invalid JSON. `refreshMember` de
 
 **Exports:**
 
-- Error: `RegistryConflictError`.
+- Errors: `RegistryOperationError` for expected request/domain failures, `RegistryConflictError` for ownership/name conflicts, and `RegistryPersistenceError` for unreadable or malformed persisted JSON.
 - Project API: `createProject`, `deleteProject`, `getProject`, `listProjects`.
 - Member API: `readMember`, `listMembers`, `joinProject`, `heartbeat`, `leaveProject`.
 - Presentation/diagnostic helpers: `formatMembersTable`, `hostnameHint`.
@@ -226,7 +226,7 @@ Reads return `null` for missing, unreadable, or invalid JSON. `refreshMember` de
 
 **Dependencies:** Node `fs`, `os`, and `path`; storage helpers from `paths.ts`; contracts and constants from `types.ts`.
 
-**Consumer:** `src/hub/server.ts` imports the registry's project and membership operations plus `RegistryConflictError` to implement its HTTP endpoints.
+**Consumer:** `src/hub/server.ts` imports the registry's project and membership operations plus `RegistryOperationError` and `RegistryConflictError` to distinguish HTTP client errors from unexpected persistence failures; `RegistryPersistenceError` propagates through the generic HTTP `500` path.
 
 ## Hub Integration Boundary
 
