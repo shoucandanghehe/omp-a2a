@@ -1,0 +1,56 @@
+{
+  "metadata": {
+    "version": "1.0.0",
+    "last_run": "2026-07-22T18:25:40.909Z",
+    "root": "/home/particleg/coding/OtherProjects/omp-a2a",
+    "include_patterns": [
+      "src/**/*.ts",
+      "scripts/*.ts",
+      "package.json",
+      "Dockerfile",
+      "docker-compose.yml",
+      "config.example.yml",
+      "README.md"
+    ],
+    "exclude_patterns": [
+      "**/*.test.ts",
+      "**/*.spec.ts",
+      "tests/**",
+      "__tests__/**",
+      "docs/**",
+      "dist/**",
+      "build/**",
+      "node_modules/**"
+    ],
+    "exceptions": []
+  },
+  "file_hashes": {
+    "Dockerfile": "c65f5b5a97dca275d7a52b54f9d48f2c",
+    "README.md": "5676c13e939b9977b7f1849f99c18112",
+    "config.example.yml": "50cb75096863d76c0a750f7813286eb3",
+    "docker-compose.yml": "01b48497c790325babfa7201d2411517",
+    "package.json": "9682dfb7c4ed470fba63e68ef6bb9d07",
+    "scripts/smoke-hub.ts": "fa49a1d56fbd6b73c82ee10c4f5d2f2e",
+    "scripts/smoke.ts": "6481ac5f4db3dfb72757646a549dc609",
+    "src/config.ts": "ea80e285e463531643d2821b3e62c4cf",
+    "src/extension.ts": "a1666c641647ef37c73a7c4f24b6518a",
+    "src/hub/cli.ts": "a5f4fa82fc3f2e44915391b0eb74fda4",
+    "src/hub/client.ts": "9de2b3d8e1509a3f5a7353f5a5f2a1e5",
+    "src/hub/data-lock.ts": "b62e6ee5d63bf43ad8a3fd07703f8837",
+    "src/hub/inbox.ts": "2b9715bd59087c693ec1b5f7e52e28d2",
+    "src/hub/message-ref.ts": "9f54f41435413e2adc8f4752975855ff",
+    "src/hub/payload.ts": "cacf43376109728d4a295f3e4d8efcc1",
+    "src/hub/server.ts": "88b1b2b82920a0150ca81c31a447e7e7",
+    "src/hub/types.ts": "e41f73879e3b8bb5db067ee720341f50",
+    "src/operations.ts": "231952e53fa89e7b048e0cc30d9334fa",
+    "src/paths.ts": "0bee882654c7814f703202b0444f471f",
+    "src/registry.ts": "2805e81b7ea7a1a921726859306864d1",
+    "src/types.ts": "9c37517e5670215069eb695d96346743"
+  },
+  "folder_hashes": {
+    ".": "3219ff0070d515fae2e1f79db4102f02",
+    "scripts": "53f0b2b48184ffe4776a29cc2d322eb6",
+    "src": "a4a2405c09619b6d5cd0f45869e1d482",
+    "src/hub": "65a80968e113542d9f165f5210daee37"
+  }
+}
