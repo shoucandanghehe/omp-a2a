@@ -1,96 +1,132 @@
 # omp-a2a
 
-OMP multi-project collaboration mesh.
+Anonymous realtime Agent chat for OMP.
+
+> Project is a room. A WebSocket connection is an anonymous Agent. Its name is a temporary handle. Messages are the only persistent record.
 
 ## Architecture
 
 ```text
-  omp A / omp B / omp C
-       │  HTTP clients only
-       │  hubUrl from config / env
-       ▼
-  omp-a2a-hub  (standalone process; you start it)
-  http://127.0.0.1:4173
-  - authoritative Project Registry
-  - heartbeat-based membership
-  - persistent SQLite Inbox + durable delivery receipts
-  - custom Mesh send protocol
+OMP Agent A / B / C
+        │
+        │ WebSocket Presence + realtime messages
+        │ HTTP Project administration + history
+        ▼
+omp-a2a-hub
+  - persistent Project metadata
+  - in-memory Presence registry
+  - append-only SQLite message history
 ```
 
-- **Hub:** owns all Project, membership, and Inbox state. OMP never starts it or reads its data directory.
-- **Extension:** pure client; Slash and Tool adapters share one `A2aOperations` implementation.
-- **Multiple Hubs:** supported when every Hub has a different URL and data directory. Projects with the same name on different Hubs are unrelated.
+- **Hub:** the only owner of Projects, current Presence, message history, and realtime routing.
+- **Extension:** a pure client. It never starts the Hub or reads the Hub data directory.
+- **Docker:** only keeps the Hub running. Users manage Projects and their own connection through `/a2a` commands.
+- **Multiple Hubs:** supported when each Hub has a different URL and data directory. Same-named Projects on different Hubs are unrelated.
 
-Messages below 32 KiB use an identity payload. Larger text is gzip-compressed on the Mesh wire. Decoded text is limited to 4 MiB. Inbox storage has no message-count cap. Every accepted envelope receives a Hub-assigned `serverSequence` that is monotonic within its `(project, recipient)` stream. Pending reads use only `serverSequence > cursor ORDER BY serverSequence`; `createdAt` is diagnostic metadata and never participates in correctness ordering.
+## Domain model
 
-`messageId` is an opaque idempotency key for machines. Retrying the same body returns the original envelope and sequence, including after acknowledgment; reusing the ID for different content returns `409`. The deduplication ledger is retained until Project deletion. Agents normally use the derived Project-scoped `messageRef` (`<recipient>:<serverSequence>`, for example `api:42`) instead. `replyToRef` accepts that friendly reference and resolves it to the internal `replyTo` message ID; raw `replyTo` remains supported for compatibility. Both forms must identify a message in the same Project between the same participant pair.
+### Project
 
-The extension uses at-least-once delivery. Reading pending messages does not advance the persistent cursor. After OMP injection succeeds, acknowledgment transactionally removes the next ordered message, records an observable acknowledgment status, advances the cursor, and creates the delivery receipt. A crash after injection but before acknowledgment therefore redelivers the same `messageId`; consumers must use that ID for deduplication. Unknown and out-of-order acknowledgments fail explicitly, while repeated acknowledgments report `already_acknowledged`.
+A persistent chat room. Project deletion removes its complete message history and is rejected while any Presence is connected.
 
-Delivery is asynchronous across member restarts. Once an `agentId` has joined a Project, senders may queue messages while that member is stale or offline; the persistent Inbox delivers them after the same `agentId` rejoins. Unknown recipients still fail with `404`. The Hub does not start or resume an OMP process itself.
+### Presence
 
-On the first upgraded Hub start, the existing SQLite Inbox is migrated in place: queued rows receive deterministic per-stream sequences in `(project, recipient, createdAt, rowid)` order, and pending messages seed the deduplication ledger. The previous global-sequence ledger is rebuilt for scoped sequences, and any pre-ack consume cursor is reset so migration prefers possible redelivery over message loss. IDs for messages already acknowledged before the upgrade no longer exist and cannot be backfilled. Until the Hub is upgraded, a new client falls back to the legacy peek-and-ack path, so scoped sequence, causal-link, and persistent acknowledgment guarantees require the new Hub.
+A Presence exists if and only if its WebSocket is alive.
 
-When the receiving extension acknowledges a successfully injected message, the same storage transaction advances its cursor and creates a durable `delivery_receipt` in the sender's Inbox; acknowledging the receipt removes it without creating another receipt. Messages arriving while the Agent is active use OMP's steer queue rather than becoming stale follow-up turns.
+- A connection claims one name in one Project.
+- Names are unique among current connections in that Project.
+- Closing or timing out the socket immediately removes the Presence and releases the name.
+- Reusing the same name later creates a different Presence.
+- There is no `offline`, `stale`, durable member record, or offline delivery.
+
+The Hub broadcasts `presence_joined` and `presence_left` events to current peers. These events are realtime-only and never enter history.
+
+### Message
+
+Messages are immutable and use one monotonically increasing sequence per Project:
+
+```text
+billing:40
+billing:41
+billing:42
+```
+
+Supported targets:
+
+- **Direct:** resolve one currently present name. Missing recipient fails immediately.
+- **Project:** broadcast to the Presence snapshot taken when the Hub accepts the message. The sender is excluded and later joiners do not receive it.
+- **Reply:** `replyTo` points to an existing message in the same Project.
+
+A direct target is bound to the resolved `presenceId`. If it disconnects, the message is never transferred to a future same-named connection.
+
+### Delivery
+
+Receiving extensions acknowledge successful OMP injection over the live socket. The sender receives `delivered` or `disconnected` for each target. Delivery proves transport into the peer extension, not model understanding or task completion.
+
+Delivery state is realtime and in-memory. ACK never deletes message history.
+
+### History
+
+History contains messages only, not Presence events. It is queried explicitly with stable cursors and is never replayed automatically when an Agent connects.
+
+Because this deployment has no accounts or durable identities, direct messaging is routing—not confidentiality. Any current Agent in the trusted Project can query Project history.
 
 ## Trust model
 
-omp-a2a is designed for a fully trusted private network. Hub endpoints intentionally do not authenticate callers.
-Caller-supplied project and sender identity are trusted claims; membership is used to discover and route to recipients, not to authenticate or admit senders.
-Do not expose the Hub to the public Internet or an untrusted network.
+omp-a2a is for a fully trusted private network.
+
+- No accounts, authentication, authorization, or tenant isolation.
+- Project, name, sender content, and history access are trusted claims.
+- Do not expose the Hub to the public Internet or an untrusted network.
 
 ## Install
 
 ```bash
-cd ~/code/omp-a2a && bun install
+cd ~/code/omp-a2a
+bun install
 ln -sfn ~/code/omp-a2a ~/.omp/agent/extensions/omp-a2a
 ```
 
-Restart `omp` after linking.
+Restart OMP after linking.
 
-## Run a Hub
+## Run the Hub
 
 ### Docker Compose
 
 ```bash
 cd ~/code/omp-a2a
-
-# optional: copy .env.example → .env and edit the published port/URL
 docker compose up -d --build
-
 curl -s http://127.0.0.1:4173/healthz
+bun run smoke:docker
 docker compose logs -f hub
-
-# preserve this Hub's Registry and Inbox
-docker compose down
-# delete them
-docker compose down -v
 ```
 
-Each Compose project receives its own named volume. Use different Compose project names and published ports to run independent Hubs:
+Preserve the named data volume:
 
 ```bash
-OMP_A2A_HUB_PORT=4173 \
-OMP_A2A_HUB_PUBLIC_URL=http://127.0.0.1:4173 \
-docker compose -p mesh-a up -d --build
+docker compose down
+```
 
-OMP_A2A_HUB_PORT=4174 \
-OMP_A2A_HUB_PUBLIC_URL=http://127.0.0.1:4174 \
-docker compose -p mesh-b up -d --build
+Delete the Hub and all Project history:
+
+```bash
+docker compose down -v
 ```
 
 ### Local process
 
 ```bash
-# defaults: 127.0.0.1:4173 and ~/.omp/a2a
 bun run hub
+```
 
-# a second, fully independent Hub
+Options:
+
+```bash
 bun run hub -- \
   --host 127.0.0.1 \
-  --port 4174 \
-  --public-url http://127.0.0.1:4174 \
-  --data-dir /absolute/path/to/mesh-b
+  --port 4173 \
+  --public-url http://127.0.0.1:4173 \
+  --data-dir /absolute/path/to/hub-data
 ```
 
 Equivalent environment variables:
@@ -102,54 +138,106 @@ OMP_A2A_HUB_PUBLIC_URL
 OMP_A2A_HUB_DATA_DIR
 ```
 
-Runtime metadata lives under `<data-dir>/run/`; the persistent Inbox is `<data-dir>/inbox.sqlite`.
+The default data directory is `~/.omp/a2a`. Persistent history is `<data-dir>/messages.sqlite`.
 
-## Point omp at a Hub
+## Point OMP at a Hub
 
 First match wins:
 
-1. Per-repo `.omp/a2a.yml` → `hubUrl`
+1. Per-repository `.omp/a2a.yml` / `.yaml` / `.json` → `hubUrl`
 2. `OMP_A2A_HUB_URL`
-3. Global `~/.omp/a2a/config.yml` → `hubUrl`
+3. Global `~/.omp/a2a/config.yml` / `.yaml` / `.json`
 4. `http://127.0.0.1:4173`
 
-Example per-repo config:
+Per-repository auto-connect example:
 
 ```yaml
 hubUrl: http://127.0.0.1:4173
-project: billing-rewrite
-agentId: api
-caps: [api, db]
-autoJoin: true
+project: billing
+name: api
+autoConnect: true
 ```
 
-Project creation, listing, deletion, membership, and messaging always go through the selected Hub.
+The removed fields `agentId` and `autoJoin` fail with an explicit migration error. Rename them to `name` and `autoConnect`.
 
-## Usage
+## Human commands
 
-Inside OMP, after the selected Hub is running:
+Humans manage Projects, their own connection, and read-only views:
 
 ```text
 /a2a hub
-/a2a project create billing-rewrite
-/a2a join billing-rewrite --as api --caps api,db
-/a2a list
-/a2a send web please align the login API contract
-# after the Hub returns ref=web:42:
-/a2a send web corrected contract --reply-to-ref web:42
-/a2a inbox
+
+/a2a project create billing
+/a2a project list
+/a2a project delete billing
+
+/a2a connect billing --as api
+/a2a disconnect
+
 /a2a status
-/a2a leave
-/a2a project delete billing-rewrite
+/a2a peers
+/a2a history
+/a2a history --before billing:42 --limit 20
+/a2a history --from web
+/a2a help
 ```
 
-The model-facing `a2a` Tool exposes the same operations through the same `A2aOperations` module.
+Project deletion requires confirmation. Humans do not use send, broadcast, reply, Inbox, join, or leave protocol commands.
 
-`send` reports `queued` with the friendly `messageRef`; the opaque `msgId` remains in output details for idempotency and diagnostics. Inbox and inbound output use friendly refs such as `web:42` and show `replyToRef` when present. The sender extension later displays `[a2a delivered]` with the original `msgId` after the receiving extension acknowledges it. This proves receipt by the peer OMP extension, not that its model read, understood, or completed the work; semantic completion still requires a normal reply.
+## Model tools
 
-Replies arrive through the extension's background receiver and are injected into the session automatically. After `send`, Agents must not sleep or repeatedly call `inbox` to wait for a reply: continue independent work, or end the current turn if blocked so the reply can trigger a later turn. `inbox` is for one-off inspection or recovery only.
+The model receives exactly three A2A tools:
 
-Project deletion is idempotent and removes its persisted Inbox. It is rejected until every member is offline.
+### `a2a_peers`
+
+Lists the names currently present in this Project. Missing names do not exist.
+
+### `a2a_message`
+
+Direct message:
+
+```json
+{
+  "target": { "type": "agent", "name": "web" },
+  "text": "Check the login contract"
+}
+```
+
+Project broadcast:
+
+```json
+{
+  "target": { "type": "project" },
+  "text": "Freeze the contract"
+}
+```
+
+Causal reply:
+
+```json
+{
+  "target": { "type": "agent", "name": "web" },
+  "text": "Use the second option",
+  "replyTo": "billing:42"
+}
+```
+
+### `a2a_history`
+
+Queries Project history by `before`, `after`, `limit`, or `from`.
+
+Inbound messages are pushed automatically. Presence changes update the UI without starting an idle model turn. Messages trigger a turn and are acknowledged only after successful injection.
+
+## Payload and persistence
+
+- Text below 32 KiB uses identity encoding.
+- Larger text uses gzip + base64 on the wire.
+- Decoded text is limited to 4 MiB.
+- `messageId` is an opaque idempotency key. Reusing it with different content fails.
+- History uses SQLite WAL with `synchronous = FULL`.
+- The Hub data directory has an exclusive lock; two Hub processes cannot write the same data.
+
+On first start with an old `inbox.sqlite`, the Hub imports ordinary `message_ledger` rows into `messages.sqlite` in deterministic `(project, created_at, msg_id)` order. Old Presence, cursor, ACK, receipt, and offline-delivery state are not migrated. Pending messages become history only and are never delivered to future connections.
 
 ## Verify
 
@@ -157,19 +245,27 @@ Project deletion is idempotent and removes its persisted Inbox. It is rejected u
 bun run smoke
 ```
 
-This runs the Bun tests, Registry smoke, and a real Hub/HubClient smoke covering per-stream monotonic FIFO ordering, friendly message references, concurrent writes and duplicate reads, idempotent message IDs, causal replies, acknowledgment-driven persistent cursors, pre-ack failure and post-ack restart behavior, durable delivery across member restarts, delivery receipts, legacy Inbox migration, gzip payloads, and safe Project deletion.
+This runs the Bun tests, Project registry smoke, and a real Hub/client smoke covering WebSocket Presence, name conflicts, join/leave notifications, direct messaging, Project broadcast, delivery outcomes, Project history, legacy message migration, payload limits, Project deletion, and Hub restart semantics.
+
+`bun run smoke:docker` targets the already-running Hub selected by `OMP_A2A_HUB_URL`, exercises the public HTTP and WebSocket surfaces, verifies persisted history, and deletes its temporary Project.
 
 ## Layout
 
 ```text
 src/
-  operations.ts    # canonical Slash/Tool operations
-  registry.ts      # Project and heartbeat membership persistence
-  hub/server.ts    # standalone custom Mesh Hub
-  hub/client.ts    # pure URL client
-  hub/inbox.ts     # persistent SQLite Inbox
-  hub/message-ref.ts # derived agent-facing message references
-  hub/payload.ts   # text encoding, gzip, and decoded-size limits
-  hub/cli.ts       # bun run hub
-  extension.ts     # thin OMP adapters and background timers
+  extension.ts             # human commands + three model tools
+  operations.ts            # canonical runtime shared by both adapters
+  registry.ts              # persistent Project metadata only
+  config.ts                # repository connection defaults
+  hub/
+    server.ts              # HTTP control/history + WebSocket attachment
+    realtime-server.ts     # Presence, routing, broadcast, delivery
+    connection.ts          # extension WebSocket client
+    presence.ts            # in-memory Presence registry
+    messages.ts            # append-only Project history + legacy migration
+    realtime-types.ts      # versioned protocol types
+    payload.ts             # gzip and decoded-size limits
+    client.ts              # HTTP Project/history client
+    data-lock.ts           # exclusive Hub data directory ownership
+    cli.ts                 # standalone Hub process
 ```

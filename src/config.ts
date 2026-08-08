@@ -1,7 +1,7 @@
 import * as fs from "node:fs";
-import type { A2aLocalConfig } from "./types";
-import { AGENT_ID_RE, PROJECT_NAME_RE } from "./types";
 import { localConfigCandidates } from "./paths";
+import type { A2aLocalConfig } from "./types";
+import { AGENT_NAME_RE, PROJECT_NAME_RE } from "./types";
 
 /**
  * Minimal YAML subset for .omp/a2a.yml:
@@ -49,7 +49,10 @@ function parseSimpleYaml(text: string): Record<string, unknown> {
 		if (val.startsWith("[") && val.endsWith("]")) {
 			const inner = val.slice(1, -1).trim();
 			out[key] = inner
-				? inner.split(",").map((s) => stripQuotes(s.trim())).filter(Boolean)
+				? inner
+						.split(",")
+						.map((s) => stripQuotes(s.trim()))
+						.filter(Boolean)
 				: [];
 			continue;
 		}
@@ -72,49 +75,52 @@ function parseSimpleYaml(text: string): Record<string, unknown> {
 }
 
 function stripQuotes(s: string): string {
-	if ((s.startsWith('"') && s.endsWith('"')) || (s.startsWith("'") && s.endsWith("'"))) {
+	if (
+		(s.startsWith('"') && s.endsWith('"')) ||
+		(s.startsWith("'") && s.endsWith("'"))
+	) {
 		return s.slice(1, -1);
 	}
 	return s;
 }
 
 function normalizeConfig(raw: Record<string, unknown>): A2aLocalConfig {
-	const project = String(raw.project ?? "").trim();
-	const agentId = String(raw.agentId ?? raw.agent_id ?? raw.id ?? "").trim();
+	if (
+		"agentId" in raw ||
+		"agent_id" in raw ||
+		"autoJoin" in raw ||
+		"auto_join" in raw
+	) {
+		throw new Error(
+			"a2a config uses removed fields; rename agentId to name and autoJoin to autoConnect",
+		);
+	}
+	const project = typeof raw.project === "string" ? raw.project.trim() : "";
+	const name = typeof raw.name === "string" ? raw.name.trim() : "";
 	if (!project) throw new Error("a2a config missing required field: project");
-	if (!agentId) throw new Error("a2a config missing required field: agentId");
+	if (!name) throw new Error("a2a config missing required field: name");
 	if (!PROJECT_NAME_RE.test(project)) {
-		throw new Error(`invalid project name "${project}" (use [a-zA-Z0-9._-], max 64)`);
+		throw new Error(
+			`invalid project name "${project}" (use [a-zA-Z0-9._-], max 64)`,
+		);
 	}
-	if (!AGENT_ID_RE.test(agentId)) {
-		throw new Error(`invalid agentId "${agentId}" (use [a-zA-Z0-9._-], max 32)`);
+	if (!AGENT_NAME_RE.test(name)) {
+		throw new Error(
+			`invalid Agent name "${name}" (use [a-zA-Z0-9._-], max 32)`,
+		);
 	}
-
-	const capsRaw = raw.caps ?? raw.capabilities;
-	const caps = Array.isArray(capsRaw)
-		? capsRaw.map(String)
-		: typeof capsRaw === "string"
-			? capsRaw.split(",").map((s) => s.trim()).filter(Boolean)
-			: undefined;
-
-
+	const hubUrlValue = raw.hubUrl ?? raw.hub_url;
+	if (hubUrlValue !== undefined && typeof hubUrlValue !== "string")
+		throw new Error("a2a config hubUrl must be a string");
+	const autoConnectValue = raw.autoConnect ?? raw.auto_connect;
+	if (autoConnectValue !== undefined && typeof autoConnectValue !== "boolean") {
+		throw new Error("a2a config autoConnect must be a boolean");
+	}
 	return {
 		project,
-		agentId,
-		hubUrl:
-			raw.hubUrl != null
-				? String(raw.hubUrl)
-				: raw.hub_url != null
-					? String(raw.hub_url)
-					: undefined,
-		caps,
-		displayName:
-			raw.displayName != null
-				? String(raw.displayName)
-				: raw.display_name != null
-					? String(raw.display_name)
-					: undefined,
-		autoJoin: raw.autoJoin === false || raw.auto_join === false ? false : true,
+		name,
+		hubUrl: hubUrlValue?.trim(),
+		autoConnect: autoConnectValue ?? true,
 	};
 }
 
@@ -123,7 +129,9 @@ export function loadLocalConfig(cwd: string): A2aLocalConfig | null {
 	for (const p of localConfigCandidates(cwd)) {
 		if (!fs.existsSync(p)) continue;
 		const text = fs.readFileSync(p, "utf8");
-		const raw = p.endsWith(".json") ? (JSON.parse(text) as Record<string, unknown>) : parseSimpleYaml(text);
+		const raw = p.endsWith(".json")
+			? (JSON.parse(text) as Record<string, unknown>)
+			: parseSimpleYaml(text);
 		return normalizeConfig(raw);
 	}
 	return null;

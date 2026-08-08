@@ -24,14 +24,6 @@ export function projectMetaPath(project: string, dataDir?: string): string {
 	return path.join(projectDir(project, dataDir), "project.json");
 }
 
-export function membersDir(project: string, dataDir?: string): string {
-	return path.join(projectDir(project, dataDir), "members");
-}
-
-export function memberPath(project: string, agentId: string, dataDir?: string): string {
-	return path.join(membersDir(project, dataDir), `${agentId}.json`);
-}
-
 export function hubRunDir(dataDir: string = defaultDataDir()): string {
 	return path.join(dataDir, "run");
 }
@@ -50,6 +42,12 @@ export function hubLockPath(dataDir?: string): string {
 
 export function inboxDatabasePath(dataDir: string = defaultDataDir()): string {
 	return path.join(dataDir, "inbox.sqlite");
+}
+
+export function messageDatabasePath(
+	dataDir: string = defaultDataDir(),
+): string {
+	return path.join(dataDir, "messages.sqlite");
 }
 
 export function ensureDir(dir: string): void {

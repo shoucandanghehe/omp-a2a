@@ -3,171 +3,87 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HubClient } from "../src/hub/client";
-import { startHubServer, type HubServerHandle } from "../src/hub/server";
-import { A2aOperations } from "../src/operations";
+import type { DeliveryEvent } from "../src/hub/realtime-types";
+import { type HubServerHandle, startHubServer } from "../src/hub/server";
+import { A2aRuntime, type MessageView } from "../src/operations";
 
-let hub: HubServerHandle | null = null;
-let root: string | null = null;
+const roots: string[] = [];
+const hubs: HubServerHandle[] = [];
 
 afterEach(async () => {
-	await hub?.stop();
-	if (root) rmSync(root, { recursive: true, force: true });
-	hub = null;
-	root = null;
+	await Promise.all(hubs.splice(0).map((hub) => hub.stop()));
+	for (const root of roots.splice(0))
+		rmSync(root, { recursive: true, force: true });
 });
 
-test("A2aOperations creates and lists projects through the connected Hub", async () => {
-	root = mkdtempSync(join(tmpdir(), "omp-a2a-operations-"));
-	hub = await startHubServer({ port: 0, dataDir: root });
+test("one runtime path serves discovery, messaging, delivery, and history", async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-runtime-"));
+	roots.push(dataDir);
+	const hub = await startHubServer({ port: 0, dataDir });
+	hubs.push(hub);
 	const client = new HubClient(hub.meta.baseUrl);
-	const operations = new A2aOperations({ getClient: async () => client, pid: 123 });
+	await client.createProject({ name: "runtime" });
 
-	await operations.execute({ action: "project_create", project: "shared" }, { cwd: "/repo" });
-	const listed = await operations.execute({ action: "project_list" }, { cwd: "/repo" });
-
-	expect((await client.listProjects()).map((project) => project.name)).toEqual(["shared"]);
-	expect(listed.text).toContain("shared");
-});
-
-test("A2aOperations deletes an inactive project through the connected Hub", async () => {
-	root = mkdtempSync(join(tmpdir(), "omp-a2a-operations-"));
-	hub = await startHubServer({ port: 0, dataDir: root });
-	const client = new HubClient(hub.meta.baseUrl);
-	const operations = new A2aOperations({ getClient: async () => client, pid: 123 });
-	await operations.execute({ action: "project_create", project: "retired" }, { cwd: "/repo" });
-
-	const deleted = await operations.execute({ action: "project_delete", project: "retired" }, { cwd: "/repo" });
-
-	expect(deleted.text).toBe("Deleted A2A project retired");
-	expect(await client.listProjects()).toEqual([]);
-});
-
-test("leave clears local membership and reports pending cleanup when Hub is unavailable", async () => {
-	root = mkdtempSync(join(tmpdir(), "omp-a2a-operations-"));
-	hub = await startHubServer({ port: 0, dataDir: root });
-	const client = new HubClient(hub.meta.baseUrl);
-	let available = true;
-	const operations = new A2aOperations({
-		getClient: async () => {
-			if (!available) throw new Error("Hub unavailable");
-			return client;
+	let resolveMessage!: (message: MessageView) => void;
+	const received = new Promise<MessageView>((resolve) => {
+		resolveMessage = resolve;
+	});
+	let resolveJoined!: () => void;
+	const joined = new Promise<void>((resolve) => {
+		resolveJoined = resolve;
+	});
+	let resolveDelivery!: (delivery: DeliveryEvent) => void;
+	const delivered = new Promise<DeliveryEvent>((resolve) => {
+		resolveDelivery = resolve;
+	});
+	const api = new A2aRuntime({
+		getClient: async () => client,
+		events: {
+			onDelivery: resolveDelivery,
+			onPresenceJoined: () => resolveJoined(),
 		},
-		pid: 123,
 	});
-	await operations.execute({ action: "project_create", project: "leave" }, { cwd: "/repo" });
-	await operations.execute(
-		{ action: "join", project: "leave", agentId: "worker" },
-		{ cwd: "/repo", sessionId: "session" },
-	);
-	available = false;
+	const web = new A2aRuntime({
+		getClient: async () => client,
+		events: { onMessage: resolveMessage },
+	});
 
-	const result = await operations.execute({ action: "leave" }, { cwd: "/repo" });
+	await api.connect("runtime", "api");
+	await web.connect("runtime", "web");
+	await joined;
+	expect(api.peers().map((peer) => peer.name)).toEqual(["web"]);
 
-	expect(result.cleanupPending).toBe(true);
-	expect(result.membershipChanged).toBe("left");
-	expect(operations.membership).toBeNull();
-});
-
-test("failed delivery remains pending until a successful delivery is acknowledged", async () => {
-	root = mkdtempSync(join(tmpdir(), "omp-a2a-operations-"));
-	hub = await startHubServer({ port: 0, dataDir: root });
-	const client = new HubClient(hub.meta.baseUrl);
-	const operations = new A2aOperations({ getClient: async () => client, pid: 123 });
-	await operations.execute({ action: "project_create", project: "delivery" }, { cwd: "/repo" });
-	await operations.execute(
-		{ action: "join", project: "delivery", agentId: "worker" },
-		{ cwd: "/repo", sessionId: "session" },
-	);
-	await client.send({ project: "delivery", from: "controller", to: "worker", text: "work" });
-
+	const accepted = await api.message({
+		target: { type: "agent", name: "web" },
+		text: "check login",
+		messageId: "runtime-message",
+	});
+	expect(accepted).toMatchObject({
+		message: { messageRef: "runtime:1" },
+		recipients: ["web"],
+	});
+	expect(await received).toMatchObject({
+		from: { name: "api" },
+		text: "check login",
+	});
 	await expect(
-		operations.receive(() => {
-			throw new Error("injection failed");
-		}),
-	).rejects.toThrow("injection failed");
-	expect(await client.inbox("delivery", "worker")).toHaveLength(1);
-	expect(await client.inbox("delivery", "controller")).toEqual([]);
-
-	const repeated: string[] = [];
-	expect(await operations.receive((message) => repeated.push(message.text))).toBe(1);
-	expect(repeated).toEqual(["work"]);
-	expect(await client.inbox("delivery", "controller")).toHaveLength(1);
-});
-
-test("send uses the joined membership as the claimed sender", async () => {
-	root = mkdtempSync(join(tmpdir(), "omp-a2a-operations-"));
-	hub = await startHubServer({ port: 0, dataDir: root });
-	const client = new HubClient(hub.meta.baseUrl);
-	const operations = new A2aOperations({ getClient: async () => client, pid: 123 });
-	await operations.execute({ action: "project_create", project: "send" }, { cwd: "/repo" });
-	await client.register({ project: "send", agentId: "worker", cwd: "/worker", pid: 456 });
-	await operations.execute({ action: "join", project: "send", agentId: "controller" }, { cwd: "/repo" });
-
-	const result = await operations.execute({ action: "send", to: "worker", text: "hello" }, { cwd: "/repo" });
-
-	expect(result.text).toContain("Queued for worker");
-	expect(result.text).toContain("ref=worker:1");
-	expect(result.text).toContain("Never wait, sleep, or poll inbox for a reply after send");
-	expect((await client.inbox("send", "worker"))[0]?.text).toBe("hello");
-	const correction = await operations.execute(
-		{ action: "send", to: "worker", text: "corrected", replyToRef: "worker:1" },
-		{ cwd: "/repo" },
-	);
-	expect(correction.text).toContain("ref=worker:2");
-	expect(correction.text).toContain("replyTo=worker:1");
-	expect((await client.inbox("send", "worker"))[1]).toMatchObject({
-		messageRef: "worker:2",
-		replyToRef: "worker:1",
+		api.message({ target: { type: "agent", name: "api" }, text: "self" }),
+	).rejects.toThrow("cannot send to yourself");
+	expect(await delivered).toEqual({
+		messageId: "runtime-message",
+		to: "web",
+		status: "delivered",
 	});
-});
+	expect(await api.history()).toMatchObject([
+		{ messageRef: "runtime:1", text: "check login" },
+	]);
 
-test("read-only operations report the connected Hub and joined membership", async () => {
-	root = mkdtempSync(join(tmpdir(), "omp-a2a-operations-"));
-	hub = await startHubServer({ port: 0, dataDir: root });
-	const client = new HubClient(hub.meta.baseUrl);
-	const operations = new A2aOperations({ getClient: async () => client, pid: 123 });
-	await operations.execute({ action: "project_create", project: "status" }, { cwd: "/repo" });
-	await operations.execute({ action: "join", project: "status", agentId: "controller" }, { cwd: "/repo" });
-
-	const hubResult = await operations.execute({ action: "hub" }, { cwd: "/repo" });
-	const status = await operations.execute({ action: "status" }, { cwd: "/repo" });
-	const members = await operations.execute({ action: "list" }, { cwd: "/repo" });
-
-	expect(hubResult.text).toContain(hub.meta.baseUrl);
-	expect(status.text).toContain("controller");
-	expect(members.text).toContain("controller");
-});
-
-test("manual inbox displays and acknowledges messages", async () => {
-	root = mkdtempSync(join(tmpdir(), "omp-a2a-operations-"));
-	hub = await startHubServer({ port: 0, dataDir: root });
-	const client = new HubClient(hub.meta.baseUrl);
-	const operations = new A2aOperations({ getClient: async () => client, pid: 123 });
-	await operations.execute({ action: "project_create", project: "inbox" }, { cwd: "/repo" });
-	await operations.execute({ action: "join", project: "inbox", agentId: "worker" }, { cwd: "/repo" });
-	await client.send({ project: "inbox", from: "controller", to: "worker", text: "manual" });
-
-	const result = await operations.execute({ action: "inbox" }, { cwd: "/repo" });
-
-	expect(result.text).toContain("manual");
-	expect(await client.inbox("inbox", "worker")).toEqual([]);
-});
-
-test("manual inbox identifies and acknowledges delivery receipts", async () => {
-	root = mkdtempSync(join(tmpdir(), "omp-a2a-operations-"));
-	hub = await startHubServer({ port: 0, dataDir: root });
-	const client = new HubClient(hub.meta.baseUrl);
-	const operations = new A2aOperations({ getClient: async () => client, pid: 123 });
-	await operations.execute({ action: "project_create", project: "receipts" }, { cwd: "/repo" });
-	await client.register({ project: "receipts", agentId: "worker", cwd: "/worker", pid: 456 });
-	await operations.execute({ action: "join", project: "receipts", agentId: "controller" }, { cwd: "/repo" });
-	await operations.execute({ action: "send", to: "worker", text: "work" }, { cwd: "/repo" });
-	const message = (await client.inbox("receipts", "worker"))[0]!;
-	await client.ack("receipts", "worker", [message.msgId]);
-
-	const result = await operations.execute({ action: "inbox" }, { cwd: "/repo" });
-
-	expect(result.text).toContain("Inbox cursor=");
-	expect(result.text).toContain(`msg=${message.msgId} to=worker`);
-	expect(await client.inbox("receipts", "controller")).toEqual([]);
+	await web.disconnect();
+	await expect(
+		api.message({
+			target: { type: "agent", name: "web" },
+			text: "are you there",
+		}),
+	).rejects.toThrow("recipient_not_present");
+	await api.disconnect();
 });

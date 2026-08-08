@@ -7,7 +7,8 @@ let publicUrl: string | undefined;
 let dataDir: string | undefined;
 
 for (let index = 0; index < args.length; index++) {
-	const argument = args[index]!;
+	const argument = args[index];
+	if (!argument) continue;
 	const next = args[index + 1];
 	if (argument === "--port" && next) {
 		port = Number(next);
@@ -19,10 +20,16 @@ for (let index = 0; index < args.length; index++) {
 		index++;
 	} else if (argument.startsWith("--host=")) {
 		host = argument.slice("--host=".length);
-	} else if ((argument === "--public-url" || argument === "--publicUrl") && next) {
+	} else if (
+		(argument === "--public-url" || argument === "--publicUrl") &&
+		next
+	) {
 		publicUrl = next;
 		index++;
-	} else if (argument.startsWith("--public-url=") || argument.startsWith("--publicUrl=")) {
+	} else if (
+		argument.startsWith("--public-url=") ||
+		argument.startsWith("--publicUrl=")
+	) {
 		publicUrl = argument.slice(argument.indexOf("=") + 1);
 	} else if (argument === "--data-dir" && next) {
 		dataDir = next;

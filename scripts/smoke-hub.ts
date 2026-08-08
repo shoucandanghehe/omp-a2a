@@ -2,7 +2,10 @@ import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
 import { HubClient } from "../src/hub/client";
-import { startHubServer, type HubServerHandle } from "../src/hub/server";
+import { A2aConnection } from "../src/hub/connection";
+import { decodeTextPayload } from "../src/hub/payload";
+import type { DeliveryEvent, RealtimeMessage } from "../src/hub/realtime-types";
+import { type HubServerHandle, startHubServer } from "../src/hub/server";
 
 const firstDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-a2a-hub-a-"));
 const secondDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-a2a-hub-b-"));
@@ -10,6 +13,23 @@ const handles: HubServerHandle[] = [];
 
 function assert(condition: unknown, message: string): asserts condition {
 	if (!condition) throw new Error(`ASSERT: ${message}`);
+}
+
+class AsyncQueue<T> {
+	#values: T[] = [];
+	#waiters: Array<(value: T) => void> = [];
+
+	push(value: T): void {
+		const waiter = this.#waiters.shift();
+		if (waiter) waiter(value);
+		else this.#values.push(value);
+	}
+
+	next(): Promise<T> {
+		const value = this.#values.shift();
+		if (value) return Promise.resolve(value);
+		return new Promise<T>((resolve) => this.#waiters.push(resolve));
+	}
 }
 
 async function main() {
@@ -20,86 +40,131 @@ async function main() {
 	const client = new HubClient(first.meta.baseUrl);
 	const otherClient = new HubClient(second.meta.baseUrl);
 	await client.createProject({ name: "mesh-demo" });
-	assert((await otherClient.listProjects()).length === 0, "Hub registries are isolated");
-
-	console.log("\n== register and reject duplicate ==");
-	await client.register({ project: "mesh-demo", agentId: "api", cwd: "/code/api", pid: 999_999_998 });
-	await client.register({ project: "mesh-demo", agentId: "web", cwd: "/code/web", pid: 999_999_999 });
-	let duplicateRejected = false;
-	try {
-		await client.register({ project: "mesh-demo", agentId: "api", cwd: "/replacement", pid: 1 });
-	} catch {
-		duplicateRejected = true;
-	}
-	assert(duplicateRejected, "online duplicate rejected");
-	assert((await client.listMembers("mesh-demo")).length === 2, "heartbeat presence ignores diagnostic PID");
-
-	console.log("\n== trust-on-claim send and durable delivery receipt ==");
-	const message = await client.send({ project: "mesh-demo", from: "controller", to: "web", text: "hello" });
-	assert((await client.inbox("mesh-demo", "web"))[0]?.text === "hello", "unregistered sender claim accepted");
-	await client.ack("mesh-demo", "web", [message.msgId]);
-	assert((await client.inbox("mesh-demo", "web")).length === 0, "ack removes message");
-	const receipt = (await client.inbox("mesh-demo", "controller"))[0];
 	assert(
-		receipt?.kind === "delivery_receipt" && receipt.receiptFor === message.msgId,
-		"ack creates delivery receipt",
+		(await otherClient.listProjects()).length === 0,
+		"Hub Projects are isolated",
 	);
-	await client.ack("mesh-demo", "controller", [receipt.msgId]);
-	assert((await client.inbox("mesh-demo", "web")).length === 0, "receipt ack does not loop");
+	const joined = new AsyncQueue<string>();
 
-	console.log("\n== gzip large payload ==");
-	const largeText = "compressible diff line\n".repeat(2_000);
-	const large = await client.send({ project: "mesh-demo", from: "controller", to: "web", text: largeText });
-	assert((await client.inbox("mesh-demo", "web"))[0]?.text === largeText, "large payload round trip");
-	await client.ack("mesh-demo", "web", [large.msgId]);
+	console.log("\n== realtime Presence ==");
+	const deliveries = new AsyncQueue<DeliveryEvent>();
+	const webMessages = new AsyncQueue<RealtimeMessage>();
+	const testMessages = new AsyncQueue<RealtimeMessage>();
+	const api = await A2aConnection.connect({
+		baseUrl: first.meta.baseUrl,
+		project: "mesh-demo",
+		name: "api",
+		events: {
+			onDelivery: (delivery) => deliveries.push(delivery),
+			onPresenceJoined: (peer) => joined.push(peer.name),
+		},
+	});
+	const web = await A2aConnection.connect({
+		baseUrl: first.meta.baseUrl,
+		project: "mesh-demo",
+		name: "web",
+		events: { onMessage: (message) => webMessages.push(message) },
+	});
+	assert((await joined.next()) === "web", "web join is announced");
+	const test = await A2aConnection.connect({
+		baseUrl: first.meta.baseUrl,
+		project: "mesh-demo",
+		name: "test",
+		events: { onMessage: (message) => testMessages.push(message) },
+	});
+	assert((await joined.next()) === "test", "test join is announced");
+	assert(
+		api
+			.peers()
+			.map((peer) => peer.name)
+			.join(",") === "test,web",
+		"Presence snapshot is current",
+	);
 
-	console.log("\n== persistent Inbox across restart ==");
-	const durable = await client.send({ project: "mesh-demo", from: "controller", to: "web", text: "survive restart" });
+	console.log("\n== direct message and delivery ==");
+	const direct = await api.send({
+		target: { type: "agent", name: "web" },
+		text: "hello",
+		messageId: "smoke-direct",
+	});
+	assert(
+		direct.message.messageRef === "mesh-demo:1",
+		"direct message receives Project sequence",
+	);
+	assert(
+		decodeTextPayload((await webMessages.next()).payload) === "hello",
+		"direct message arrives in realtime",
+	);
+	assert(
+		(await deliveries.next()).status === "delivered",
+		"receiver acknowledgment becomes delivery event",
+	);
+
+	console.log("\n== Project broadcast ==");
+	const broadcast = await api.send({
+		target: { type: "project" },
+		text: "freeze contract",
+		messageId: "smoke-broadcast",
+	});
+	assert(
+		broadcast.recipients.join(",") === "web,test",
+		"broadcast freezes the current Presence snapshot",
+	);
+	assert(
+		decodeTextPayload((await webMessages.next()).payload) === "freeze contract",
+		"web receives broadcast",
+	);
+	assert(
+		decodeTextPayload((await testMessages.next()).payload) ===
+			"freeze contract",
+		"test receives broadcast",
+	);
+	await deliveries.next();
+	await deliveries.next();
+
+	console.log("\n== persistent message history ==");
+	await api.close();
+	await web.close();
+	await test.close();
 	await first.stop();
 	const restarted = await startHubServer({ dataDir: firstDataDir, port: 0 });
 	handles.push(restarted);
 	const restartedClient = new HubClient(restarted.meta.baseUrl);
-	assert((await restartedClient.inbox("mesh-demo", "web"))[0]?.msgId === durable.msgId, "message survives restart");
-	await restartedClient.ack("mesh-demo", "web", [durable.msgId]);
-
-	console.log("\n== durable delivery while recipient is offline ==");
-	await restartedClient.unregister("mesh-demo", "web");
-	const deferred = await restartedClient.send({
+	const history = await restartedClient.history({
 		project: "mesh-demo",
-		from: "controller",
-		to: "web",
-		text: "deliver after rejoin",
+		limit: 10,
 	});
-	assert((await restartedClient.inbox("mesh-demo", "web"))[0]?.msgId === deferred.msgId, "offline message queued");
-	await restartedClient.register({ project: "mesh-demo", agentId: "web", cwd: "/code/web", pid: 999_999_999 });
-	assert((await restartedClient.inbox("mesh-demo", "web"))[0]?.msgId === deferred.msgId, "queued message survives rejoin");
-	await restartedClient.ack("mesh-demo", "web", [deferred.msgId]);
+	assert(history.messages.length === 2, "history survives Hub restart");
+	const replacement = await A2aConnection.connect({
+		baseUrl: restarted.meta.baseUrl,
+		project: "mesh-demo",
+		name: "web",
+	});
+	assert(
+		replacement.peers().length === 0,
+		"Presence does not survive Hub restart",
+	);
 
-	console.log("\n== fail closed unknown recipient ==");
-	let unknownRejected = false;
-	try {
-		await restartedClient.send({ project: "mesh-demo", from: "controller", to: "missing", text: "nope" });
-	} catch {
-		unknownRejected = true;
-	}
-	assert(unknownRejected, "unknown recipient rejected");
-
-	console.log("\n== safe project deletion ==");
+	console.log("\n== safe Project deletion ==");
 	let activeDeleteRejected = false;
 	try {
 		await restartedClient.deleteProject("mesh-demo");
 	} catch {
 		activeDeleteRejected = true;
 	}
-	assert(activeDeleteRejected, "project with online members cannot be deleted");
-	await restartedClient.unregister("mesh-demo", "api");
-	await restartedClient.unregister("mesh-demo", "web");
-	assert(await restartedClient.deleteProject("mesh-demo"), "inactive project deleted");
-	assert((await restartedClient.listProjects()).length === 0, "deleted project absent");
-	assert(!(await restartedClient.deleteProject("mesh-demo")), "project deletion is idempotent");
+	assert(activeDeleteRejected, "active Presence blocks Project deletion");
+	await replacement.close();
+	assert(
+		await restartedClient.deleteProject("mesh-demo"),
+		"inactive Project deletes with its history",
+	);
+	assert(
+		!(await restartedClient.deleteProject("mesh-demo")),
+		"Project deletion is idempotent",
+	);
 
 	console.log("\n== PASS ==");
-	console.log("Custom Mesh Hub smoke OK");
+	console.log("Realtime Agent chat Hub smoke OK");
 }
 
 main()

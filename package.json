@@ -2,25 +2,30 @@
 	"name": "omp-a2a",
 	"version": "0.1.0",
 	"private": true,
-	"description": "OMP multi-project custom mesh: independent Hub servers + pure client extension",
+	"description": "Anonymous realtime Agent chat for OMP: WebSocket Presence + persistent Project history",
 	"type": "module",
 	"omp": {
-		"extensions": ["./src/extension.ts"]
+		"extensions": [
+			"./src/extension.ts"
+		]
 	},
 	"bin": {
 		"omp-a2a-hub": "./src/hub/cli.ts"
 	},
 	"scripts": {
 		"hub": "bun run src/hub/cli.ts",
-		"smoke": "bun test && bun run scripts/smoke.ts && bun run scripts/smoke-hub.ts"
+		"smoke": "bun test && bun run scripts/smoke.ts && bun run scripts/smoke-hub.ts",
+		"smoke:docker": "bun run scripts/smoke-docker.ts"
 	},
 	"engines": {
 		"bun": ">=1.1.0"
 	},
 	"dependencies": {
-		"express": "^5.2.1"
+		"express": "^5.2.1",
+		"ws": "^8.21.3"
 	},
 	"devDependencies": {
-		"@types/express": "^5.0.6"
+		"@types/express": "^5.0.6",
+		"@types/ws": "^8.18.1"
 	}
 }

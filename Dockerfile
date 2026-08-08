@@ -15,7 +15,7 @@ ENV NODE_ENV=production \
 	OMP_A2A_HUB_PUBLIC_URL=http://127.0.0.1:4173 \
 	OMP_A2A_HUB_DATA_DIR=/data/omp-a2a
 
-# Persist this Hub's registry, Inbox, and runtime metadata.
+# Persist Project metadata, append-only message history, and runtime metadata.
 RUN mkdir -p /data/omp-a2a && chown -R bun:bun /data /app
 USER bun
 

@@ -1,39 +1,36 @@
-import type { ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { loadLocalConfig } from "./config";
 import { HubClient, resolveHubUrl } from "./hub/client";
-import type { HubEnvelope, HubMessageEnvelope } from "./hub/types";
-import { A2aOperations, ASYNC_REPLY_GUIDANCE, type A2aOperationRequest } from "./operations";
-import { AGENT_ID_RE, HEARTBEAT_MS, PROJECT_NAME_RE } from "./types";
+import type { MessageRequestTarget } from "./hub/realtime-types";
+import { A2aRuntime, type MessageView } from "./operations";
+import { AGENT_NAME_RE, PROJECT_NAME_RE } from "./types";
 
-type TimerContext = {
-	setInterval: (fn: () => void, ms: number) => unknown;
-	clearTimer: (handle: unknown) => void;
-	isIdle: () => boolean;
-	ui: { notify: (message: string, type?: "info" | "warning" | "error") => void };
-};
-
-function parseArgs(raw: string): { positional: string[]; flags: Record<string, string | boolean> } {
+function parseArgs(raw: string): {
+	positional: string[];
+	flags: Record<string, string | boolean>;
+} {
 	const tokens = raw.trim().length === 0 ? [] : raw.trim().split(/\s+/);
 	const positional: string[] = [];
 	const flags: Record<string, string | boolean> = {};
 	for (let index = 0; index < tokens.length; index++) {
-		const token = tokens[index]!;
+		const token = tokens[index];
+		if (!token) continue;
 		if (!token.startsWith("--")) {
 			positional.push(token);
 			continue;
 		}
-		const equals = token.indexOf("=");
-		if (equals > 2) {
-			flags[token.slice(2, equals)] = token.slice(equals + 1);
+		const separator = token.indexOf("=");
+		if (separator > 2) {
+			flags[token.slice(2, separator)] = token.slice(separator + 1);
 			continue;
 		}
-		const key = token.slice(2);
+		const name = token.slice(2);
 		const next = tokens[index + 1];
 		if (next && !next.startsWith("--")) {
-			flags[key] = next;
+			flags[name] = next;
 			index++;
 		} else {
-			flags[key] = true;
+			flags[name] = true;
 		}
 	}
 	return { positional, flags };
@@ -41,293 +38,384 @@ function parseArgs(raw: string): { positional: string[]; flags: Record<string, s
 
 function usage(): string {
 	return [
-		"A2A multi-project custom mesh (standalone Hub + omp client)",
+		"A2A anonymous realtime Agent chat",
 		"",
-		"/a2a project create <name> [--display <text>] [--desc <text>]",
-		"/a2a project delete <name>",
-		"/a2a project list",
-		"/a2a join <project> --as <agentId> [--caps a,b]",
-		"/a2a leave",
-		"/a2a list [--project <name>] [--all]",
-		"/a2a send <agentId> <message...> [--message-id <id>] [--reply-to-ref <agentId:sequence>] [--reply-to <msgId>]",
-		"/a2a inbox",
-		"/a2a status",
 		"/a2a hub",
+		"/a2a project create <name>",
+		"/a2a project list",
+		"/a2a project delete <name>",
+		"/a2a connect <project> --as <name>",
+		"/a2a disconnect",
+		"/a2a status",
+		"/a2a peers",
+		"/a2a history [--before <ref>] [--after <ref>] [--limit <n>] [--from <name>]",
 		"/a2a help",
 	].join("\n");
 }
 
-function commandRequest(raw: string): A2aOperationRequest | null {
-	const { positional, flags } = parseArgs(raw);
-	const command = positional[0] ?? "";
-	if (command === "hub" || command === "status" || command === "leave" || command === "inbox") {
-		return { action: command };
-	}
-	if (command === "project" && positional[1] === "create") {
-		const project = positional[2];
-		if (!project) throw new Error("usage: /a2a project create <name>");
-		if (!PROJECT_NAME_RE.test(project)) throw new Error(`invalid project name: ${project}`);
-		return {
-			action: "project_create",
-			project,
-			displayName: typeof flags.display === "string" ? flags.display : undefined,
-			description:
-				typeof flags.desc === "string"
-					? flags.desc
-					: typeof flags.description === "string"
-						? flags.description
-						: undefined,
-		};
-	}
-	if (command === "project" && positional[1] === "delete") {
-		const project = positional[2];
-		if (!project) throw new Error("usage: /a2a project delete <name>");
-		if (!PROJECT_NAME_RE.test(project)) throw new Error(`invalid project name: ${project}`);
-		return { action: "project_delete", project };
-	}
-	if (command === "project" && (positional[1] === "list" || positional[1] === undefined)) {
-		return { action: "project_list" };
-	}
-	if (command === "join") {
-		const project = positional[1];
-		const agentId =
-			typeof flags.as === "string" ? flags.as : typeof flags.agent === "string" ? flags.agent : undefined;
-		if (!project || !agentId) throw new Error("usage: /a2a join <project> --as <agentId> [--caps a,b]");
-		if (!AGENT_ID_RE.test(agentId)) throw new Error(`invalid agentId: ${agentId}`);
-		return {
-			action: "join",
-			project,
-			agentId,
-			caps:
-				typeof flags.caps === "string"
-					? flags.caps
-						.split(",")
-						.map((capability) => capability.trim())
-						.filter(Boolean)
-					: undefined,
-		};
-	}
-	if (command === "list") {
-		return {
-			action: "list",
-			project: typeof flags.project === "string" ? flags.project : undefined,
-			all: flags.all === true || flags.all === "true",
-		};
-	}
-	if (command === "send") {
-		const to = positional[1];
-		const text = positional.slice(2).join(" ").trim();
-		if (!to || !text) throw new Error("usage: /a2a send <agentId> <message...>");
-		return {
-			action: "send",
-			to,
-			text,
-			messageId: typeof flags["message-id"] === "string" ? flags["message-id"] : undefined,
-			replyTo: typeof flags["reply-to"] === "string" ? flags["reply-to"] : undefined,
-			replyToRef: typeof flags["reply-to-ref"] === "string" ? flags["reply-to-ref"] : undefined,
-		};
-	}
-	return null;
+function formatMessages(messages: MessageView[]): string {
+	if (messages.length === 0) return "No messages.";
+	return messages
+		.map((message) => {
+			const target =
+				message.target.type === "project" ? "project" : message.target.name;
+			return `[${message.messageRef}] ${message.from.name} -> ${target}${message.replyTo ? ` replyTo=${message.replyTo}` : ""}\n${message.text}`;
+		})
+		.join("\n\n");
 }
 
 export default function a2aExtension(pi: ExtensionAPI) {
 	const z = pi.zod;
-	pi.setLabel("A2A Project Mesh");
+	pi.setLabel("A2A Realtime Chat");
 
-	let hub: HubClient | null = null;
+	let client: HubClient | null = null;
 	let configuredHubUrl: string | undefined;
-	let sessionCwd = process.cwd();
-	let heartbeatTimer: unknown = null;
-	let inboxTimer: unknown = null;
-	let clearTimer: ((handle: unknown) => void) | null = null;
-	let polling = false;
+	let activeContext: ExtensionContext | null = null;
+	let desiredConnection: { project: string; name: string } | null = null;
+	let reconnectTimer: NodeJS.Timeout | undefined;
+	let reconnectDelayMs = 500;
 
 	const refreshHubUrl = (cwd: string) => {
 		configuredHubUrl = loadLocalConfig(cwd)?.hubUrl;
 	};
-
 	const ensureClient = async (): Promise<HubClient> => {
 		const target = resolveHubUrl({ hubUrl: configuredHubUrl });
-		if (hub?.baseUrl !== target) hub = null;
-		if (hub) return hub;
-		hub = await HubClient.connect({ hubUrl: configuredHubUrl });
-		return hub;
+		if (client?.baseUrl !== target) client = null;
+		client ??= await HubClient.connect({ hubUrl: configuredHubUrl });
+		return client;
 	};
 
-	const operations = new A2aOperations({ getClient: ensureClient });
-
-	const stopBackground = () => {
-		if (clearTimer && heartbeatTimer != null) clearTimer(heartbeatTimer);
-		if (clearTimer && inboxTimer != null) clearTimer(inboxTimer);
-		heartbeatTimer = null;
-		inboxTimer = null;
-		polling = false;
-	};
-
-	const injectEnvelope = (message: HubMessageEnvelope, deliverAs: "steer" | "followUp") => {
-		pi.sendMessage(
-			{
-				customType: "a2a-inbound",
-				content: `[a2a inbound] ref=${message.messageRef ?? "-"} from=${message.from} project=${message.project} at=${new Date(message.createdAt).toISOString()} msg=${message.msgId} replyTo=${message.replyToRef ?? message.replyTo ?? "-"}\n${message.text}`,
-				display: true,
-				details: message,
+	const runtime = new A2aRuntime({
+		getClient: ensureClient,
+		events: {
+			onPresenceJoined: (peer) =>
+				activeContext?.ui.notify(`[a2a] ${peer.name} joined`, "info"),
+			onPresenceLeft: (peer) =>
+				activeContext?.ui.notify(`[a2a] ${peer.name} left`, "info"),
+			onDelivery: (delivery) =>
+				activeContext?.ui.notify(
+					`[a2a] ${delivery.to} ${delivery.status}`,
+					"info",
+				),
+			onError: (error) =>
+				pi.logger?.warn?.(`a2a realtime error: ${error.message}`),
+			onMessage: (message) => {
+				const context = activeContext;
+				pi.sendMessage(
+					{
+						customType: "a2a-inbound",
+						content: `[a2a message] ref=${message.messageRef} from=${message.from.name} project=${message.project} at=${new Date(message.createdAt).toISOString()} replyTo=${message.replyTo ?? "-"}\n${message.text}`,
+						display: true,
+						details: message,
+					},
+					{
+						deliverAs: context?.isIdle() === false ? "steer" : "followUp",
+						triggerTurn: true,
+					},
+				);
 			},
-			{ deliverAs, triggerTurn: true },
-		);
-	};
-
-	const startBackground = (context: TimerContext) => {
-		stopBackground();
-		clearTimer = (handle) => context.clearTimer(handle);
-		if (!operations.membership) return;
-		heartbeatTimer = context.setInterval(() => {
-			void operations.heartbeat().catch((error) => {
-				pi.logger?.warn?.(`a2a heartbeat failed: ${error instanceof Error ? error.message : String(error)}`);
-			});
-		}, HEARTBEAT_MS);
-		inboxTimer = context.setInterval(() => {
-			if (polling) return;
-			polling = true;
-			void operations
-				.receive((message: HubEnvelope) => {
-					if (message.kind === "delivery_receipt") {
-						context.ui.notify(
-							`[a2a delivered] ref=${message.messageRef ?? "-"} msg=${message.receiptFor} to=${message.from} at=${new Date(message.deliveredAt).toISOString()}`,
-							"info",
-						);
-						return;
-					}
-					injectEnvelope(message, context.isIdle() ? "followUp" : "steer");
-				})
-				.catch((error) => {
-					pi.logger?.warn?.(`a2a inbox poll failed: ${error instanceof Error ? error.message : String(error)}`);
-				})
-				.finally(() => {
-					polling = false;
-				});
-		}, 1_000);
-	};
-
-	const run = async (request: A2aOperationRequest, context: TimerContext & { cwd: string; sessionId?: string }) => {
-		if (request.action === "join" || request.action === "leave") stopBackground();
-		const result = await operations.execute(request, { cwd: context.cwd, sessionId: context.sessionId });
-		if (result.membershipChanged === "joined") startBackground(context);
-		return result;
-	};
-
-	pi.on("session_start", async (_event, context) => {
-		sessionCwd = context.cwd;
-		refreshHubUrl(context.cwd);
-		try {
-			await ensureClient();
-		} catch (error) {
-			context.ui.notify(
-				`A2A Hub unavailable at ${resolveHubUrl({ hubUrl: configuredHubUrl })}: ${error instanceof Error ? error.message : String(error)}`,
-				"warning",
-			);
-		}
-		const config = loadLocalConfig(context.cwd);
-		if (!config || config.autoJoin === false) return;
-		try {
-			const result = await run(
-				{
-					action: "join",
-					project: config.project,
-					agentId: config.agentId,
-					caps: config.caps,
-					displayName: config.displayName,
-				},
-				context,
-			);
-			context.ui.notify(result.text, "info");
-		} catch (error) {
-			context.ui.notify(`A2A auto-join failed: ${error instanceof Error ? error.message : String(error)}`, "error");
-		}
+			onClose: ({ manual }) => {
+				if (manual || !desiredConnection) return;
+				activeContext?.ui.notify(
+					"[a2a] connection lost; reconnecting",
+					"warning",
+				);
+				scheduleReconnect();
+			},
+		},
 	});
 
-	pi.on("session_shutdown", async () => {
-		stopBackground();
+	const connectDesired = async (): Promise<void> => {
+		if (!desiredConnection) return;
 		try {
-			await operations.execute({ action: "leave" }, { cwd: sessionCwd });
+			await runtime.connect(desiredConnection.project, desiredConnection.name);
+			reconnectDelayMs = 500;
+			activeContext?.ui.notify(
+				`Connected to ${desiredConnection.project} as ${desiredConnection.name}`,
+				"info",
+			);
 		} catch (error) {
-			pi.logger?.warn?.(`a2a leave failed: ${error instanceof Error ? error.message : String(error)}`);
+			const message = error instanceof Error ? error.message : String(error);
+			if (message.includes("name_in_use")) {
+				desiredConnection = null;
+				activeContext?.ui.notify(message, "error");
+				return;
+			}
+			activeContext?.ui.notify(`A2A connect failed: ${message}`, "warning");
+			scheduleReconnect();
 		}
+	};
+
+	function scheduleReconnect(): void {
+		if (reconnectTimer || !desiredConnection) return;
+		reconnectTimer = setTimeout(() => {
+			reconnectTimer = undefined;
+			void connectDesired();
+		}, reconnectDelayMs);
+		reconnectDelayMs = Math.min(reconnectDelayMs * 2, 10_000);
+	}
+
+	const activateSession = async (context: ExtensionContext) => {
+		activeContext = context;
+		refreshHubUrl(context.cwd);
+		if (reconnectTimer) {
+			clearTimeout(reconnectTimer);
+			reconnectTimer = undefined;
+		}
+		await runtime.disconnect();
+		desiredConnection = null;
+		const config = loadLocalConfig(context.cwd);
+		if (!config || config.autoConnect === false) return;
+		desiredConnection = { project: config.project, name: config.name };
+		await connectDesired();
+	};
+
+	pi.on(
+		"session_start",
+		async (_event, context) => await activateSession(context),
+	);
+	pi.on(
+		"session_switch",
+		async (_event, context) => await activateSession(context),
+	);
+	pi.on("session_shutdown", async () => {
+		desiredConnection = null;
+		clearTimeout(reconnectTimer);
+		reconnectTimer = undefined;
+		await runtime.disconnect();
 	});
 
 	pi.registerCommand("a2a", {
-		description: "A2A multi-project custom mesh client",
-		handler: async (args, context) => {
-			sessionCwd = context.cwd;
+		description: "A2A realtime chat connection and Project administration",
+		handler: async (raw, context) => {
+			activeContext = context;
 			refreshHubUrl(context.cwd);
-			const raw = args.trim();
-			if (!raw || raw === "help" || raw === "--help" || raw === "-h") {
-				context.ui.notify(usage(), "info");
-				return;
-			}
+			const { positional, flags } = parseArgs(raw);
+			const command = positional[0] ?? "help";
 			try {
-				const request = commandRequest(raw);
-				if (!request) throw new Error(`unknown subcommand. ${usage()}`);
-				const result = await run(request, context);
-				context.ui.notify(result.text, result.cleanupPending ? "warning" : "info");
+				if (command === "help" || command === "--help" || command === "-h") {
+					context.ui.notify(usage(), "info");
+					return;
+				}
+				if (command === "hub") {
+					const status = await runtime.status();
+					context.ui.notify(
+						`Hub ${status.hub.baseUrl} protocol=${status.hub.protocolVersion} data=${status.hub.dataDir}`,
+						"info",
+					);
+					return;
+				}
+				if (command === "project" && positional[1] === "create") {
+					const name = positional[2];
+					if (!name || !PROJECT_NAME_RE.test(name))
+						throw new Error("usage: /a2a project create <name>");
+					await runtime.createProject({ name, createdByCwd: context.cwd });
+					context.ui.notify(`Created Project ${name}`, "info");
+					return;
+				}
+				if (
+					command === "project" &&
+					(positional[1] === "list" || positional[1] === undefined)
+				) {
+					const projects = await runtime.listProjects();
+					context.ui.notify(
+						projects.length === 0
+							? "No Projects."
+							: projects.map((project) => project.name).join("\n"),
+						"info",
+					);
+					return;
+				}
+				if (command === "project" && positional[1] === "delete") {
+					const name = positional[2];
+					if (!name || !PROJECT_NAME_RE.test(name))
+						throw new Error("usage: /a2a project delete <name>");
+					if (
+						!(await context.ui.confirm(
+							"Delete A2A Project",
+							`Delete ${name} and its complete message history?`,
+						))
+					)
+						return;
+					const deleted = await runtime.deleteProject(name);
+					context.ui.notify(
+						deleted
+							? `Deleted Project ${name}`
+							: `Project ${name} does not exist`,
+						"info",
+					);
+					return;
+				}
+				if (command === "connect") {
+					const project = positional[1];
+					const name = typeof flags.as === "string" ? flags.as : undefined;
+					if (
+						!project ||
+						!PROJECT_NAME_RE.test(project) ||
+						!name ||
+						!AGENT_NAME_RE.test(name)
+					) {
+						throw new Error("usage: /a2a connect <project> --as <name>");
+					}
+					desiredConnection = { project, name };
+					await connectDesired();
+					return;
+				}
+				if (command === "disconnect") {
+					desiredConnection = null;
+					clearTimeout(reconnectTimer);
+					reconnectTimer = undefined;
+					context.ui.notify(
+						(await runtime.disconnect())
+							? "Disconnected"
+							: "A2A is not connected",
+						"info",
+					);
+					return;
+				}
+				if (command === "status") {
+					const status = await runtime.status();
+					context.ui.notify(
+						status.connection
+							? `Project: ${status.connection.project}\nName: ${status.connection.name}\nConnection: connected\nPeers: ${status.connection.peers.length}\nHub: ${status.hub.baseUrl}`
+							: `Connection: disconnected\nHub: ${status.hub.baseUrl}`,
+						"info",
+					);
+					return;
+				}
+				if (command === "peers") {
+					const peers = runtime.peers();
+					context.ui.notify(
+						peers.length === 0
+							? "No other Agents."
+							: peers.map((peer) => peer.name).join("\n"),
+						"info",
+					);
+					return;
+				}
+				if (command === "history") {
+					const limit =
+						flags.limit === undefined ? undefined : Number(flags.limit);
+					context.ui.notify(
+						formatMessages(
+							await runtime.history({
+								before:
+									typeof flags.before === "string" ? flags.before : undefined,
+								after:
+									typeof flags.after === "string" ? flags.after : undefined,
+								from: typeof flags.from === "string" ? flags.from : undefined,
+								limit,
+							}),
+						),
+						"info",
+					);
+					return;
+				}
+				throw new Error(`unknown subcommand. ${usage()}`);
 			} catch (error) {
-				context.ui.notify(error instanceof Error ? error.message : String(error), "error");
+				context.ui.notify(
+					error instanceof Error ? error.message : String(error),
+					"error",
+				);
 			}
 		},
 	});
 
 	pi.registerTool({
-		name: "a2a",
-		label: "A2A Mesh",
-		description: `Custom multi-project mesh client for a standalone Hub. Send messages with agent-friendly refs such as api:42; use replyToRef for causal replies. Create/list/delete projects; join/leave; list members; receive messages. ${ASYNC_REPLY_GUIDANCE}`,
-		parameters: z.object({
-			op: z.enum([
-				"project_create",
-				"project_delete",
-				"project_list",
-				"join",
-				"leave",
-				"list",
-				"status",
-				"send",
-				"inbox",
-				"hub",
-			]),
-			project: z.string().optional(),
-			agentId: z.string().optional(),
-			to: z.string().optional(),
-			text: z.string().optional(),
-			messageId: z.string().optional(),
-			replyTo: z.string().optional(),
-			replyToRef: z.string().optional(),
-			displayName: z.string().optional(),
-			description: z.string().optional(),
-			caps: z.array(z.string()).optional(),
-			all: z.boolean().optional(),
-		}),
-		async execute(_id, params, _signal, _onUpdate, context) {
-			sessionCwd = context.cwd;
-			refreshHubUrl(context.cwd);
+		name: "a2a_peers",
+		label: "A2A Peers",
+		description:
+			"List the Agents currently present in this Project. Missing names do not exist; there is no offline state.",
+		parameters: z.object({}),
+		async execute() {
 			try {
-				const result = await run(
-					{
-						action: params.op,
-						project: params.project,
-						agentId: params.agentId,
-						to: params.to,
-						text: params.text,
-						messageId: params.messageId,
-						displayName: params.displayName,
-						replyTo: params.replyTo,
-						replyToRef: params.replyToRef,
-						description: params.description,
-						caps: params.caps,
-						all: params.all,
-					},
-					context,
-				);
+				const peers = runtime.peers();
 				return {
-					content: [{ type: "text", text: result.text }],
-					details: result.details,
+					content: [
+						{
+							type: "text",
+							text:
+								peers.length === 0
+									? "No other Agents are present."
+									: peers.map((peer) => peer.name).join("\n"),
+						},
+					],
+					details: { peers },
+				};
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				return {
+					content: [{ type: "text", text: message }],
+					details: { error: message },
+					isError: true,
+				};
+			}
+		},
+	});
+
+	pi.registerTool({
+		name: "a2a_message",
+		label: "A2A Message",
+		description:
+			"Send a direct message, Project broadcast, or causal reply. Use target.type=agent for one present name or project for the current Presence snapshot.",
+		parameters: z.object({
+			target: z.discriminatedUnion("type", [
+				z.object({ type: z.literal("agent"), name: z.string() }),
+				z.object({ type: z.literal("project") }),
+			]),
+			text: z.string(),
+			replyTo: z.string().optional(),
+			messageId: z.string().optional(),
+		}),
+		async execute(_id, parameters) {
+			try {
+				const accepted = await runtime.message({
+					target: parameters.target as MessageRequestTarget,
+					text: parameters.text,
+					replyTo: parameters.replyTo,
+					messageId: parameters.messageId,
+				});
+				const target =
+					parameters.target.type === "project"
+						? `${accepted.recipients.length} Agents`
+						: parameters.target.name;
+				return {
+					content: [
+						{
+							type: "text",
+							text: `Sent to ${target} ref=${accepted.message.messageRef}`,
+						},
+					],
+					details: accepted,
+				};
+			} catch (error) {
+				const message = error instanceof Error ? error.message : String(error);
+				return {
+					content: [{ type: "text", text: message }],
+					details: { error: message },
+					isError: true,
+				};
+			}
+		},
+	});
+
+	pi.registerTool({
+		name: "a2a_history",
+		label: "A2A History",
+		description:
+			"Query persistent Project message history by cursor or sender. History is explicit and is never replayed automatically on connect.",
+		parameters: z.object({
+			before: z.string().optional(),
+			after: z.string().optional(),
+			limit: z.number().optional(),
+			from: z.string().optional(),
+		}),
+		async execute(_id, parameters) {
+			try {
+				const messages = await runtime.history(parameters);
+				return {
+					content: [{ type: "text", text: formatMessages(messages) }],
+					details: { messages },
 				};
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
