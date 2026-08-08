@@ -34,7 +34,7 @@ import { decodeTextPayload, PayloadTooLargeError } from "./payload";
 import type { HubMeta, HubRegisterBody, HubSendBody, HubWireMessageDraft } from "./types";
 
 const DEFAULT_PORT = 4173;
-class RecipientUnavailableError extends Error {}
+class UnknownRecipientError extends Error {}
 
 
 export type HubServerHandle = {
@@ -202,15 +202,14 @@ export async function startHubServer(opts?: {
 				replyToRef: body.replyToRef,
 			};
 			const message = inboxes.enqueue(draft, () => {
-				const recipient = readMember(body.project, body.to, dataDir);
-				if (!recipient || recipient.status !== "online") {
-					throw new RecipientUnavailableError(`peer ${body.to} is not online in ${body.project}`);
+				if (!readMember(body.project, body.to, dataDir)) {
+					throw new UnknownRecipientError(`unknown recipient ${body.to} in ${body.project}`);
 				}
 			});
 			response.json({ ok: true, message });
 		} catch (error) {
 			const status =
-				error instanceof RecipientUnavailableError
+				error instanceof UnknownRecipientError
 					? 404
 					: error instanceof MessageIdConflictError || error instanceof CausalParentError
 						? 409

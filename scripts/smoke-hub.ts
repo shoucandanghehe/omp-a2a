@@ -62,6 +62,19 @@ async function main() {
 	assert((await restartedClient.inbox("mesh-demo", "web"))[0]?.msgId === durable.msgId, "message survives restart");
 	await restartedClient.ack("mesh-demo", "web", [durable.msgId]);
 
+	console.log("\n== durable delivery while recipient is offline ==");
+	await restartedClient.unregister("mesh-demo", "web");
+	const deferred = await restartedClient.send({
+		project: "mesh-demo",
+		from: "controller",
+		to: "web",
+		text: "deliver after rejoin",
+	});
+	assert((await restartedClient.inbox("mesh-demo", "web"))[0]?.msgId === deferred.msgId, "offline message queued");
+	await restartedClient.register({ project: "mesh-demo", agentId: "web", cwd: "/code/web", pid: 999_999_999 });
+	assert((await restartedClient.inbox("mesh-demo", "web"))[0]?.msgId === deferred.msgId, "queued message survives rejoin");
+	await restartedClient.ack("mesh-demo", "web", [deferred.msgId]);
+
 	console.log("\n== fail closed unknown recipient ==");
 	let unknownRejected = false;
 	try {

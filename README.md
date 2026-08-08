@@ -27,6 +27,8 @@ Messages below 32 KiB use an identity payload. Larger text is gzip-compressed on
 
 The extension uses at-least-once delivery. Reading pending messages does not advance the persistent cursor. After OMP injection succeeds, acknowledgment transactionally removes the next ordered message, records an observable acknowledgment status, advances the cursor, and creates the delivery receipt. A crash after injection but before acknowledgment therefore redelivers the same `messageId`; consumers must use that ID for deduplication. Unknown and out-of-order acknowledgments fail explicitly, while repeated acknowledgments report `already_acknowledged`.
 
+Delivery is asynchronous across member restarts. Once an `agentId` has joined a Project, senders may queue messages while that member is stale or offline; the persistent Inbox delivers them after the same `agentId` rejoins. Unknown recipients still fail with `404`. The Hub does not start or resume an OMP process itself.
+
 On the first upgraded Hub start, the existing SQLite Inbox is migrated in place: queued rows receive deterministic per-stream sequences in `(project, recipient, createdAt, rowid)` order, and pending messages seed the deduplication ledger. The previous global-sequence ledger is rebuilt for scoped sequences, and any pre-ack consume cursor is reset so migration prefers possible redelivery over message loss. IDs for messages already acknowledged before the upgrade no longer exist and cannot be backfilled. Until the Hub is upgraded, a new client falls back to the legacy peek-and-ack path, so scoped sequence, causal-link, and persistent acknowledgment guarantees require the new Hub.
 
 When the receiving extension acknowledges a successfully injected message, the same storage transaction advances its cursor and creates a durable `delivery_receipt` in the sender's Inbox; acknowledging the receipt removes it without creating another receipt. Messages arriving while the Agent is active use OMP's steer queue rather than becoming stale follow-up turns.
@@ -155,7 +157,7 @@ Project deletion is idempotent and removes its persisted Inbox. It is rejected u
 bun run smoke
 ```
 
-This runs the Bun tests, Registry smoke, and a real Hub/HubClient smoke covering per-stream monotonic FIFO ordering, friendly message references, concurrent writes and duplicate reads, idempotent message IDs, causal replies, acknowledgment-driven persistent cursors, pre-ack failure and post-ack restart behavior, durable delivery receipts, legacy Inbox migration, gzip payloads, and safe Project deletion.
+This runs the Bun tests, Registry smoke, and a real Hub/HubClient smoke covering per-stream monotonic FIFO ordering, friendly message references, concurrent writes and duplicate reads, idempotent message IDs, causal replies, acknowledgment-driven persistent cursors, pre-ack failure and post-ack restart behavior, durable delivery across member restarts, delivery receipts, legacy Inbox migration, gzip payloads, and safe Project deletion.
 
 ## Layout
 

@@ -33,6 +33,31 @@ test("Inbox messages survive Hub restart and remain until acknowledged", async (
 	expect(await receiver.inbox("durable", "worker")).toEqual([]);
 });
 
+test("messages queue while a known recipient is offline and deliver after rejoin", async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-inbox-"));
+	roots.push(dataDir);
+	const hub = await startHubServer({ port: 0, dataDir });
+	hubs.push(hub);
+	const client = new HubClient(hub.meta.baseUrl);
+	await client.createProject({ name: "offline-delivery" });
+	await client.register({ project: "offline-delivery", agentId: "worker", cwd: "/worker", pid: 1 });
+	await client.unregister("offline-delivery", "worker");
+
+	const sent = await client.send({
+		project: "offline-delivery",
+		from: "controller",
+		to: "worker",
+		text: "continue when you return",
+	});
+	expect((await client.inbox("offline-delivery", "worker")).map((message) => message.msgId)).toEqual([sent.msgId]);
+
+	await client.register({ project: "offline-delivery", agentId: "worker", cwd: "/worker", pid: 2 });
+	const [delivered] = await client.inbox("offline-delivery", "worker");
+	expect(delivered).toMatchObject({ msgId: sent.msgId, text: "continue when you return" });
+	await client.ack("offline-delivery", "worker", [sent.msgId]);
+	expect(await client.inbox("offline-delivery", "worker")).toEqual([]);
+});
+
 test("Inbox has no message-count cap", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-inbox-"));
 	roots.push(dataDir);
