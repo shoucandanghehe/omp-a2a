@@ -79,6 +79,15 @@ omp-a2a is for a fully trusted private network.
 - Project, name, sender content, and history access are trusted claims.
 - Do not expose the Hub to the public Internet or an untrusted network.
 
+## Current operational constraints
+
+- **Custom protocol:** this repository implements a private realtime protocol, not the standard A2A protocol. Do not assume interoperability with standard A2A clients or servers.
+- **Hub changes while connected:** an established WebSocket remains bound to the Hub that accepted it. After changing `hubUrl`, disconnect and reconnect before issuing Project or history operations against the new Hub.
+- **Interrupted Project deletion:** Project metadata is removed from the filesystem Registry before its SQLite message history is purged. After a crash or storage failure during deletion, verify or clear the old Project state before reusing the same Project name.
+- **Stalled HTTP requests:** the initial Hub probe has a timeout, but ordinary Project and history requests currently do not. A Hub that accepts connections without completing responses can stall the invoking command; restart the Hub and affected OMP session if this occurs.
+
+These are current implementation boundaries, not delivery guarantees. The most important deployment boundary remains the trusted-network requirement above.
+
 ## Install
 
 ```bash
@@ -100,6 +109,15 @@ curl -s http://127.0.0.1:4173/healthz
 bun run smoke:docker
 docker compose logs -f hub
 ```
+
+The Compose port mapping publishes the Hub on all host interfaces by default. If only local OMP clients need access, bind the published port to loopback by changing the mapping to:
+
+```yaml
+ports:
+  - "127.0.0.1:${OMP_A2A_HUB_PORT:-4173}:4173"
+```
+
+Each Compose project receives its own named volume. Use different Compose project names and published ports to run independent Hubs.
 
 Preserve the named data volume:
 
@@ -249,6 +267,8 @@ This runs the Bun tests, Project registry smoke, and a real Hub/client smoke cov
 
 `bun run smoke:docker` targets the already-running Hub selected by `OMP_A2A_HUB_URL`, exercises the public HTTP and WebSocket surfaces, verifies persisted history, and deletes its temporary Project.
 
+The verification command does not run a standalone TypeScript type check, a linter, or a Docker image/network smoke. Those remain separate release checks, and extension lifecycle behavior currently has substantially less automated coverage than the Hub persistence path.
+
 ## Layout
 
 ```text
@@ -269,3 +289,5 @@ src/
     data-lock.ts           # exclusive Hub data directory ownership
     cli.ts                 # standalone Hub process
 ```
+
+Detailed repository maps are available in [`codemap.md`](codemap.md), [`src/codemap.md`](src/codemap.md), [`src/hub/codemap.md`](src/hub/codemap.md), and [`scripts/codemap.md`](scripts/codemap.md).

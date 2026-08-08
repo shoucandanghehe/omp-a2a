@@ -1,0 +1,55 @@
+{
+	"metadata": {
+		"version": "1.0.0",
+		"last_run": "2026-08-08T19:25:35Z",
+		"root": "/home/scdhh/code/omp-a2a",
+		"include_patterns": [
+			"src/**/*.ts",
+			"scripts/*.ts",
+			"package.json",
+			"Dockerfile",
+			"docker-compose.yml",
+			"config.example.yml",
+			"README.md"
+		],
+		"exclude_patterns": [
+			"**/*.test.ts",
+			"**/*.spec.ts",
+			"tests/**",
+			"__tests__/**",
+			"docs/**",
+			"dist/**",
+			"build/**",
+			"node_modules/**"
+		],
+		"exceptions": []
+	},
+	"file_hashes": {
+		"Dockerfile": "53acdaf08b3f9df3ca4380135a6e630a",
+		"README.md": "6aee37eaa38a8d5a46cefceb35b367a0",
+		"config.example.yml": "50cb75096863d76c0a750f7813286eb3",
+		"docker-compose.yml": "8b25f5fb06830f9ce387f3f862334d68",
+		"package.json": "add31b234138b58aebbea254692fa718",
+		"scripts/smoke-docker.ts": "506843bd7978fb25d6bb1fcfb5cad137",
+		"scripts/smoke-hub.ts": "1e1b085795db0dbfc9b1d8c7b3377b9f",
+		"scripts/smoke.ts": "7218b738f4f0a75b9bb9a40dd376dd0c",
+		"src/config.ts": "53dccb9969b30d9bc80d6ed42519078a",
+		"src/extension.ts": "c0be71c713c1a9473e442f898bea4013",
+		"src/operations.ts": "5d716a97c4f587abe42b8d1c22c73f94",
+		"src/paths.ts": "3cdf4081887fafa1c62e40b7e4488972",
+		"src/registry.ts": "5874a52052f0e5ae2788014b5dfbdb0b",
+		"src/types.ts": "9ba54c047d7ca73d8e314d1b30037577",
+		"src/hub/cli.ts": "6326a9dc45426ff53a8abdf3d4067b25",
+		"src/hub/client.ts": "d7b23f945591e3260f0f856ef10752e5",
+		"src/hub/connection.ts": "32eb3c7987e7a4229e6ac61f3d7a3e4a",
+		"src/hub/data-lock.ts": "57b86794106497158b3ad3ed05ba4128",
+		"src/hub/messages.ts": "a63dbcbe7c180e0a74814f9738892596",
+		"src/hub/payload.ts": "39e42223645d44de989c525e23e403e7",
+		"src/hub/presence.ts": "a32fe4b6b4db73ca47e111b20e6d3e88",
+		"src/hub/realtime-server.ts": "7cf3deb772bc321d8a76db0f31da4c3b",
+		"src/hub/realtime-types.ts": "7005a82fd759ee2ae2c579085403df32",
+		"src/hub/server.ts": "9554e25f0c3424c7053f38733e9544da",
+		"src/hub/types.ts": "54224af2269b43ed967d2a49297fad76"
+	},
+	"folder_hashes": {}
+}
