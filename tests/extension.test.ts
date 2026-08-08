@@ -1,6 +1,12 @@
 import { expect, test } from "bun:test";
 import a2aExtension from "../src/extension";
 
+interface CompletionItem {
+	value: string;
+	label: string;
+	description?: string;
+}
+
 test("human commands and model tools expose separate A2A surfaces", async () => {
 	const tools: string[] = [];
 	let commandHandler:
@@ -8,6 +14,9 @@ test("human commands and model tools expose separate A2A surfaces", async () => 
 				args: string,
 				context: { cwd: string; ui: { notify(message: string): void } },
 		  ) => Promise<void>)
+		| undefined;
+	let commandCompletions:
+		| ((argumentPrefix: string) => CompletionItem[] | null)
 		| undefined;
 	let help = "";
 
@@ -21,9 +30,13 @@ test("human commands and model tools expose separate A2A surfaces", async () => 
 		sendMessage() {},
 		registerCommand(
 			_name: string,
-			command: { handler: typeof commandHandler },
+			command: {
+				handler: typeof commandHandler;
+				getArgumentCompletions?: typeof commandCompletions;
+			},
 		) {
 			commandHandler = command.handler;
+			commandCompletions = command.getArgumentCompletions;
 		},
 		registerTool(tool: { name: string }) {
 			tools.push(tool.name);
@@ -45,4 +58,39 @@ test("human commands and model tools expose separate A2A surfaces", async () => 
 	expect(help).not.toContain("/a2a send");
 	expect(help).not.toContain("/a2a inbox");
 	expect(help).not.toContain("/a2a join");
+	if (!commandCompletions)
+		throw new Error("a2a command completions were not registered");
+	expect(commandCompletions("").map((item) => item.label)).toEqual([
+		"hub",
+		"project",
+		"connect",
+		"disconnect",
+		"status",
+		"peers",
+		"history",
+		"help",
+	]);
+	expect(commandCompletions("project d")).toEqual([
+		{
+			value: "project delete ",
+			label: "delete",
+			description: "Delete a Project and its history",
+		},
+	]);
+	expect(commandCompletions("connect billing ")).toEqual([
+		{
+			value: "connect billing --as ",
+			label: "--as",
+			description: "Set this Presence name",
+		},
+	]);
+	expect(
+		commandCompletions("history --before billing:42 ").map(
+			(item) => item.value,
+		),
+	).toEqual([
+		"history --before billing:42 --limit ",
+		"history --before billing:42 --from ",
+	]);
+	expect(commandCompletions("history --limit ")).toBeNull();
 });

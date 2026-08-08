@@ -36,6 +36,134 @@ function parseArgs(raw: string): {
 	return { positional, flags };
 }
 
+interface CompletionOption {
+	token: string;
+	description: string;
+	continues?: boolean;
+}
+
+const ROOT_COMPLETIONS: CompletionOption[] = [
+	{ token: "hub", description: "Show Hub status" },
+	{
+		token: "project",
+		description: "Create, list, or delete Projects",
+		continues: true,
+	},
+	{
+		token: "connect",
+		description: "Connect this OMP session to a Project",
+		continues: true,
+	},
+	{ token: "disconnect", description: "Disconnect the current Presence" },
+	{ token: "status", description: "Show the current connection" },
+	{ token: "peers", description: "List currently present Agents" },
+	{
+		token: "history",
+		description: "Query persistent Project history",
+		continues: true,
+	},
+	{ token: "help", description: "Show A2A command help" },
+];
+
+const PROJECT_COMPLETIONS: CompletionOption[] = [
+	{ token: "create", description: "Create a Project", continues: true },
+	{ token: "list", description: "List Projects" },
+	{
+		token: "delete",
+		description: "Delete a Project and its history",
+		continues: true,
+	},
+];
+
+const HISTORY_COMPLETIONS: CompletionOption[] = [
+	{
+		token: "--before",
+		description: "Messages before a MessageRef",
+		continues: true,
+	},
+	{
+		token: "--after",
+		description: "Messages after a MessageRef",
+		continues: true,
+	},
+	{
+		token: "--limit",
+		description: "Maximum messages to return",
+		continues: true,
+	},
+	{
+		token: "--from",
+		description: "Only messages from one Agent name",
+		continues: true,
+	},
+];
+
+function completionItems(
+	base: string,
+	current: string,
+	options: CompletionOption[],
+): Array<{ value: string; label: string; description: string }> | null {
+	const prefix = current.toLowerCase();
+	const items = options
+		.filter((option) => option.token.startsWith(prefix))
+		.map((option) => ({
+			value: `${base}${option.token}${option.continues ? " " : ""}`,
+			label: option.token,
+			description: option.description,
+		}));
+	return items.length === 0 ? null : items;
+}
+
+function completeA2aArguments(
+	argumentPrefix: string,
+): Array<{ value: string; label: string; description: string }> | null {
+	const trailingSpace = /\s$/.test(argumentPrefix);
+	const normalized = argumentPrefix.trim().replace(/\s+/g, " ");
+	const words = normalized.length === 0 ? [] : normalized.split(" ");
+	const current = trailingSpace ? "" : (words.pop() ?? "");
+
+	if (words.length === 0) return completionItems("", current, ROOT_COMPLETIONS);
+
+	const command = words[0];
+	if (command === "project" && words.length === 1) {
+		return completionItems("project ", current, PROJECT_COMPLETIONS);
+	}
+	if (command === "connect" && words.length === 2) {
+		return completionItems(`connect ${words[1]} `, current, [
+			{ token: "--as", description: "Set this Presence name", continues: true },
+		]);
+	}
+	if (command !== "history") return null;
+
+	const used = new Set<string>();
+	const completedArguments = words.slice(1);
+	for (let index = 0; index < completedArguments.length; index += 2) {
+		const flag = completedArguments[index];
+		const value = completedArguments[index + 1];
+		if (
+			!flag ||
+			!HISTORY_COMPLETIONS.some((option) => option.token === flag) ||
+			!value ||
+			value.startsWith("--")
+		) {
+			return null;
+		}
+		used.add(flag);
+	}
+	if (current && !current.startsWith("--")) return null;
+	const available = HISTORY_COMPLETIONS.filter((option) => {
+		if (used.has(option.token)) return false;
+		if (option.token === "--before" && used.has("--after")) return false;
+		if (option.token === "--after" && used.has("--before")) return false;
+		return true;
+	});
+	return completionItems(
+		`${words.join(" ")}${words.length === 0 ? "" : " "}`,
+		current,
+		available,
+	);
+}
+
 function usage(): string {
 	return [
 		"A2A anonymous realtime Agent chat",
@@ -187,6 +315,7 @@ export default function a2aExtension(pi: ExtensionAPI) {
 
 	pi.registerCommand("a2a", {
 		description: "A2A realtime chat connection and Project administration",
+		getArgumentCompletions: completeA2aArguments,
 		handler: async (raw, context) => {
 			activeContext = context;
 			refreshHubUrl(context.cwd);
