@@ -1,14 +1,6 @@
 import { expect, test } from "bun:test";
 import a2aExtension from "../src/extension";
 
-function schemaStub() {
-	return {
-		optional() {
-			return this;
-		},
-	};
-}
-
 test("human commands and model tools expose separate A2A surfaces", async () => {
 	const tools: string[] = [];
 	let commandHandler:
@@ -18,16 +10,11 @@ test("human commands and model tools expose separate A2A surfaces", async () => 
 		  ) => Promise<void>)
 		| undefined;
 	let help = "";
-	const zod = {
-		string: schemaStub,
-		number: schemaStub,
-		literal: schemaStub,
-		object: schemaStub,
-		discriminatedUnion: schemaStub,
-	};
 
 	a2aExtension({
-		zod,
+		arktype(definition: unknown) {
+			return definition;
+		},
 		setLabel() {},
 		on() {},
 		logger: { warn() {} },

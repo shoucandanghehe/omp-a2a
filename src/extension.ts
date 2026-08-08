@@ -65,7 +65,7 @@ function formatMessages(messages: MessageView[]): string {
 }
 
 export default function a2aExtension(pi: ExtensionAPI) {
-	const z = pi.zod;
+	const type = pi.arktype;
 	pi.setLabel("A2A Realtime Chat");
 
 	let client: HubClient | null = null;
@@ -326,7 +326,7 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		label: "A2A Peers",
 		description:
 			"List the Agents currently present in this Project. Missing names do not exist; there is no offline state.",
-		parameters: z.object({}),
+		parameters: type({}),
 		async execute() {
 			try {
 				const peers = runtime.peers();
@@ -358,14 +358,11 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		label: "A2A Message",
 		description:
 			"Send a direct message, Project broadcast, or causal reply. Use target.type=agent for one present name or project for the current Presence snapshot.",
-		parameters: z.object({
-			target: z.discriminatedUnion("type", [
-				z.object({ type: z.literal("agent"), name: z.string() }),
-				z.object({ type: z.literal("project") }),
-			]),
-			text: z.string(),
-			replyTo: z.string().optional(),
-			messageId: z.string().optional(),
+		parameters: type({
+			target: [{ type: "'agent'", name: "string" }, "|", { type: "'project'" }],
+			text: "string",
+			"replyTo?": "string",
+			"messageId?": "string",
 		}),
 		async execute(_id, parameters) {
 			try {
@@ -404,11 +401,11 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		label: "A2A History",
 		description:
 			"Query persistent Project message history by cursor or sender. History is explicit and is never replayed automatically on connect.",
-		parameters: z.object({
-			before: z.string().optional(),
-			after: z.string().optional(),
-			limit: z.number().optional(),
-			from: z.string().optional(),
+		parameters: type({
+			"before?": "string",
+			"after?": "string",
+			"limit?": "number",
+			"from?": "string",
 		}),
 		async execute(_id, parameters) {
 			try {
