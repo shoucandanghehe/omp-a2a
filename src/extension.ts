@@ -509,7 +509,7 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		name: "a2a_peers",
 		label: "A2A Peers",
 		description:
-			"List the Agents currently present in this Project. Missing names do not exist; there is no offline state.",
+			"List the exact A2A roster names currently addressable in this Project. Use only a returned name for target.type=agent.",
 		parameters: type({}),
 		async execute() {
 			try {

@@ -191,10 +191,15 @@ test("model tool contract makes replies push-driven instead of history-polled", 
 
 		if (!commandHandler) throw new Error("a2a command was not registered");
 		await commandHandler(`connect ${project} --as api`, context);
+		const peersTool = tools.get("a2a_peers");
 		const messageTool = tools.get("a2a_message");
 		const historyTool = tools.get("a2a_history");
-		if (!messageTool || !historyTool)
+		if (!peersTool || !messageTool || !historyTool)
 			throw new Error("a2a model tools were not registered");
+
+		expect(peersTool.description).toBe(
+			"List the exact A2A roster names currently addressable in this Project. Use only a returned name for target.type=agent.",
+		);
 
 		expect(messageTool.description).toContain(
 			"Replies arrive automatically as inbound A2A steer messages",
