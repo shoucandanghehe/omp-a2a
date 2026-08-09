@@ -30,18 +30,18 @@ The central seam is `A2aRuntime`: extension callbacks and commands depend on one
 
 On `session_start` and `session_switch`, the extension:
 
-1. resolves repository-local configuration for the new `cwd`;
+1. clears the active context so in-flight inbound callbacks cannot inject into the new session;
 2. cancels pending reconnect and disconnects the old Presence;
-3. clears prior desired connection state;
-4. auto-connects only when configuration exists and `autoConnect !== false`.
+3. activates the new context and resolves its repository-local configuration;
+4. clears prior desired connection state and auto-connects only when configuration exists and `autoConnect !== false`.
 
-On `session_shutdown`, it cancels reconnect, clears desired state, and closes the socket. Unexpected socket close schedules reconnect. A `name_in_use` response is terminal for that desired connection rather than repeatedly displacing or retrying the owner.
+On `session_shutdown`, it clears the active context and desired state, cancels reconnect, and closes the socket. Unexpected socket close schedules reconnect. A `name_in_use` response is terminal for that desired connection rather than repeatedly displacing or retrying the owner.
 
 ### Inbound events
 
 - `presence_joined` and `presence_left` update the UI only.
 - `delivery` reports the selected peer name and `delivered`/`failed`/`disconnected` outcome.
-- `message` callbacks run serially in Hub-assigned Project sequence. Each callback materializes attachment bytes into the active session, then injects an `a2a-inbound` OMP custom message through `steer`; idle sessions start a turn and busy sessions queue the Message into the active turn. Materialization or injection failure produces `failed`, not `delivered`.
+- `message` callbacks run serially in Hub-assigned Project sequence. Each callback captures the active session, materializes attachment bytes, then verifies that the session is still active before injecting an `a2a-inbound` OMP custom message through `steer`; session changes cancel the injection. Idle sessions start a turn and busy sessions queue the Message into the active turn. Materialization or injection failure produces `failed`, not `delivered`.
 - socket/protocol errors are written to the extension logger.
 
 ## Human command surface

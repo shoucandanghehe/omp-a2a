@@ -12,6 +12,8 @@ import { resolveLocalUrlToFile } from "@oh-my-pi/pi-coding-agent/internal-urls/l
 import a2aExtension from "../src/extension";
 import { HubClient } from "../src/hub/client";
 import { A2aConnection } from "../src/hub/connection";
+import { encodeBinaryPayload } from "../src/hub/payload";
+import type { DeliveryEvent } from "../src/hub/realtime-types";
 import { startHubServer } from "../src/hub/server";
 
 interface CompletionItem {
@@ -406,6 +408,117 @@ test("a2a_message snapshots a sender local file into the receiver session and hi
 	} finally {
 		if (senderCommand) await senderCommand("disconnect", senderContext);
 		if (receiverCommand) await receiverCommand("disconnect", receiverContext);
+		await hub.stop();
+		rmSync(dataDir, { recursive: true, force: true });
+	}
+});
+
+test("session switch cancels an in-flight inbound injection", async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-extension-switch-"));
+	const receiverCwd = join(dataDir, "receiver");
+	const switchedCwd = join(dataDir, "switched");
+	const receiverArtifacts = join(dataDir, "receiver-artifacts");
+	const switchedArtifacts = join(dataDir, "switched-artifacts");
+	const hub = await startHubServer({ port: 0, dataDir });
+	const client = new HubClient(hub.meta.baseUrl);
+	const delivery = Promise.withResolvers<DeliveryEvent>();
+	const receiverError = Promise.withResolvers<void>();
+	const injected: string[] = [];
+	let sender: A2aConnection | undefined;
+	let switchPromise: Promise<void> | undefined;
+	let sessionSwitch:
+		| ((event: unknown, context: typeof switchedContext) => Promise<void>)
+		| undefined;
+	let commandHandler:
+		| ((args: string, context: typeof receiverContext) => Promise<void>)
+		| undefined;
+	const switchedContext = {
+		cwd: switchedCwd,
+		ui: { notify() {} },
+		isIdle: () => true,
+		sessionManager: { getSessionId: () => "switched-session" },
+		localProtocolOptions: {
+			getArtifactsDir: () => switchedArtifacts,
+			getSessionId: () => "switched-session",
+		},
+	};
+	const receiverContext = {
+		cwd: receiverCwd,
+		ui: { notify() {} },
+		isIdle: () => true,
+		sessionManager: { getSessionId: () => "receiver-session" },
+		localProtocolOptions: {
+			getArtifactsDir: () => {
+				if (!switchPromise) {
+					if (!sessionSwitch)
+						throw new Error("session_switch handler was not registered");
+					switchPromise = sessionSwitch({}, switchedContext);
+				}
+				return receiverArtifacts;
+			},
+			getSessionId: () => "receiver-session",
+		},
+	};
+
+	try {
+		await client.createProject({ name: "session-switch" });
+		mkdirSync(join(receiverCwd, ".omp"), { recursive: true });
+		writeFileSync(
+			join(receiverCwd, ".omp", "a2a.yml"),
+			`project: session-switch\nname: receiver\nhubUrl: ${hub.meta.baseUrl}\nautoConnect: false\n`,
+		);
+		a2aExtension({
+			arktype(definition: unknown) {
+				return definition;
+			},
+			setLabel() {},
+			on(event: string, handler: unknown) {
+				if (event === "session_switch")
+					sessionSwitch = handler as typeof sessionSwitch;
+			},
+			logger: { warn: () => receiverError.resolve() },
+			sendMessage(message: { content: string }) {
+				injected.push(message.content);
+			},
+			registerCommand(
+				_name: string,
+				command: { handler: typeof commandHandler },
+			) {
+				commandHandler = command.handler;
+			},
+			registerTool() {},
+		} as never);
+		if (!commandHandler) throw new Error("a2a command was not registered");
+		await commandHandler(
+			"connect session-switch --as receiver",
+			receiverContext,
+		);
+		sender = await A2aConnection.connect({
+			baseUrl: hub.meta.baseUrl,
+			project: "session-switch",
+			name: "sender",
+			events: { onDelivery: delivery.resolve },
+		});
+
+		await sender.send({
+			target: { type: "agent", name: "receiver" },
+			text: "must stay in the old session",
+			attachments: [
+				{
+					name: "handoff.txt",
+					payload: encodeBinaryPayload(Buffer.from("old session", "utf8")),
+				},
+			],
+			messageId: "switch-in-flight",
+		});
+		const outcome = await delivery.promise;
+		if (outcome.status === "disconnected") await receiverError.promise;
+		await switchPromise;
+
+		expect(injected).toEqual([]);
+	} finally {
+		await sender?.close();
+		if (commandHandler) await commandHandler("disconnect", switchedContext);
 		await hub.stop();
 		rmSync(dataDir, { recursive: true, force: true });
 	}

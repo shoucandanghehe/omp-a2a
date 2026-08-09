@@ -265,7 +265,11 @@ export default function a2aExtension(pi: ExtensionAPI) {
 				pi.logger?.warn?.(`a2a realtime error: ${error.message}`),
 			onMessage: async (message) => {
 				const context = activeContext;
+				if (!context)
+					throw new Error("A2A inbound message has no active session");
 				const materialized = await materializeMessage(message, context);
+				if (activeContext !== context)
+					throw new Error("A2A inbound message cancelled after session change");
 				const attachments = formatAttachments(materialized.attachments);
 				pi.sendMessage(
 					{
@@ -322,13 +326,14 @@ export default function a2aExtension(pi: ExtensionAPI) {
 	}
 
 	const activateSession = async (context: ExtensionContext) => {
-		activeContext = context;
-		refreshHubUrl(context.cwd);
+		activeContext = null;
 		if (reconnectTimer) {
 			clearTimeout(reconnectTimer);
 			reconnectTimer = undefined;
 		}
 		await runtime.disconnect();
+		activeContext = context;
+		refreshHubUrl(context.cwd);
 		desiredConnection = null;
 		const config = loadLocalConfig(context.cwd);
 		if (!config || config.autoConnect === false) return;
@@ -345,6 +350,7 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		async (_event, context) => await activateSession(context),
 	);
 	pi.on("session_shutdown", async () => {
+		activeContext = null;
 		desiredConnection = null;
 		clearTimeout(reconnectTimer);
 		reconnectTimer = undefined;
