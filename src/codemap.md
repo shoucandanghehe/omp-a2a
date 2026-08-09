@@ -71,7 +71,7 @@ The extension uses the injected ArkType module as the canonical schema authoring
 | `a2a_message` | Requires a typed direct or Project target and text; accepts optional current-session `local://` attachment sources, `replyTo`, and `messageId`; every description and success result states the push-driven reply control flow. |
 | `a2a_history` | Accepts `before`, `after`, `limit`, and `from`; rematerializes persisted attachments into the calling session; it is only for deliberate review of persisted context, never waiting for a new reply. |
 
-Every model turn receives identity guidance that A2A peers are independent top-level OMP sessions, `Main` is local to one session's Task tree, and peers must use exact roster names. There is no model-side connect/disconnect or Project administration. Replies arrive as inbound `steer` messages; there is no Inbox polling tool or history-polling wait path.
+Every model turn receives identity guidance that A2A identities are opaque exact roster names sourced from the current connection, `a2a_peers`, and inbound sender metadata; roles and labels from other coordination systems never define A2A identity. There is no model-side connect/disconnect or Project administration. Replies arrive as inbound `steer` messages; there is no Inbox polling tool or history-polling wait path.
 
 ## Runtime interface
 

@@ -86,9 +86,11 @@ test("human commands and model tools expose separate A2A surfaces", async () => 
 		throw new Error("A2A identity system prompt was not registered");
 	const identityPrompt =
 		(await beforeAgentStart()).systemPrompt?.join("\n") ?? "";
-	expect(identityPrompt).toContain("independent top-level OMP session");
-	expect(identityPrompt).toContain("Main is local to one session's Task tree");
-	expect(identityPrompt).toContain("exact A2A roster name");
+	expect(identityPrompt).toContain("opaque exact A2A roster names");
+	expect(identityPrompt).toContain("other coordination systems");
+	expect(identityPrompt).not.toContain("Main");
+	expect(identityPrompt).not.toContain("subagent");
+	expect(identityPrompt).not.toContain("Task tree");
 	if (!commandHandler) throw new Error("a2a command was not registered");
 	await commandHandler("help", {
 		cwd: process.cwd(),

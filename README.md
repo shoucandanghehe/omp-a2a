@@ -262,7 +262,7 @@ Only current-session `local://` regular files are accepted as attachment sources
 
 Queries already-persisted Project history by `before`, `after`, `limit`, or `from` when past context is intentionally needed. Persisted attachments are rematerialized as valid `local://` files in the calling session. History is not a wait primitive.
 
-Every model turn receives the A2A identity rule: peers are independent top-level OMP sessions or processes; `Main` is only a local role inside one session's Task tree and has no Project-wide meaning. The model identifies itself and addresses peers only by exact A2A roster names.
+Every model turn receives the A2A identity rule: identities are opaque exact roster names. The model uses only its current connection name, names returned by `a2a_peers`, and inbound sender metadata; it never derives or replaces them using roles or labels from other coordination systems.
 
 Inbound messages are pushed automatically and processed serially in Hub-assigned Project sequence. Presence changes update the UI without starting an idle model turn. Each Message uses `steer` delivery: an idle session starts a turn, while a busy session queues it into the active turn. Messages are acknowledged only after attachment materialization and successful injection. After `a2a_message`, models continue independent work or end the current turn; they never wait, sleep, or poll `a2a_history` for a reply.
 

@@ -13,7 +13,7 @@ import { AGENT_NAME_RE, PROJECT_NAME_RE } from "./types";
 const ASYNC_REPLY_GUIDANCE =
 	"Replies arrive automatically as inbound A2A steer messages and trigger or steer a turn. After sending, continue only independent work; if blocked, end the current turn; never wait, sleep, or call a2a_history to poll for a reply.";
 const A2A_IDENTITY_GUIDANCE =
-	"A2A peers are independent top-level OMP sessions/processes. Main is local to one session's Task tree and has no Project-wide meaning. A peer's A2A identity is its exact A2A roster name, not its local Main/subagent role. Address peers only by those roster names; never call a peer Main unless its roster name is literally Main.";
+	"A2A identities are opaque exact A2A roster names. Each roster entry names one current peer. Use only the current connection name, names returned by a2a_peers, and sender names from inbound message metadata. Never infer, translate, or replace these names using roles, labels, thread names, task names, or terminology from other coordination systems.";
 
 function parseArgs(raw: string): {
 	positional: string[];
