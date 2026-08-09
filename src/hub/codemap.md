@@ -40,7 +40,7 @@
 | `GET /v1/history` | Query one existing Project by cursor, sender name, and bounded limit. |
 | `GET /v1/connect` upgrade | Hand the socket to `RealtimeHub`. |
 
-The public `baseUrl` can differ from the listen host. Binding a wildcard host requires an explicit client-facing public URL.
+The public `baseUrl` reported in Hub metadata can differ from the listen host. Clients retain their resolved configuration URL as the authoritative HTTP and WebSocket route.
 
 ## WebSocket protocol
 
@@ -143,7 +143,7 @@ Migration runs in the new database transaction and validates imported row count 
 
 ## HTTP client
 
-`resolveHubUrl` precedence is explicit argument, environment, first existing global config, then loopback default. Existing malformed global configuration fails immediately. `probeHub` uses a 1.5-second timeout and protocol-version validation; ordinary `HubClient` operations currently have no default deadline.
+`resolveHubUrl` precedence is explicit argument, environment, first existing global config, then loopback default. That resolved URL remains authoritative for HTTP and WebSocket connections; Hub metadata validates protocol compatibility without replacing it. Existing malformed global configuration fails immediately. `probeHub` uses a 1.5-second timeout; ordinary `HubClient` operations currently have no default deadline.
 
 `HubClient` exposes only metadata, Project CRUD, and history. Realtime operations belong to `A2aConnection`.
 

@@ -160,6 +160,8 @@ OMP_A2A_HUB_PUBLIC_URL
 OMP_A2A_HUB_DATA_DIR
 ```
 
+`OMP_A2A_HUB_PUBLIC_URL` controls the `baseUrl` reported by `/healthz` and `/v1/meta`; it does not override a client's configured Hub URL.
+
 The default data directory is `~/.omp/a2a`. Persistent history is `<data-dir>/messages.sqlite`.
 
 ## Point OMP at a Hub
@@ -170,6 +172,8 @@ First match wins:
 2. `OMP_A2A_HUB_URL`
 3. Global `~/.omp/a2a/config.yml` / `.yaml` / `.json`
 4. `http://127.0.0.1:4173`
+
+The resolved URL is authoritative for HTTP and WebSocket connections. `/v1/meta` validates protocol compatibility but does not replace the configured route.
 
 Per-repository auto-connect example:
 

@@ -78,6 +78,8 @@ Hub URL precedence is:
 3. global `~/.omp/a2a/config.yml`, `.yaml`, or `.json`;
 4. `http://127.0.0.1:4173`.
 
+The resolved URL is authoritative for HTTP and WebSocket connections; Hub metadata validates protocol compatibility without replacing the route.
+
 Repository-local connection defaults require `project` and `name`; `autoConnect` defaults to enabled. Removed `agentId` and `autoJoin` fields fail with an explicit migration error.
 
 The Hub runs locally with `bun run hub` or in Docker Compose. Each Hub needs a unique URL and data directory. `HubDataLock` rejects concurrent ownership of one directory. SQLite message history uses WAL and `synchronous = FULL`.

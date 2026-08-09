@@ -107,7 +107,7 @@ export async function connectHub(options?: {
 			`A2A protocol mismatch: extension=${A2A_PROTOCOL_VERSION}, Hub=${meta.protocolVersion ?? "legacy"}`,
 		);
 	}
-	return meta;
+	return { ...meta, baseUrl };
 }
 
 export class HubClient {

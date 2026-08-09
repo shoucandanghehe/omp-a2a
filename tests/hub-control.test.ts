@@ -21,6 +21,28 @@ afterEach(async () => {
 		rmSync(root, { recursive: true, force: true });
 });
 
+test("configured Hub URL remains authoritative over advertised metadata", async () => {
+	const hub = await startHubServer({
+		port: 0,
+		dataDir: dataDir(),
+		publicUrl: "http://127.0.0.1:1",
+	});
+	hubs.push(hub);
+	const configuredUrl = `http://127.0.0.1:${hub.meta.port}`;
+	await new HubClient(configuredUrl).createProject({
+		name: "configured-route",
+	});
+
+	const client = await HubClient.connect({ hubUrl: configuredUrl });
+	const connection = await A2aConnection.connect({
+		baseUrl: client.baseUrl,
+		project: "configured-route",
+		name: "remote",
+	});
+	expect(connection.self.name).toBe("remote");
+	await connection.close();
+});
+
 describe("Hub Project control plane", () => {
 	test("different Hub data directories own independent Projects", async () => {
 		const first = await startHubServer({ port: 0, dataDir: dataDir() });
