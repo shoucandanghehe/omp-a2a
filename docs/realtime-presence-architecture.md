@@ -16,8 +16,8 @@ Those mechanics did not match the actual product boundary: independent OMP sessi
 
 - A **Project** is a persistent room.
 - A **Presence** exists if and only if one WebSocket is alive. It belongs to one Project and claims one temporary name.
-- A **Message** is immutable, receives one monotonically increasing Project sequence, and remains until Project deletion.
-- A **Delivery** is the in-memory outcome for one selected Presence: `delivered` or `disconnected`.
+- A **Message** is immutable, receives one monotonically increasing Project sequence, and remains until Project deletion. Optional attachments are immutable file-content values inside the Message, not independently identified objects.
+- A **Delivery** is the in-memory outcome for one selected Presence: `delivered`, `failed`, or `disconnected`.
 
 There is no offline, stale, durable member, recipient cursor, or offline-delivery state. A same-named later connection is a new Presence and inherits nothing from the old socket.
 
@@ -25,19 +25,21 @@ Direct messaging resolves one current name and binds the target `presenceId`. Pr
 
 ### Transport and persistence
 
-Private protocol version `2` reuses the Hub HTTP server:
+Private protocol version `3` reuses the Hub HTTP server:
 
-- WebSocket `/v1/connect` carries handshake, Presence events, messages, acknowledgments, and delivery outcomes.
+- WebSocket `/v1/connect` carries handshake, Presence events, Messages with inline attachment content, acknowledgments, and Delivery outcomes.
 - HTTP carries Hub metadata, Project administration, and explicit history queries.
 - filesystem JSON stores Project metadata;
 - in-memory indexes store Presence and pending delivery;
 - SQLite `messages.sqlite` stores append-only Project history with WAL and `synchronous = FULL`.
 
-Text below 32 KiB stays identity encoded; larger text uses gzip plus Base64. The uncompressed limit is 4 MiB and decompression is bounded.
+Text below 32 KiB stays identity encoded; larger text uses gzip plus Base64. Attachment bytes use Base64 and use gzip first when smaller. One Message accepts at most eight attachments, with a 4 MiB decoded-content limit shared by text and attachment content. Decompression is bounded.
 
 ### Public interfaces
 
 Humans administer Projects and their own connection through `/a2a`. Models receive exactly `a2a_peers`, `a2a_message`, and `a2a_history`. Inbound messages are pushed into OMP automatically; there is no polling tool or user send/Inbox protocol surface.
+
+`a2a_message` accepts optional current-session `local://` regular-file sources. The sender Extension snapshots their bytes before sending; the Hub never resolves sender-local URLs. Receiving and history-querying Extensions materialize new `local://` copies inside their own sessions before exposing the Message.
 
 Repository configuration uses `name` and `autoConnect`. Removed `agentId` and `autoJoin` fields fail with an explicit migration error.
 
@@ -47,19 +49,21 @@ On first start, ordinary rows from the old `inbox.sqlite` message ledger are cop
 
 Migration runs transactionally in the new database, validates the imported count and `PRAGMA integrity_check`, and does not mutate the old database.
 
+Opening a protocol version `2` `messages.sqlite` adds attachment storage and decoded-content accounting in place. Existing Messages migrate to an empty attachment list without changing their sequence, reference, text, target, or causal parent.
+
 ## Consequences
 
 - Presence state is simple and observable: socket alive means present; socket closed means absent.
 - Missing direct recipients fail immediately instead of creating latent work.
 - Hub restart clears Presence and delivery state but preserves message history.
-- Delivery proves successful injection into the receiving OMP extension, not model understanding or task completion.
+- `delivered` proves successful attachment materialization and injection into the receiving OMP extension, not model understanding or task completion. Materialization or injection errors produce a terminal `failed` Delivery.
 - Direct routing is not confidential history. Without accounts and authorization, any trusted current Agent can query Project history.
-- Hub and extension must upgrade together because protocol version `2` has no compatibility path for the removed Inbox model.
+- Hub and extension must upgrade together because protocol version `3` has no compatibility path for version `2` Message frames.
 - Project metadata deletion and SQLite history deletion remain separate operations; interrupted deletion requires operator inspection before name reuse.
 
 ## Verification
 
-The behavior suite and executable smoke scenarios cover duplicate names, immediate Presence removal, direct-target failure, broadcast snapshots, causal replies, non-persistent Presence events, restart persistence, legacy migration, the three-tool model surface, the reduced human command surface, and the Docker HTTP/WebSocket boundary.
+The behavior suite and executable smoke scenarios cover duplicate names, immediate Presence removal, direct-target failure, broadcast snapshots, causal replies, non-persistent Presence events, attachment snapshot/materialization/history, failed Delivery, restart persistence, protocol version `2` database migration, legacy Inbox migration, the three-tool model surface, the reduced human command surface, and the Docker HTTP/WebSocket boundary.
 
 ## Deployment and rollback
 

@@ -8,7 +8,7 @@ import {
 	MessageIdConflictError,
 	MessageStore,
 } from "../src/hub/messages";
-import { encodeTextPayload } from "../src/hub/payload";
+import { encodeBinaryPayload, encodeTextPayload } from "../src/hub/payload";
 
 const roots: string[] = [];
 
@@ -28,6 +28,7 @@ test("messages form one immutable sequence per Project", () => {
 		from: { name: "api", presenceId: "presence-api" },
 		target: { type: "agent", name: "web", presenceId: "presence-web" },
 		payload: encodeTextPayload("check the login contract"),
+		attachments: [],
 		createdAt: 100,
 	});
 	const second = store.append({
@@ -36,6 +37,7 @@ test("messages form one immutable sequence per Project", () => {
 		from: { name: "api", presenceId: "presence-api" },
 		target: { type: "project" },
 		payload: encodeTextPayload("freeze the contract"),
+		attachments: [],
 		createdAt: 101,
 		replyTo: first.message.messageRef,
 	});
@@ -60,6 +62,7 @@ test("messages form one immutable sequence per Project", () => {
 		from: { name: "api", presenceId: "another-presence" },
 		target: { type: "agent", name: "web", presenceId: "another-web-presence" },
 		payload: encodeTextPayload("check the login contract"),
+		attachments: [],
 		createdAt: 999,
 	});
 	expect(repeated).toEqual({ inserted: false, message: first.message });
@@ -70,6 +73,7 @@ test("messages form one immutable sequence per Project", () => {
 			from: { name: "api", presenceId: "presence-api" },
 			target: { type: "agent", name: "web", presenceId: "presence-web" },
 			payload: encodeTextPayload("different body"),
+			attachments: [],
 			createdAt: 100,
 		}),
 	).toThrow(MessageIdConflictError);
@@ -157,6 +161,7 @@ test("history uses stable Project cursors and sender filters", () => {
 			from: { name: from, presenceId: `presence-${from}` },
 			target: { type: "project" },
 			payload: encodeTextPayload(`message ${index + 1}`),
+			attachments: [],
 			createdAt: index + 1,
 		});
 	}
@@ -196,6 +201,7 @@ test("history response has an explicit decoded-byte bound", () => {
 			from: { name: "api", presenceId: "presence-api" },
 			target: { type: "project" },
 			payload: encodeTextPayload(text),
+			attachments: [],
 			createdAt: index,
 		});
 	}
@@ -204,5 +210,107 @@ test("history response has an explicit decoded-byte bound", () => {
 			.history({ project: "bounded", limit: 10 })
 			.messages.map((message) => message.messageRef),
 	).toEqual(["bounded:2", "bounded:3"]);
+	store.close();
+});
+
+test("protocol v2 message databases migrate with empty attachments", () => {
+	const root = mkdtempSync(join(tmpdir(), "omp-a2a-messages-v2-"));
+	roots.push(root);
+	const databasePath = join(root, "messages.sqlite");
+	const previous = new Database(databasePath, { create: true });
+	previous.run(`
+		CREATE TABLE messages (
+			project TEXT NOT NULL,
+			project_sequence INTEGER NOT NULL,
+			msg_id TEXT NOT NULL UNIQUE,
+			sender_name TEXT NOT NULL,
+			sender_presence_id TEXT,
+			target_kind TEXT NOT NULL,
+			target_name TEXT,
+			target_presence_id TEXT,
+			encoding TEXT NOT NULL,
+			data TEXT NOT NULL,
+			uncompressed_bytes INTEGER NOT NULL,
+			created_at INTEGER NOT NULL,
+			reply_to_sequence INTEGER,
+			PRIMARY KEY(project, project_sequence)
+		)
+	`);
+	previous
+		.query(
+			"INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+		)
+		.run(
+			"migration",
+			1,
+			"v2-message",
+			"api",
+			"presence-api",
+			"project",
+			null,
+			null,
+			"identity",
+			"persisted before attachments",
+			28,
+			100,
+			null,
+		);
+	previous.close();
+
+	const store = new MessageStore(databasePath);
+	expect(store.history({ project: "migration" }).messages).toMatchObject([
+		{
+			messageId: "v2-message",
+			attachments: [],
+		},
+	]);
+	store.close();
+	const reopened = new MessageStore(databasePath);
+	expect(reopened.integrityCheck()).toBe("ok");
+	expect(reopened.history({ project: "migration" }).messages).toHaveLength(1);
+	reopened.close();
+});
+
+test("attachment content participates in messageId idempotency", () => {
+	const root = mkdtempSync(join(tmpdir(), "omp-a2a-attachment-idempotency-"));
+	roots.push(root);
+	const store = new MessageStore(join(root, "messages.sqlite"));
+	const draft = {
+		messageId: "attachment-idempotency",
+		project: "attachments",
+		from: { name: "api", presenceId: "presence-api" },
+		target: { type: "project" as const },
+		payload: encodeTextPayload("training contract"),
+		attachments: [
+			{
+				name: "handoff.md",
+				payload: encodeBinaryPayload(
+					Buffer.from("# Handoff\nseed=20\n", "utf8"),
+				),
+			},
+		],
+		createdAt: 100,
+	};
+	const first = store.append(draft);
+	expect(
+		store.append({
+			...draft,
+			from: { name: "api", presenceId: "replacement-presence" },
+			createdAt: 200,
+		}),
+	).toEqual({ inserted: false, message: first.message });
+	expect(() =>
+		store.append({
+			...draft,
+			attachments: [
+				{
+					name: "handoff.md",
+					payload: encodeBinaryPayload(
+						Buffer.from("# Handoff\nseed=21\n", "utf8"),
+					),
+				},
+			],
+		}),
+	).toThrow(MessageIdConflictError);
 	store.close();
 });

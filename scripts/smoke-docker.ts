@@ -1,6 +1,10 @@
 import { HubClient } from "../src/hub/client";
 import { A2aConnection } from "../src/hub/connection";
-import { decodeTextPayload } from "../src/hub/payload";
+import {
+	decodeBinaryPayload,
+	decodeTextPayload,
+	encodeBinaryPayload,
+} from "../src/hub/payload";
 import type { RealtimeMessage } from "../src/hub/realtime-types";
 
 function assert(condition: unknown, message: string): asserts condition {
@@ -15,6 +19,7 @@ let resolveMessage!: (message: RealtimeMessage) => void;
 const received = new Promise<RealtimeMessage>((resolve) => {
 	resolveMessage = resolve;
 });
+const attachmentBytes = Buffer.from("# Docker handoff\nprotocol=3\n", "utf8");
 
 try {
 	console.log(`\n== Docker Hub ${client.baseUrl} ==`);
@@ -33,15 +38,28 @@ try {
 	const accepted = await api.send({
 		target: { type: "agent", name: "web" },
 		text: "docker realtime",
+		attachments: [
+			{
+				name: "docker-handoff.md",
+				payload: encodeBinaryPayload(attachmentBytes),
+			},
+		],
 		messageId: `${project}-message`,
 	});
 	assert(
 		accepted.message.messageRef === `${project}:1`,
 		"Docker Hub assigned Project sequence",
 	);
+	const receivedMessage = await received;
 	assert(
-		decodeTextPayload((await received).payload) === "docker realtime",
+		decodeTextPayload(receivedMessage.payload) === "docker realtime",
 		"Docker WebSocket delivered message",
+	);
+	const receivedAttachment = receivedMessage.attachments[0];
+	assert(
+		receivedAttachment?.name === "docker-handoff.md" &&
+			decodeBinaryPayload(receivedAttachment.payload).equals(attachmentBytes),
+		"Docker WebSocket delivered attachment bytes",
 	);
 	await api.close();
 	api = null;
@@ -49,6 +67,12 @@ try {
 	web = null;
 	const history = await client.history({ project, limit: 10 });
 	assert(history.messages.length === 1, "Docker Hub persisted message history");
+	const persistedAttachment = history.messages[0]?.attachments[0];
+	assert(
+		persistedAttachment?.name === "docker-handoff.md" &&
+			decodeBinaryPayload(persistedAttachment.payload).equals(attachmentBytes),
+		"Docker Hub persisted attachment history",
+	);
 	assert(await client.deleteProject(project), "Docker smoke Project deleted");
 	console.log("Docker Hub smoke OK");
 } finally {

@@ -1,7 +1,14 @@
 import { expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+	mkdirSync,
+	mkdtempSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { resolveLocalUrlToFile } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
 import a2aExtension from "../src/extension";
 import { HubClient } from "../src/hub/client";
 import { A2aConnection } from "../src/hub/connection";
@@ -16,10 +23,18 @@ interface CompletionItem {
 interface RegisteredTool {
 	name: string;
 	description: string;
+	parameters?: unknown;
 	execute(
 		id: string,
 		parameters: never,
-	): Promise<{ content: Array<{ type: string; text: string }> }>;
+		signal?: AbortSignal,
+		onUpdate?: unknown,
+		context?: unknown,
+	): Promise<{
+		content: Array<{ type: string; text: string }>;
+		details?: unknown;
+		isError?: boolean;
+	}>;
 }
 
 test("human commands and model tools expose separate A2A surfaces", async () => {
@@ -190,6 +205,191 @@ test("model tool contract makes replies push-driven instead of history-polled", 
 	} finally {
 		if (commandHandler) await commandHandler("disconnect", context);
 		await worker?.close();
+		await hub.stop();
+		rmSync(dataDir, { recursive: true, force: true });
+	}
+});
+
+test("a2a_message snapshots a sender local file into the receiver session and history", async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-extension-attachment-"));
+	const project = "attachment-contract";
+	const senderCwd = join(dataDir, "sender");
+	const receiverCwd = join(dataDir, "receiver");
+	const senderArtifacts = join(dataDir, "sender-artifacts");
+	const receiverArtifacts = join(dataDir, "receiver-artifacts");
+	const hub = await startHubServer({ port: 0, dataDir });
+	const client = new HubClient(hub.meta.baseUrl);
+	const senderTools = new Map<string, RegisteredTool>();
+	const receiverTools = new Map<string, RegisteredTool>();
+	let senderCommand:
+		| ((
+				args: string,
+				context: {
+					cwd: string;
+					ui: { notify(message: string): void };
+				},
+		  ) => Promise<void>)
+		| undefined;
+	let receiverCommand: typeof senderCommand;
+	const inbound = Promise.withResolvers<{
+		content: string;
+		details: unknown;
+	}>();
+	const senderContext = {
+		cwd: senderCwd,
+		ui: { notify() {} },
+		isIdle: () => true,
+		sessionManager: { getSessionId: () => "sender-session" },
+		localProtocolOptions: {
+			getArtifactsDir: () => senderArtifacts,
+			getSessionId: () => "sender-session",
+		},
+	};
+	const receiverContext = {
+		cwd: receiverCwd,
+		ui: { notify() {} },
+		isIdle: () => true,
+		sessionManager: { getSessionId: () => "receiver-session" },
+		localProtocolOptions: {
+			getArtifactsDir: () => receiverArtifacts,
+			getSessionId: () => "receiver-session",
+		},
+	};
+
+	try {
+		await client.createProject({ name: project });
+		for (const [cwd, name] of [
+			[senderCwd, "sender"],
+			[receiverCwd, "receiver"],
+		] as const) {
+			mkdirSync(join(cwd, ".omp"), { recursive: true });
+			writeFileSync(
+				join(cwd, ".omp", "a2a.yml"),
+				`project: ${project}\nname: ${name}\nhubUrl: ${hub.meta.baseUrl}\nautoConnect: false\n`,
+			);
+		}
+		mkdirSync(join(senderArtifacts, "local"), { recursive: true });
+		writeFileSync(
+			join(senderArtifacts, "local", "training-handoff.md"),
+			"# Training handoff\nseed=20\n",
+		);
+
+		const installExtension = (
+			tools: Map<string, RegisteredTool>,
+			setCommand: (handler: NonNullable<typeof senderCommand>) => void,
+			sendMessage: (message: { content: string; details: unknown }) => void,
+		) => {
+			a2aExtension({
+				arktype(definition: unknown) {
+					return definition;
+				},
+				setLabel() {},
+				on() {},
+				logger: { warn() {} },
+				sendMessage,
+				registerCommand(
+					_name: string,
+					command: { handler: NonNullable<typeof senderCommand> },
+				) {
+					setCommand(command.handler);
+				},
+				registerTool(tool: RegisteredTool) {
+					tools.set(tool.name, tool);
+				},
+			} as never);
+		};
+		installExtension(
+			senderTools,
+			(handler) => {
+				senderCommand = handler;
+			},
+			() => {},
+		);
+		installExtension(
+			receiverTools,
+			(handler) => {
+				receiverCommand = handler;
+			},
+			(message) => inbound.resolve(message),
+		);
+
+		if (!senderCommand || !receiverCommand)
+			throw new Error("a2a command was not registered");
+		await receiverCommand(`connect ${project} --as receiver`, receiverContext);
+		await senderCommand(`connect ${project} --as sender`, senderContext);
+		const messageTool = senderTools.get("a2a_message");
+		const historyTool = receiverTools.get("a2a_history");
+		if (!messageTool || !historyTool)
+			throw new Error("a2a tools were not registered");
+
+		await expect(
+			resolveLocalUrlToFile("local://training-handoff.md", {
+				localProtocolOptions: receiverContext.localProtocolOptions,
+			}),
+		).rejects.toThrow("Local file not found");
+
+		const sent = await messageTool.execute(
+			"attachment-send",
+			{
+				target: { type: "agent", name: "receiver" },
+				text: "Use the attached training contract.",
+				attachments: ["local://training-handoff.md"],
+				messageId: "attachment-send",
+			} as never,
+			undefined,
+			undefined,
+			senderContext,
+		);
+		expect(sent.content[0]?.text).toContain("attachments=1");
+		const received = await inbound.promise;
+		const receivedUrl = received.content.match(/local:\/\/\S+/)?.[0];
+		if (!receivedUrl) throw new Error("inbound attachment URL missing");
+		const receivedFile = await resolveLocalUrlToFile(receivedUrl, {
+			localProtocolOptions: receiverContext.localProtocolOptions,
+		});
+		if (!receivedFile) throw new Error("inbound attachment did not resolve");
+		expect(readFileSync(receivedFile.path, "utf8")).toBe(
+			"# Training handoff\nseed=20\n",
+		);
+
+		const history = await historyTool.execute(
+			"attachment-history",
+			{} as never,
+			undefined,
+			undefined,
+			receiverContext,
+		);
+		const historyUrl = history.content[0]?.text.match(/local:\/\/\S+/)?.[0];
+		if (!historyUrl) throw new Error("history attachment URL missing");
+		const historyFile = await resolveLocalUrlToFile(historyUrl, {
+			localProtocolOptions: receiverContext.localProtocolOptions,
+		});
+		if (!historyFile) throw new Error("history attachment did not resolve");
+		const rejected = await messageTool.execute(
+			"missing-attachment",
+			{
+				target: { type: "agent", name: "receiver" },
+				text: "This must not enter history.",
+				attachments: ["local://missing.md"],
+				messageId: "missing-attachment",
+			} as never,
+			undefined,
+			undefined,
+			senderContext,
+		);
+		expect(rejected.isError).toBe(true);
+		expect(rejected.content[0]?.text).toContain("Local file not found");
+		expect(
+			(await client.history({ project })).messages.map(
+				(message) => message.messageId,
+			),
+		).toEqual(["attachment-send"]);
+		expect(readFileSync(historyFile.path, "utf8")).toBe(
+			"# Training handoff\nseed=20\n",
+		);
+	} finally {
+		if (senderCommand) await senderCommand("disconnect", senderContext);
+		if (receiverCommand) await receiverCommand("disconnect", receiverContext);
 		await hub.stop();
 		rmSync(dataDir, { recursive: true, force: true });
 	}

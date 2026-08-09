@@ -1,6 +1,6 @@
-import type { EncodedTextPayload } from "./types";
+import type { EncodedAttachment, EncodedTextPayload } from "./types";
 
-export const A2A_PROTOCOL_VERSION = 2;
+export const A2A_PROTOCOL_VERSION = 3;
 
 export type Peer = {
 	name: string;
@@ -23,8 +23,10 @@ export type AcceptedMessage = {
 export type DeliveryEvent = {
 	messageId: string;
 	to: string;
-	status: "delivered" | "disconnected";
-};
+} & (
+	| { status: "delivered" | "disconnected" }
+	| { status: "failed"; error: string }
+);
 
 export type RealtimeMessage = {
 	messageId: string;
@@ -34,6 +36,7 @@ export type RealtimeMessage = {
 	from: Peer;
 	target: MessageTarget;
 	payload: EncodedTextPayload;
+	attachments: EncodedAttachment[];
 	createdAt: number;
 	replyTo?: string;
 };
@@ -58,9 +61,11 @@ export type ClientFrame =
 			messageId: string;
 			target: MessageRequestTarget;
 			payload: EncodedTextPayload;
+			attachments: EncodedAttachment[];
 			replyTo?: string;
 	  }
-	| { type: "delivered"; messageId: string };
+	| { type: "delivered"; messageId: string }
+	| { type: "delivery_failed"; messageId: string; error: string };
 
 export type ServerFrame =
 	| {
@@ -83,10 +88,5 @@ export type ServerFrame =
 			recipients: string[];
 	  }
 	| { type: "message"; message: RealtimeMessage }
-	| {
-			type: "delivery";
-			messageId: string;
-			to: string;
-			status: "delivered" | "disconnected";
-	  }
+	| ({ type: "delivery" } & DeliveryEvent)
 	| { type: "error"; code: string; message: string; requestId?: string };

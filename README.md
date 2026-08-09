@@ -22,7 +22,7 @@ omp-a2a-hub
 - **Extension:** a pure client. It never starts the Hub or reads the Hub data directory.
 - **Docker:** only keeps the Hub running. Users manage Projects and their own connection through `/a2a` commands.
 - **Multiple Hubs:** supported when each Hub has a different URL and data directory. Same-named Projects on different Hubs are unrelated.
-- **Wire protocol:** private protocol version `2`; Hub and extension reject mismatched versions. It is not the standard A2A protocol.
+- **Wire protocol:** private protocol version `3`; Hub and extension reject mismatched versions. It is not the standard A2A protocol.
 
 ## Domain model
 
@@ -60,9 +60,11 @@ Supported targets:
 
 A direct target is bound to the resolved `presenceId`. If it disconnects, the message is never transferred to a future same-named connection.
 
+An optional Message attachment is an immutable file-content value, not a durable object or a reference back to the sender. The sender Extension snapshots a current-session `local://` regular file before sending. The Hub persists those bytes with the Message, and each receiving Extension materializes its own session-local copy. Attachments share the Message lifecycle and disappear only when the Project is deleted.
+
 ### Delivery
 
-Receiving extensions acknowledge successful OMP injection over the live socket. The sender receives `delivered` or `disconnected` for each target. Delivery proves transport into the peer extension, not model understanding or task completion.
+Receiving extensions acknowledge only after all attachments are materialized and the OMP message is injected. The sender receives `delivered`, `failed`, or `disconnected` for each target. A failed materialization or injection reports `failed`; Delivery still proves neither model understanding nor task completion.
 
 Delivery state is realtime and in-memory. ACK never deletes message history.
 
@@ -83,6 +85,7 @@ omp-a2a is for a fully trusted private network.
 ## Current operational constraints
 
 - **Custom protocol:** this repository implements a private realtime protocol, not the standard A2A protocol. Do not assume interoperability with standard A2A clients or servers.
+- **OMP runtime:** attachment transfer requires `@oh-my-pi/pi-coding-agent` `>=17.2.11`, whose public local-protocol resolver provides session-scoped `local://` access.
 - **Hub changes while connected:** an established WebSocket remains bound to the Hub that accepted it. After changing `hubUrl`, disconnect and reconnect before issuing Project or history operations against the new Hub.
 - **Interrupted Project deletion:** Project metadata is removed from the filesystem Registry before its SQLite message history is purged. After a crash or storage failure during deletion, verify or clear the old Project state before reusing the same Project name.
 - **Stalled HTTP requests:** the initial Hub probe has a timeout, but ordinary Project and history requests currently do not. A Hub that accepts connections without completing responses can stall the invoking command; restart the Hub and affected OMP session if this occurs.
@@ -243,22 +246,37 @@ Causal reply:
 }
 ```
 
+Message with a session-local attachment:
+
+```json
+{
+  "target": { "type": "agent", "name": "training" },
+  "text": "Use the frozen training contract",
+  "attachments": ["local://v104-g1-training-handoff.md"]
+}
+```
+
+Only current-session `local://` regular files are accepted as attachment sources. Source URLs are never sent to or resolved by the Hub.
+
 ### `a2a_history`
 
-Queries already-persisted Project history by `before`, `after`, `limit`, or `from` when past context is intentionally needed. It is not a wait primitive.
+Queries already-persisted Project history by `before`, `after`, `limit`, or `from` when past context is intentionally needed. Persisted attachments are rematerialized as valid `local://` files in the calling session. History is not a wait primitive.
 
-Inbound messages are pushed automatically. Presence changes update the UI without starting an idle model turn. Messages trigger a turn and are acknowledged only after successful injection. After `a2a_message`, models continue independent work or end the current turn; they never wait, sleep, or poll `a2a_history` for a reply.
+Inbound messages are pushed automatically. Presence changes update the UI without starting an idle model turn. Messages trigger a turn and are acknowledged only after attachment materialization and successful injection. After `a2a_message`, models continue independent work or end the current turn; they never wait, sleep, or poll `a2a_history` for a reply.
 
 ## Payload and persistence
 
-- Text below 32 KiB uses identity encoding.
-- Larger text uses gzip + base64 on the wire.
-- Decoded text is limited to 4 MiB.
-- `messageId` is an opaque idempotency key. Reusing it with different content fails.
+- Text below 32 KiB uses identity encoding; larger text uses gzip + Base64.
+- Attachment bytes use Base64 and use gzip first when that reduces payload size.
+- One Message accepts at most eight attachments.
+- Decoded text plus attachment content is limited to 4 MiB per Message and per history page.
+- `messageId` is an opaque idempotency key. Reusing it with different text, attachment names, attachment order, attachment content, target, or causal parent fails.
 - History uses SQLite WAL with `synchronous = FULL`.
 - The Hub data directory has an exclusive lock; two Hub processes cannot write the same data.
 
 On first start with an old `inbox.sqlite`, the Hub imports ordinary `message_ledger` rows into `messages.sqlite` in deterministic `(project, created_at, msg_id)` order. Old Presence, cursor, ACK, receipt, and offline-delivery state are not migrated. Pending messages become history only and are never delivered to future connections.
+
+Opening a protocol version `2` `messages.sqlite` adds the attachment columns in place. Existing Messages receive an empty attachment list and retain their original sequence, reference, text, and causality.
 
 ## Verify
 
@@ -267,12 +285,12 @@ On first start with an old `inbox.sqlite`, the Hub imports ordinary `message_led
 ```bash
 biome check .slim/codemap.json src tests scripts package.json
 bun run smoke
-bun build src/extension.ts --target=bun --outdir=/tmp/omp-a2a-extension-build
+bun build src/extension.ts --target=bun --external @oh-my-pi/pi-coding-agent/internal-urls/local-protocol --outdir=/tmp/omp-a2a-extension-build
 bun build src/hub/cli.ts --target=bun --outdir=/tmp/omp-a2a-hub-build
 docker compose config
 ```
 
-These commands check formatting, run the Bun tests plus Project Registry and live Hub/client smokes, build both executable entry points, and validate the Compose model. The behavioral coverage includes WebSocket Presence, name conflicts, Presence join/leave notifications, direct messaging, Project broadcast, delivery outcomes, Project history, legacy message migration, payload limits, Project deletion, Hub restart semantics, and command completion.
+These commands check formatting, run the Bun tests plus Project Registry and live Hub/client smokes, build both executable entry points, and validate the Compose model. The behavioral coverage includes WebSocket Presence, name conflicts, Presence notifications, direct and broadcast routing, successful/failed/disconnected Delivery, cross-session attachment snapshot/materialization/history, protocol version `2` and legacy Inbox migration, payload limits, Project deletion, Hub restart semantics, and command completion.
 
 ### Docker boundary
 
@@ -290,6 +308,7 @@ src/
   extension.ts             # human commands + three model tools
   operations.ts            # canonical runtime shared by both adapters
   registry.ts              # persistent Project metadata only
+  local-attachments.ts     # sender local:// snapshots + receiver materialization
   config.ts                # repository connection defaults
   hub/
     server.ts              # HTTP control/history + WebSocket attachment

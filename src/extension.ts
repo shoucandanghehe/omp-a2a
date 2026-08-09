@@ -2,6 +2,11 @@ import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
 import { loadLocalConfig } from "./config";
 import { HubClient, resolveHubUrl } from "./hub/client";
 import type { MessageRequestTarget } from "./hub/realtime-types";
+import {
+	type LocalAttachmentReference,
+	materializeLocalAttachments,
+	snapshotLocalAttachments,
+} from "./local-attachments";
 import { A2aRuntime, type MessageView } from "./operations";
 import { AGENT_NAME_RE, PROJECT_NAME_RE } from "./types";
 
@@ -184,13 +189,41 @@ function usage(): string {
 	].join("\n");
 }
 
-function formatMessages(messages: MessageView[]): string {
+type MaterializedMessageView = Omit<MessageView, "attachments"> & {
+	attachments: LocalAttachmentReference[];
+};
+
+async function materializeMessage(
+	message: MessageView,
+	context: Pick<ExtensionContext, "localProtocolOptions"> | null | undefined,
+): Promise<MaterializedMessageView> {
+	return {
+		...message,
+		attachments: await materializeLocalAttachments(
+			message.attachments,
+			context?.localProtocolOptions,
+		),
+	};
+}
+
+function formatAttachments(attachments: LocalAttachmentReference[]): string {
+	if (attachments.length === 0) return "";
+	return `\nAttachments:\n${attachments
+		.map(
+			(attachment) =>
+				`- ${attachment.name} (${attachment.uncompressedBytes} bytes): ${attachment.url}`,
+		)
+		.join("\n")}`;
+}
+
+function formatMessages(messages: MaterializedMessageView[]): string {
 	if (messages.length === 0) return "No messages.";
 	return messages
 		.map((message) => {
 			const target =
 				message.target.type === "project" ? "project" : message.target.name;
-			return `[${message.messageRef}] ${message.from.name} -> ${target}${message.replyTo ? ` replyTo=${message.replyTo}` : ""}\n${message.text}`;
+			const attachments = formatAttachments(message.attachments);
+			return `[${message.messageRef}] ${message.from.name} -> ${target}${message.replyTo ? ` replyTo=${message.replyTo}` : ""}\n${message.text}${attachments}`;
 		})
 		.join("\n\n");
 }
@@ -225,19 +258,21 @@ export default function a2aExtension(pi: ExtensionAPI) {
 				activeContext?.ui.notify(`[a2a] ${peer.name} left`, "info"),
 			onDelivery: (delivery) =>
 				activeContext?.ui.notify(
-					`[a2a] ${delivery.to} ${delivery.status}`,
-					"info",
+					`[a2a] ${delivery.to} ${delivery.status}${delivery.status === "failed" ? `: ${delivery.error}` : ""}`,
+					delivery.status === "failed" ? "error" : "info",
 				),
 			onError: (error) =>
 				pi.logger?.warn?.(`a2a realtime error: ${error.message}`),
-			onMessage: (message) => {
+			onMessage: async (message) => {
 				const context = activeContext;
+				const materialized = await materializeMessage(message, context);
+				const attachments = formatAttachments(materialized.attachments);
 				pi.sendMessage(
 					{
 						customType: "a2a-inbound",
-						content: `[a2a message] ref=${message.messageRef} from=${message.from.name} project=${message.project} at=${new Date(message.createdAt).toISOString()} replyTo=${message.replyTo ?? "-"}\n${message.text}`,
+						content: `[a2a message] ref=${message.messageRef} from=${message.from.name} project=${message.project} at=${new Date(message.createdAt).toISOString()} replyTo=${message.replyTo ?? "-"}\n${message.text}${attachments}`,
 						display: true,
-						details: message,
+						details: materialized,
 					},
 					{
 						deliverAs: context?.isIdle() === false ? "steer" : "followUp",
@@ -428,16 +463,17 @@ export default function a2aExtension(pi: ExtensionAPI) {
 				if (command === "history") {
 					const limit =
 						flags.limit === undefined ? undefined : Number(flags.limit);
+					const messages = await runtime.history({
+						before: typeof flags.before === "string" ? flags.before : undefined,
+						after: typeof flags.after === "string" ? flags.after : undefined,
+						from: typeof flags.from === "string" ? flags.from : undefined,
+						limit,
+					});
 					context.ui.notify(
 						formatMessages(
-							await runtime.history({
-								before:
-									typeof flags.before === "string" ? flags.before : undefined,
-								after:
-									typeof flags.after === "string" ? flags.after : undefined,
-								from: typeof flags.from === "string" ? flags.from : undefined,
-								limit,
-							}),
+							await Promise.all(
+								messages.map((message) => materializeMessage(message, context)),
+							),
 						),
 						"info",
 					);
@@ -488,18 +524,25 @@ export default function a2aExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "a2a_message",
 		label: "A2A Message",
-		description: `Send a direct message, Project broadcast, or causal reply. Use target.type=agent for one present name or project for the current Presence snapshot. ${ASYNC_REPLY_GUIDANCE}`,
+		description: `Send a direct message, Project broadcast, or causal reply. Use target.type=agent for one present name or project for the current Presence snapshot. Optional attachments must be current-session local:// regular files; their immutable contents enter Project history with the Message. ${ASYNC_REPLY_GUIDANCE}`,
 		parameters: type({
 			target: [{ type: "'agent'", name: "string" }, "|", { type: "'project'" }],
 			text: "string",
+			"attachments?": "string[]",
 			"replyTo?": "string",
 			"messageId?": "string",
 		}),
-		async execute(_id, parameters) {
+		async execute(_id, parameters, _signal, _onUpdate, context) {
 			try {
+				const attachmentSources = parameters.attachments ?? [];
+				const attachments = await snapshotLocalAttachments(
+					attachmentSources,
+					context?.localProtocolOptions,
+				);
 				const accepted = await runtime.message({
 					target: parameters.target as MessageRequestTarget,
 					text: parameters.text,
+					attachments,
 					replyTo: parameters.replyTo,
 					messageId: parameters.messageId,
 				});
@@ -511,10 +554,20 @@ export default function a2aExtension(pi: ExtensionAPI) {
 					content: [
 						{
 							type: "text",
-							text: `Sent to ${target} ref=${accepted.message.messageRef}\n${ASYNC_REPLY_GUIDANCE}`,
+							text: `Sent to ${target} ref=${accepted.message.messageRef} attachments=${attachments.length}\n${ASYNC_REPLY_GUIDANCE}`,
 						},
 					],
-					details: accepted,
+					details: {
+						...accepted,
+						message: {
+							...accepted.message,
+							attachments: attachments.map((attachment, index) => ({
+								name: attachment.name,
+								url: attachmentSources[index],
+								uncompressedBytes: attachment.payload.uncompressedBytes,
+							})),
+						},
+					},
 				};
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
@@ -531,19 +584,22 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		name: "a2a_history",
 		label: "A2A History",
 		description:
-			"Review already-persisted Project messages by cursor or sender. Use only when past context is needed; never call this tool to wait for or poll a new reply. Replies arrive automatically as inbound A2A messages.",
+			"Review already-persisted Project messages by cursor or sender. Attachments are rematerialized as current-session local:// files. Use only when past context is needed; never call this tool to wait for or poll a new reply. Replies arrive automatically as inbound A2A messages.",
 		parameters: type({
 			"before?": "string",
 			"after?": "string",
 			"limit?": "number",
 			"from?": "string",
 		}),
-		async execute(_id, parameters) {
+		async execute(_id, parameters, _signal, _onUpdate, context) {
 			try {
 				const messages = await runtime.history(parameters);
+				const materialized = await Promise.all(
+					messages.map((message) => materializeMessage(message, context)),
+				);
 				return {
-					content: [{ type: "text", text: formatMessages(messages) }],
-					details: { messages },
+					content: [{ type: "text", text: formatMessages(materialized) }],
+					details: { messages: materialized },
 				};
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);

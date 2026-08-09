@@ -10,6 +10,17 @@ import {
 	type RealtimeMessage,
 	type ServerFrame,
 } from "./realtime-types";
+import type { EncodedAttachment } from "./types";
+
+function deliveryFailureMessage(error: unknown): string {
+	const message = error instanceof Error ? error.message : String(error);
+	if (Buffer.byteLength(message, "utf8") <= 512)
+		return message || "receiver failed to inject message";
+	return Buffer.from(message, "utf8")
+		.subarray(0, 512)
+		.toString("utf8")
+		.replace(/\uFFFD$/, "");
+}
 
 export type A2aConnectionEvents = {
 	onPresenceJoined?: (peer: Peer) => void;
@@ -132,6 +143,7 @@ export class A2aConnection {
 	send(options: {
 		target: MessageRequestTarget;
 		text: string;
+		attachments?: EncodedAttachment[];
 		replyTo?: string;
 		messageId?: string;
 	}): Promise<AcceptedMessage> {
@@ -146,6 +158,7 @@ export class A2aConnection {
 					messageId,
 					target: options.target,
 					payload: encodeTextPayload(options.text),
+					attachments: options.attachments ?? [],
 					replyTo: options.replyTo,
 				});
 			} catch (error) {
@@ -187,18 +200,40 @@ export class A2aConnection {
 							messageId: frame.message.messageId,
 						}),
 					)
-					.catch((error) =>
-						this.#events.onError?.(
-							error instanceof Error ? error : new Error(String(error)),
-						),
-					);
+					.catch((error) => {
+						const failure =
+							error instanceof Error ? error : new Error(String(error));
+						try {
+							this.#send({
+								type: "delivery_failed",
+								messageId: frame.message.messageId,
+								error: deliveryFailureMessage(failure),
+							});
+						} catch (sendError) {
+							this.#events.onError?.(
+								sendError instanceof Error
+									? sendError
+									: new Error(String(sendError)),
+							);
+						}
+						this.#events.onError?.(failure);
+					});
 				return;
 			case "delivery":
-				this.#events.onDelivery?.({
-					messageId: frame.messageId,
-					to: frame.to,
-					status: frame.status,
-				});
+				this.#events.onDelivery?.(
+					frame.status === "failed"
+						? {
+								messageId: frame.messageId,
+								to: frame.to,
+								status: frame.status,
+								error: frame.error,
+							}
+						: {
+								messageId: frame.messageId,
+								to: frame.to,
+								status: frame.status,
+							},
+				);
 				return;
 			case "accepted": {
 				const pending = this.#pending.get(frame.requestId);

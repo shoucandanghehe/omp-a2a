@@ -25,6 +25,7 @@
 		"ws": "^8.21.3"
 	},
 	"devDependencies": {
+		"@oh-my-pi/pi-coding-agent": "^17.2.11",
 		"@types/express": "^5.0.6",
 		"@types/ws": "^8.18.1"
 	}

@@ -87,3 +87,50 @@ test("one runtime path serves discovery, messaging, delivery, and history", asyn
 	).rejects.toThrow("recipient_not_present");
 	await api.disconnect();
 });
+
+test("receiver injection failure produces a terminal failed delivery", async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-runtime-failure-"));
+	roots.push(dataDir);
+	const hub = await startHubServer({ port: 0, dataDir });
+	hubs.push(hub);
+	const client = new HubClient(hub.meta.baseUrl);
+	await client.createProject({ name: "runtime-failure" });
+	const delivery = Promise.withResolvers<DeliveryEvent>();
+	const api = new A2aRuntime({
+		getClient: async () => client,
+		events: { onDelivery: delivery.resolve },
+	});
+	const web = new A2aRuntime({
+		getClient: async () => client,
+		events: {
+			onMessage: () => {
+				throw new Error("receiver disk full");
+			},
+			onError() {},
+		},
+	});
+
+	await api.connect("runtime-failure", "api");
+	await web.connect("runtime-failure", "web");
+	const accepted = await api.message({
+		target: { type: "agent", name: "web" },
+		text: "persist despite failed injection",
+		messageId: "failed-delivery",
+	});
+	expect(accepted.message.messageRef).toBe("runtime-failure:1");
+	expect(await delivery.promise).toEqual({
+		messageId: "failed-delivery",
+		to: "web",
+		status: "failed",
+		error: "receiver disk full",
+	});
+	expect(await api.history()).toMatchObject([
+		{
+			messageId: "failed-delivery",
+			text: "persist despite failed injection",
+		},
+	]);
+
+	await web.disconnect();
+	await api.disconnect();
+});

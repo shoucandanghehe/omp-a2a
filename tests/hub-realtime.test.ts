@@ -145,6 +145,7 @@ test("direct messages and broadcasts target the current Presence snapshot", asyn
 			messageId: "direct-1",
 			target: { type: "agent", name: "web" },
 			payload: encodeTextPayload("check login"),
+			attachments: [],
 		}),
 	);
 	const direct = await web.frames.next();
@@ -178,6 +179,7 @@ test("direct messages and broadcasts target the current Presence snapshot", asyn
 			messageId: "broadcast-1",
 			target: { type: "project" },
 			payload: encodeTextPayload("freeze contract"),
+			attachments: [],
 		}),
 	);
 	expect(await web.frames.next()).toMatchObject({
@@ -219,6 +221,7 @@ test("direct messages and broadcasts target the current Presence snapshot", asyn
 			messageId: "disconnect-1",
 			target: { type: "agent", name: "web" },
 			payload: encodeTextPayload("still there?"),
+			attachments: [],
 		}),
 	);
 	expect(await web.frames.next()).toMatchObject({
@@ -272,6 +275,15 @@ test("message history survives Hub restart while Presence does not", async () =>
 	const web = await connect(first.meta.baseUrl, "durable-chat", "web");
 	await web.frames.next();
 	await api.frames.next();
+	const attachmentBytes = Buffer.from("# Training handoff\nseed=20\n", "utf8");
+	const attachment = {
+		name: "training-handoff.md",
+		payload: {
+			encoding: "base64",
+			data: attachmentBytes.toString("base64"),
+			uncompressedBytes: attachmentBytes.byteLength,
+		},
+	};
 	api.socket.send(
 		JSON.stringify({
 			type: "message",
@@ -279,9 +291,14 @@ test("message history survives Hub restart while Presence does not", async () =>
 			messageId: "history-1",
 			target: { type: "agent", name: "web" },
 			payload: encodeTextPayload("persist this"),
+			attachments: [attachment],
 		}),
 	);
-	await web.frames.next();
+	const inbound = await web.frames.next();
+	if (inbound.type !== "message") throw new Error("expected message frame");
+	expect(
+		"attachments" in inbound.message ? inbound.message.attachments : undefined,
+	).toEqual([attachment]);
 	await api.frames.next();
 	await first.stop();
 
@@ -300,6 +317,9 @@ test("message history survives Hub restart while Presence does not", async () =>
 	const [persisted] = history.messages;
 	if (!persisted) throw new Error("expected persisted history");
 	expect(decodeTextPayload(persisted.payload)).toBe("persist this");
+	expect(
+		"attachments" in persisted ? persisted.attachments : undefined,
+	).toEqual([attachment]);
 
 	const replacement = await connect(second.meta.baseUrl, "durable-chat", "web");
 	expect(await replacement.frames.next()).toMatchObject({

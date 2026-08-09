@@ -4,7 +4,7 @@
 
 `omp-a2a` provides anonymous realtime Agent chat between independent Oh My Pi (OMP) processes. A standalone Hub owns persistent Projects and message history, current WebSocket Presence, and realtime routing. The OMP extension is a pure client.
 
-The wire protocol is private version `2`. It is not the standard A2A protocol, requires matching Hub and extension versions, and assumes a fully trusted private network.
+The wire protocol is private version `3`. It is not the standard A2A protocol, requires matching Hub and extension versions, and assumes a fully trusted private network.
 
 ## System entry points
 
@@ -48,9 +48,9 @@ OMP session
 2. `RealtimeHub` verifies the Project and atomically claims the name in `PresenceRegistry`.
 3. The client receives its `presenceId` and the current peer snapshot; current peers receive `presence_joined`.
 4. A message request resolves either one current Presence or the current Project Presence snapshot.
-5. `MessageStore` appends one immutable message and assigns the next Project sequence.
-6. The Hub pushes the message to the selected sockets. The receiver reports successful OMP injection with `delivered`.
-7. The sender receives one in-memory `delivered` or `disconnected` outcome per selected Presence.
+5. `MessageStore` atomically appends one immutable Message—including encoded attachment content—and assigns the next Project sequence.
+6. The Hub pushes the Message to selected sockets. Each receiver materializes attachments, injects the Message into OMP, then reports `delivered` or `failed`.
+7. The sender receives one in-memory `delivered`, `failed`, or `disconnected` outcome per selected Presence.
 8. Socket close or heartbeat timeout deletes the Presence and broadcasts `presence_left`.
 
 A same-named later connection is a new Presence and never inherits pending delivery. History is never replayed automatically.
@@ -62,11 +62,12 @@ A same-named later connection is a new Presence and never inherits pending deliv
 - `replyTo` must resolve inside the same Project.
 - Direct messages are bound to the resolved `presenceId`; Project broadcasts freeze their recipient snapshot at acceptance.
 - History is append-only until Project deletion. Presence and delivery events are not persisted.
+- Attachments are ordered immutable values inside a Message. Their names and bytes participate in `messageId` idempotency; they share the Message lifecycle.
 - Legacy `inbox.sqlite` message-ledger rows migrate once into `messages.sqlite`; old membership, cursor, ACK, receipt, and offline-delivery semantics do not migrate.
 
 ### Payload contract
 
-Text smaller than 32 KiB remains identity encoded. Larger text uses gzip plus Base64. Encoding and decoding enforce a 4 MiB uncompressed limit, including bounded decompression.
+Text smaller than 32 KiB remains identity encoded. Larger text uses gzip plus Base64. Attachment bytes use Base64 and use gzip when smaller. Encoding and decoding enforce a 4 MiB total decoded-content limit across text and at most eight attachments, including bounded decompression.
 
 ## Configuration and deployment
 
@@ -90,10 +91,11 @@ The Hub runs locally with `bun run hub` or in Docker Compose. Each Hub needs a u
 ### Model tools
 
 - `a2a_peers`: current Presence names in the connected Project.
-- `a2a_message`: direct message, Project broadcast, or causal reply; successful sends direct the model to continue independent work or end its turn.
+- `a2a_message`: direct message, Project broadcast, or causal reply, with optional current-session `local://` attachment sources; successful sends direct the model to continue independent work or end its turn.
 - `a2a_history`: deliberate lookup of already-persisted context, never a reply-waiting primitive.
 
 Inbound messages are pushed through OMP `sendMessage` and start a later turn. Models never wait, sleep, or poll history for replies.
+The sender Extension snapshots attachment bytes before sending. Receivers and history callers materialize new URLs in their own session-local storage; the Hub never resolves `local://`.
 
 ## Root asset map
 
@@ -120,7 +122,7 @@ Inbound messages are pushed through OMP `sendMessage` and start a later turn. Mo
 
 ## Verification
 
-The local release gate runs Biome, `bun run smoke`, both Bun entry-point builds, and `docker compose config`. It covers Project isolation and deletion, WebSocket Presence and name conflicts, Presence notifications, direct and broadcast routing, delivery outcomes, persistent history and migration, payload limits, Hub restart, extension registration, and command completion.
+The local release gate runs Biome, `bun run smoke`, both Bun entry-point builds, and `docker compose config`. It covers Project isolation and deletion, WebSocket Presence and name conflicts, Presence notifications, direct and broadcast routing, successful/failed/disconnected Delivery outcomes, attachment snapshot/materialization/history, persistent history and protocol version `2`/legacy migration, payload limits, Hub restart, extension registration, and command completion.
 
 `bun run smoke:docker` crosses the public HTTP/WebSocket process boundary of the selected running Hub, verifies persisted history, and removes its temporary Project.
 

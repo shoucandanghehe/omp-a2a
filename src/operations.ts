@@ -1,6 +1,6 @@
 import type { HubClient } from "./hub/client";
 import { A2aConnection, type A2aConnectionEvents } from "./hub/connection";
-import { decodeTextPayload } from "./hub/payload";
+import { decodeBinaryPayload, decodeTextPayload } from "./hub/payload";
 import type {
 	AcceptedMessage,
 	DeliveryEvent,
@@ -9,10 +9,14 @@ import type {
 	Peer,
 	RealtimeMessage,
 } from "./hub/realtime-types";
-import type { HubMeta } from "./hub/types";
+import type { EncodedAttachment, HubMeta } from "./hub/types";
 import type { A2aProject } from "./types";
 
-export type MessageView = Omit<RealtimeMessage, "payload"> & { text: string };
+export type MessageAttachment = { name: string; bytes: Buffer };
+export type MessageView = Omit<RealtimeMessage, "payload" | "attachments"> & {
+	text: string;
+	attachments: MessageAttachment[];
+};
 
 export type RuntimeStatus = {
 	hub: HubMeta;
@@ -124,6 +128,7 @@ export class A2aRuntime {
 	async message(options: {
 		target: MessageRequestTarget;
 		text: string;
+		attachments?: EncodedAttachment[];
 		replyTo?: string;
 		messageId?: string;
 	}): Promise<{ message: MessageView; recipients: string[] }> {
@@ -178,7 +183,14 @@ export class A2aRuntime {
 	}
 
 	#view(message: RealtimeMessage): MessageView {
-		const { payload, ...metadata } = message;
-		return { ...metadata, text: decodeTextPayload(payload) };
+		const { payload, attachments, ...metadata } = message;
+		return {
+			...metadata,
+			text: decodeTextPayload(payload),
+			attachments: attachments.map((attachment) => ({
+				name: attachment.name,
+				bytes: decodeBinaryPayload(attachment.payload),
+			})),
+		};
 	}
 }

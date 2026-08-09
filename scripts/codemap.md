@@ -76,11 +76,11 @@ Cross the deployed process/network boundary rather than proving another in-proce
 1. Connect an HTTP `HubClient`.
 2. Create a timestamped temporary Project.
 3. Open `api` and `web` WebSocket Presences.
-4. Send one direct message with an explicit `messageId`.
+4. Send one direct Message with an explicit `messageId` and binary-safe attachment.
 5. Assert the Hub assigned `<project>:1`.
-6. Await and decode the realtime message at `web`.
+6. Await and decode the realtime text and exact attachment bytes at `web`.
 7. Close both sockets.
-8. Query HTTP history and assert one persistent message.
+8. Query HTTP history and assert the Message and attachment bytes persisted.
 9. Delete the temporary Project.
 
 `finally` closes any surviving sockets and retries Project deletion. The script never owns or stops the external Hub.
@@ -96,6 +96,7 @@ Cross the deployed process/network boundary rather than proving another in-proce
 | Project broadcast snapshot | yes | no | yes | no |
 | Delivery outcomes | yes | no | yes | no |
 | Persistent history/restart | yes | no | yes | history only |
+| Attachment wire/history bytes | yes | no | no | yes |
 | Legacy message migration | yes | no | no | no |
 | Payload boundaries | yes | no | representative payload | representative payload |
 | Actual container/network process | no | no | no | yes |

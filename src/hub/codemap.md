@@ -22,9 +22,9 @@
 | `messages.ts` | SQLite append-only message log, history queries, idempotency, references, deletion, and migration. | `MessageStore` |
 | `client.ts` | Hub URL resolution and HTTP meta/Project/history client. | `HubClient`, `connectHub`, `resolveHubUrl` |
 | `realtime-types.ts` | Versioned WebSocket frames and public realtime/history shapes. | protocol types, `A2A_PROTOCOL_VERSION` |
-| `payload.ts` | Identity/gzip encoding and bounded decoding. | `encodeTextPayload`, `decodeTextPayload` |
+| `payload.ts` | Text/binary encoding, attachment validation, and bounded decoded-content accounting. | text/binary codecs, `validateMessageContent` |
 | `data-lock.ts` | Exclusive ownership of one Hub data directory. | `HubDataLock` |
-| `types.ts` | Hub metadata and encoded payload union. | `HubMeta`, `EncodedTextPayload` |
+| `types.ts` | Hub metadata plus encoded text, binary, and attachment values. | `HubMeta`, encoded payload types |
 
 ## HTTP surface
 
@@ -44,7 +44,7 @@ The public `baseUrl` can differ from the listen host. Binding a wildcard host re
 
 ## WebSocket protocol
 
-`A2A_PROTOCOL_VERSION` is `2`.
+`A2A_PROTOCOL_VERSION` is `3`.
 
 ### Handshake
 
@@ -58,21 +58,21 @@ One socket can claim one name. One name can be held by one current socket inside
 
 ### Message request
 
-The client sends `message` with `requestId`, opaque `messageId`, typed target, encoded payload, and optional `replyTo`.
+The client sends `message` with `requestId`, opaque `messageId`, typed target, encoded text payload, ordered encoded attachments, and optional `replyTo`.
 
 - Direct target resolves the current name and freezes its `presenceId`.
 - Project target snapshots all current Presence except the sender.
 - A missing direct target fails before persistence.
-- Payload and causal references are validated before append.
-- `MessageStore.append` commits one immutable message and next Project sequence.
+- Text, attachment structure/content, total decoded size, and causal references are validated before append.
+- `MessageStore.append` atomically commits one immutable Message—including attachments—and the next Project sequence.
 - The sender receives `accepted` with the canonical message and selected recipient names.
 - Each selected socket receives the canonical `message` frame.
 
 ### Delivery
 
-The Hub records selected recipients only in memory. Receiver `delivered` frames resolve the matching `(messageId, recipientPresenceId)` entry and produce a sender `delivery` event. If that exact Presence disconnects first, the sender receives `disconnected`.
+The Hub records selected recipients only in memory. Receiver `delivered` or `delivery_failed` frames resolve the matching `(messageId, recipientPresenceId)` entry and produce a sender Delivery event. If that exact Presence disconnects first, the sender receives `disconnected`.
 
-Delivery proves injection into the receiving OMP extension. It does not prove model comprehension or task completion. Delivery state is not history and is never transferred to a same-named replacement socket.
+`delivered` proves attachment materialization and injection into the receiving OMP extension. `failed` proves that the accepted Message could not be materialized or injected. Neither proves model comprehension or task completion. Delivery state is not history and is never transferred to a same-named replacement socket.
 
 ### Presence lifetime
 
@@ -102,7 +102,7 @@ WebSocket -> Presence
 - globally idempotent `messageId` content comparison;
 - sender name and accepting `presenceId`;
 - direct/Project target, including resolved target Presence for direct messages;
-- encoded payload and uncompressed byte count;
+- encoded text, ordered attachment names/content, and total decoded-content bytes;
 - creation timestamp and optional same-Project causal parent sequence.
 
 Message references use `<project>:<sequence>`. Parsing rejects invalid Project names, non-positive/unsafe sequences, and cross-Project history cursors.
@@ -115,11 +115,11 @@ Message references use `<project>:<sequence>`. Parsing rejects invalid Project n
 - optional exact sender-name filter;
 - positive bounded item limit;
 - deterministic Project-sequence ordering;
-- a 4 MiB cumulative uncompressed-text budget per history page.
+- a 4 MiB cumulative decoded-content budget, including attachments, per history page.
 
 ### Idempotency and causality
 
-Reusing `messageId` with the same Project, sender name, target kind/name, payload encoding/data/size, and causal parent returns the canonical stored message. A difference in any compared field raises `MessageIdConflictError`.
+Reusing `messageId` with the same Project, sender name, target kind/name, text encoding/data/size, ordered attachment names/encoding/data/size, and causal parent returns the canonical stored Message. A difference in any compared field raises `MessageIdConflictError`.
 
 `replyTo` must resolve to an existing message in the same Project or `UnknownReplyTargetError` is raised.
 
@@ -127,17 +127,19 @@ Reusing `messageId` with the same Project, sender name, target kind/name, payloa
 
 When `messages.sqlite` is first created and old `inbox.sqlite` exists, ordinary `message_ledger` rows are imported in deterministic `(project, created_at, msg_id)` order. Delivery-receipt rows are excluded. Old pending messages become history only; no old Presence, recipient cursor, ACK, receipt, or offline-delivery state survives.
 
+Opening a protocol version `2` `messages.sqlite` adds attachment JSON and total decoded-content columns in place. Existing rows receive `attachments = []` and `content_bytes = uncompressed_bytes`.
+
 Migration runs in the new database transaction and validates imported row count plus `PRAGMA integrity_check`. The old database is not modified.
 
 ## Payload codec
 
-- `< 32 KiB`: `{ encoding: "identity", data, uncompressedBytes }`.
-- `>= 32 KiB`: gzip bytes encoded as Base64.
-- `> 4 MiB`: rejected before encoding.
-- gzip decode uses `maxOutputLength` so the 4 MiB limit is enforced during decompression.
-- decoded byte count must equal `uncompressedBytes`.
-
-The WebSocket server caps a complete frame at 6 MiB.
+- Text `< 32 KiB`: `{ encoding: "identity", data, uncompressedBytes }`.
+- Larger text: gzip bytes encoded as Base64.
+- Attachment bytes: Base64, optionally gzip-compressed first when smaller.
+- At most eight attachments per Message.
+- Text plus attachments `> 4 MiB`: rejected before persistence.
+- gzip decode uses `maxOutputLength`, and decoded byte counts must match their metadata.
+- The WebSocket server caps a complete frame at 6 MiB.
 
 ## HTTP client
 
@@ -160,10 +162,10 @@ Stop closes realtime clients, the HTTP server, message storage, metadata files, 
 
 ## Test coverage
 
-- `hub-realtime.test.ts`: Presence lifetime, duplicate names, direct/broadcast snapshots, delivery/disconnection, history persistence, and restart.
-- `message-store.test.ts`: ordering, idempotency, causal references, filters, migration, integrity, and deletion.
+- `hub-realtime.test.ts`: Presence lifetime, duplicate names, direct/broadcast snapshots, Delivery outcomes, attachment persistence, and restart.
+- `message-store.test.ts`: ordering, attachment-aware idempotency, causal references, filters, protocol version `2`/legacy migration, integrity, and deletion.
 - `hub-control.test.ts`: independent Hubs, Project control, active-Presence deletion rejection, and safe name reuse.
-- `payload.test.ts`: compression boundary and decoded-size enforcement.
-- `operations.test.ts`: client/runtime integration and callback behavior.
+- `payload.test.ts`: text/binary compression, attachment count, and decoded-size enforcement.
+- `operations.test.ts`: client/runtime integration plus successful and failed Delivery callbacks.
 
 See `scripts/codemap.md` for executable boundary scenarios.

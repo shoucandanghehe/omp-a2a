@@ -11,6 +11,7 @@ The central seam is `A2aRuntime`: extension callbacks and commands depend on one
 | File | Responsibility | Primary interface |
 | --- | --- | --- |
 | `extension.ts` | OMP registration, session lifecycle, UI notifications, reconnect policy, slash commands, completions, and model tools. | default extension factory |
+| `local-attachments.ts` | Snapshot sender-session `local://` files and materialize received/history attachment bytes into the calling session. | `snapshotLocalAttachments`, `materializeLocalAttachments` |
 | `operations.ts` | Connected runtime over one WebSocket plus HTTP Project/history operations. | `A2aRuntime`, `MessageView`, `RuntimeStatus` |
 | `config.ts` | Strict repository-local YAML/JSON connection defaults. | `loadLocalConfig` |
 | `paths.ts` | Hub storage paths and local config candidates. | path functions |
@@ -39,8 +40,8 @@ On `session_shutdown`, it cancels reconnect, clears desired state, and closes th
 ### Inbound events
 
 - `presence_joined` and `presence_left` update the UI only.
-- `delivery` reports the selected peer name and `delivered`/`disconnected` outcome.
-- `message` becomes an `a2a-inbound` OMP custom message. It uses `steer` while the session is busy and `followUp` while idle, always triggering a turn.
+- `delivery` reports the selected peer name and `delivered`/`failed`/`disconnected` outcome.
+- `message` materializes attachment bytes into the active session, then becomes an `a2a-inbound` OMP custom message. It uses `steer` while the session is busy and `followUp` while idle, always triggering a turn. Materialization or injection failure produces `failed`, not `delivered`.
 - socket/protocol errors are written to the extension logger.
 
 ## Human command surface
@@ -67,8 +68,8 @@ The extension uses the injected ArkType module as the canonical schema authoring
 | Tool | Contract |
 | --- | --- |
 | `a2a_peers` | Returns current peer names from the connected Presence snapshot. |
-| `a2a_message` | Requires a typed direct or Project target and text; accepts optional `replyTo` and `messageId`; every description and success result states the push-driven reply control flow. |
-| `a2a_history` | Accepts `before`, `after`, `limit`, and `from`; it is only for deliberate review of persisted context, never waiting for a new reply. |
+| `a2a_message` | Requires a typed direct or Project target and text; accepts optional current-session `local://` attachment sources, `replyTo`, and `messageId`; every description and success result states the push-driven reply control flow. |
+| `a2a_history` | Accepts `before`, `after`, `limit`, and `from`; rematerializes persisted attachments into the calling session; it is only for deliberate review of persisted context, never waiting for a new reply. |
 
 There is no model-side connect/disconnect or Project administration. Replies arrive as inbound messages that start a later turn; there is no Inbox polling tool or history-polling wait path.
 
@@ -84,7 +85,7 @@ There is no model-side connect/disconnect or Project administration. Replies arr
 - `status()` combines Hub metadata with connected Presence state.
 - Project create/list/delete are thin HTTP operations and do not require a Presence.
 
-`MessageView` is the persistent realtime message shape with decoded text replacing the wire payload.
+`MessageView` is the persistent realtime Message shape with decoded text and attachment bytes replacing encoded wire payloads.
 
 ## Configuration contract
 
@@ -136,8 +137,8 @@ OMP callbacks / slash / tools
 
 ## Tests touching this directory
 
-- `extension.test.ts`: registered surfaces, help contract, ArkType schemas, and multi-level completion.
-- `operations.test.ts`: runtime connect, snapshots, message and delivery callbacks, and disconnected errors.
+- `extension.test.ts`: registered surfaces, help contract, ArkType schemas, multi-level completion, and cross-session attachment snapshot/materialization/history.
+- `operations.test.ts`: runtime connect, snapshots, message and successful/failed Delivery callbacks, and disconnected errors.
 - `config.test.ts`: strict configuration parsing and migration failures.
 - `hub-control.test.ts`: public Project control behavior reached through `HubClient`.
 

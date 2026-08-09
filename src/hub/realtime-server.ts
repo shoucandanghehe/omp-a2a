@@ -7,7 +7,7 @@ import {
 	type MessageStore,
 	UnknownReplyTargetError,
 } from "./messages";
-import { decodeTextPayload, PayloadTooLargeError } from "./payload";
+import { PayloadTooLargeError } from "./payload";
 import { NameInUseError, type Presence, PresenceRegistry } from "./presence";
 import {
 	A2A_PROTOCOL_VERSION,
@@ -19,6 +19,7 @@ import {
 const MAX_FRAME_BYTES = 6 * 1024 * 1024;
 const HEARTBEAT_MS = 10_000;
 const HELLO_TIMEOUT_MS = 5_000;
+const MAX_DELIVERY_ERROR_BYTES = 512;
 
 class RecipientNotPresentError extends Error {}
 
@@ -163,9 +164,28 @@ export class RealtimeHub {
 			return;
 		}
 		if (value.type === "delivered") {
-			this.#handleDelivered(
+			const frame = value as Partial<
+				Extract<ClientFrame, { type: "delivered" }>
+			>;
+			this.#handleDeliveryResult(claimed, frame.messageId, "delivered");
+			return;
+		}
+		if (value.type === "delivery_failed") {
+			const frame = value as Partial<
+				Extract<ClientFrame, { type: "delivery_failed" }>
+			>;
+			if (
+				typeof frame.error !== "string" ||
+				frame.error.length === 0 ||
+				Buffer.byteLength(frame.error, "utf8") > MAX_DELIVERY_ERROR_BYTES
+			) {
+				throw new Error("delivery failure error is invalid");
+			}
+			this.#handleDeliveryResult(
 				claimed,
-				value as Partial<Extract<ClientFrame, { type: "delivered" }>>,
+				frame.messageId,
+				"failed",
+				frame.error,
 			);
 			return;
 		}
@@ -228,18 +248,18 @@ export class RealtimeHub {
 				!requestId ||
 				typeof frame.messageId !== "string" ||
 				!frame.target ||
-				!frame.payload
+				!frame.payload ||
+				!frame.attachments
 			) {
 				throw new Error(
-					"requestId, messageId, target and payload are required",
+					"requestId, messageId, target, payload and attachments are required",
 				);
 			}
 			if (frame.target.type !== "agent" && frame.target.type !== "project")
 				throw new Error("invalid message target");
 			if (frame.replyTo !== undefined && typeof frame.replyTo !== "string")
 				throw new Error("invalid replyTo");
-			const text = decodeTextPayload(frame.payload);
-			if (text.trim().length === 0) throw new Error("message text required");
+			// MessageStore owns content validation and persistence atomically.
 			let target: MessageTarget;
 			let recipients: Presence[];
 			if (frame.target.type === "agent") {
@@ -273,6 +293,7 @@ export class RealtimeHub {
 				from: { name: presence.name, presenceId: presence.presenceId },
 				target,
 				payload: frame.payload,
+				attachments: frame.attachments,
 				createdAt: Date.now(),
 				replyTo: frame.replyTo,
 			});
@@ -319,27 +340,37 @@ export class RealtimeHub {
 		}
 	}
 
-	#handleDelivered(
+	#handleDeliveryResult(
 		presence: Presence,
-		frame: Partial<Extract<ClientFrame, { type: "delivered" }>>,
+		messageId: unknown,
+		status: "delivered" | "failed",
+		error?: string,
 	): void {
-		if (typeof frame.messageId !== "string")
-			throw new Error("messageId is required");
-		const key = `${frame.messageId}:${presence.presenceId}`;
+		if (typeof messageId !== "string") throw new Error("messageId is required");
+		const key = `${messageId}:${presence.presenceId}`;
 		const pending = this.#pendingDeliveries.get(key);
-		if (!pending) throw new Error(`unknown delivery: ${frame.messageId}`);
+		if (!pending) throw new Error(`unknown delivery: ${messageId}`);
 		this.#pendingDeliveries.delete(key);
 		const sender = this.#presences
 			.connections(presence.project)
 			.find((candidate) => candidate.presenceId === pending.senderPresenceId);
-		if (sender) {
+		if (!sender) return;
+		if (status === "failed") {
 			this.#send(sender.socket, {
 				type: "delivery",
 				messageId: pending.messageId,
 				to: pending.recipientName,
-				status: "delivered",
+				status,
+				error: error ?? "receiver failed to inject message",
 			});
+			return;
 		}
+		this.#send(sender.socket, {
+			type: "delivery",
+			messageId: pending.messageId,
+			to: pending.recipientName,
+			status,
+		});
 	}
 
 	#failDeliveriesFor(presence: Presence): void {

@@ -3,13 +3,14 @@ import * as fs from "node:fs";
 import * as path from "node:path";
 import { ensureDir } from "../paths";
 import { AGENT_NAME_RE, PROJECT_NAME_RE } from "../types";
+import { parseEncodedAttachments, validateMessageContent } from "./payload";
 import type {
 	HistoryPage,
 	HistoryQuery,
 	MessageTarget,
 	RealtimeMessage,
 } from "./realtime-types";
-import type { EncodedTextPayload } from "./types";
+import type { EncodedAttachment, EncodedTextPayload } from "./types";
 
 const MESSAGE_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
 export const MAX_HISTORY_BYTES = 4 * 1024 * 1024;
@@ -23,6 +24,7 @@ export type MessageDraft = {
 	from: { name: string; presenceId: string };
 	target: MessageTarget;
 	payload: EncodedTextPayload;
+	attachments: EncodedAttachment[];
 	createdAt: number;
 	replyTo?: string;
 };
@@ -39,6 +41,8 @@ type MessageRow = {
 	encoding: string;
 	data: string;
 	uncompressed_bytes: number;
+	attachments: string;
+	content_bytes: number;
 	created_at: number;
 	reply_to_sequence: number | null;
 };
@@ -118,11 +122,14 @@ export class MessageStore {
 				encoding TEXT NOT NULL,
 				data TEXT NOT NULL,
 				uncompressed_bytes INTEGER NOT NULL,
+				attachments TEXT NOT NULL DEFAULT '[]',
+				content_bytes INTEGER NOT NULL,
 				created_at INTEGER NOT NULL,
 				reply_to_sequence INTEGER,
 				PRIMARY KEY(project, project_sequence)
 			)
 		`);
+		this.#migrateSchema();
 		this.#database.run(
 			"CREATE INDEX IF NOT EXISTS messages_project_sender ON messages(project, sender_name, project_sequence)",
 		);
@@ -143,21 +150,22 @@ export class MessageStore {
 			INSERT INTO messages(
 				project, project_sequence, msg_id, sender_name, sender_presence_id,
 				target_kind, target_name, target_presence_id, encoding, data,
-				uncompressed_bytes, created_at, reply_to_sequence
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+				uncompressed_bytes, attachments, content_bytes, created_at,
+				reply_to_sequence
+			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`);
 		this.#append = this.#database.transaction(
 			(
 				draft: MessageDraft,
 			): { inserted: boolean; message: RealtimeMessage } => {
-				this.#validateDraft(draft);
+				const { attachments, contentBytes } = this.#validateDraft(draft);
 				const replyToSequence = this.#resolveReply(
 					draft.project,
 					draft.replyTo,
 				);
 				const existing = this.#findById.get(draft.messageId);
 				if (existing) {
-					if (!this.#matches(existing, draft, replyToSequence)) {
+					if (!this.#matches(existing, draft, attachments, replyToSequence)) {
 						throw new MessageIdConflictError(
 							`messageId already used with different content: ${draft.messageId}`,
 						);
@@ -185,6 +193,8 @@ export class MessageStore {
 					draft.payload.encoding,
 					draft.payload.data,
 					draft.payload.uncompressedBytes,
+					JSON.stringify(attachments),
+					contentBytes,
 					draft.createdAt,
 					replyToSequence,
 				);
@@ -198,6 +208,10 @@ export class MessageStore {
 						from: { ...draft.from },
 						target: { ...draft.target },
 						payload: { ...draft.payload },
+						attachments: attachments.map((attachment) => ({
+							name: attachment.name,
+							payload: { ...attachment.payload },
+						})),
 						createdAt: draft.createdAt,
 						replyTo: draft.replyTo,
 					},
@@ -256,7 +270,7 @@ export class MessageStore {
 		const rows = this.#database
 			.query<MessageRow & { cumulative_bytes: number }, Array<string | number>>(
 				`SELECT * FROM (
-					SELECT messages.*, SUM(uncompressed_bytes) OVER (ORDER BY project_sequence ${order}) AS cumulative_bytes
+					SELECT messages.*, SUM(content_bytes) OVER (ORDER BY project_sequence ${order}) AS cumulative_bytes
 					FROM messages
 					WHERE ${predicates.join(" AND ")}
 				)
@@ -340,6 +354,8 @@ export class MessageStore {
 						row.encoding,
 						row.data,
 						row.uncompressed_bytes,
+						"[]",
+						row.uncompressed_bytes,
 						row.created_at,
 						null,
 					);
@@ -362,6 +378,28 @@ export class MessageStore {
 		}
 	}
 
+	#migrateSchema(): void {
+		const columns = new Set(
+			this.#database
+				.query<{ name: string }, []>("PRAGMA table_info(messages)")
+				.all()
+				.map((column) => column.name),
+		);
+		if (!columns.has("attachments")) {
+			this.#database.run(
+				"ALTER TABLE messages ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'",
+			);
+		}
+		if (!columns.has("content_bytes")) {
+			this.#database.run(
+				"ALTER TABLE messages ADD COLUMN content_bytes INTEGER",
+			);
+		}
+		this.#database.run(
+			"UPDATE messages SET content_bytes = uncompressed_bytes WHERE content_bytes IS NULL",
+		);
+	}
+
 	#resolveReply(project: string, replyTo: string | undefined): number | null {
 		if (!replyTo) return null;
 		const parsed = parseMessageRef(replyTo);
@@ -372,7 +410,10 @@ export class MessageStore {
 		return parsed.sequence;
 	}
 
-	#validateDraft(draft: MessageDraft): void {
+	#validateDraft(draft: MessageDraft): {
+		attachments: EncodedAttachment[];
+		contentBytes: number;
+	} {
 		if (!MESSAGE_ID_RE.test(draft.messageId))
 			throw new Error(`invalid messageId: ${draft.messageId}`);
 		if (!PROJECT_NAME_RE.test(draft.project))
@@ -389,11 +430,13 @@ export class MessageStore {
 		}
 		if (!Number.isSafeInteger(draft.createdAt) || draft.createdAt < 0)
 			throw new Error("invalid createdAt");
+		return validateMessageContent(draft.payload, draft.attachments);
 	}
 
 	#matches(
 		row: MessageRow,
 		draft: MessageDraft,
+		attachments: EncodedAttachment[],
 		replyToSequence: number | null,
 	): boolean {
 		return (
@@ -405,6 +448,7 @@ export class MessageStore {
 			row.encoding === draft.payload.encoding &&
 			row.data === draft.payload.data &&
 			row.uncompressed_bytes === draft.payload.uncompressedBytes &&
+			row.attachments === JSON.stringify(attachments) &&
 			row.reply_to_sequence === replyToSequence
 		);
 	}
@@ -421,6 +465,20 @@ export class MessageStore {
 						presenceId: row.target_presence_id ?? undefined,
 					}
 				: { type: "project" };
+		const payload: EncodedTextPayload = {
+			encoding: row.encoding as EncodedTextPayload["encoding"],
+			data: row.data,
+			uncompressedBytes: row.uncompressed_bytes,
+		};
+		const attachments = parseEncodedAttachments(JSON.parse(row.attachments));
+		const contentBytes =
+			payload.uncompressedBytes +
+			attachments.reduce(
+				(total, attachment) => total + attachment.payload.uncompressedBytes,
+				0,
+			);
+		if (contentBytes !== row.content_bytes)
+			throw new Error("stored message content size does not match metadata");
 		return {
 			messageId: row.msg_id,
 			messageRef: formatMessageRef(row.project, row.project_sequence),
@@ -431,11 +489,8 @@ export class MessageStore {
 				presenceId: row.sender_presence_id ?? "legacy",
 			},
 			target,
-			payload: {
-				encoding: row.encoding as EncodedTextPayload["encoding"],
-				data: row.data,
-				uncompressedBytes: row.uncompressed_bytes,
-			},
+			payload,
+			attachments,
 			createdAt: row.created_at,
 			replyTo:
 				row.reply_to_sequence == null
