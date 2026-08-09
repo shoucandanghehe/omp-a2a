@@ -235,6 +235,9 @@ test("a2a_message snapshots a sender local file into the receiver session and hi
 		content: string;
 		details: unknown;
 	}>();
+	let inboundDelivery:
+		| { deliverAs?: "steer" | "followUp"; triggerTurn?: boolean }
+		| undefined;
 	const senderContext = {
 		cwd: senderCwd,
 		ui: { notify() {} },
@@ -277,7 +280,13 @@ test("a2a_message snapshots a sender local file into the receiver session and hi
 		const installExtension = (
 			tools: Map<string, RegisteredTool>,
 			setCommand: (handler: NonNullable<typeof senderCommand>) => void,
-			sendMessage: (message: { content: string; details: unknown }) => void,
+			sendMessage: (
+				message: { content: string; details: unknown },
+				options?: {
+					deliverAs?: "steer" | "followUp";
+					triggerTurn?: boolean;
+				},
+			) => void,
 		) => {
 			a2aExtension({
 				arktype(definition: unknown) {
@@ -310,7 +319,10 @@ test("a2a_message snapshots a sender local file into the receiver session and hi
 			(handler) => {
 				receiverCommand = handler;
 			},
-			(message) => inbound.resolve(message),
+			(message, options) => {
+				inboundDelivery = options;
+				inbound.resolve(message);
+			},
 		);
 
 		if (!senderCommand || !receiverCommand)
@@ -342,6 +354,10 @@ test("a2a_message snapshots a sender local file into the receiver session and hi
 		);
 		expect(sent.content[0]?.text).toContain("attachments=1");
 		const received = await inbound.promise;
+		expect(inboundDelivery).toEqual({
+			deliverAs: "steer",
+			triggerTurn: true,
+		});
 		const receivedUrl = received.content.match(/local:\/\/\S+/)?.[0];
 		if (!receivedUrl) throw new Error("inbound attachment URL missing");
 		const receivedFile = await resolveLocalUrlToFile(receivedUrl, {

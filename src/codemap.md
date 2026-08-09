@@ -41,7 +41,7 @@ On `session_shutdown`, it cancels reconnect, clears desired state, and closes th
 
 - `presence_joined` and `presence_left` update the UI only.
 - `delivery` reports the selected peer name and `delivered`/`failed`/`disconnected` outcome.
-- `message` materializes attachment bytes into the active session, then becomes an `a2a-inbound` OMP custom message. It uses `steer` while the session is busy and `followUp` while idle, always triggering a turn. Materialization or injection failure produces `failed`, not `delivered`.
+- `message` callbacks run serially in Hub-assigned Project sequence. Each callback materializes attachment bytes into the active session, then injects an `a2a-inbound` OMP custom message through `steer`; idle sessions start a turn and busy sessions queue the Message into the active turn. Materialization or injection failure produces `failed`, not `delivered`.
 - socket/protocol errors are written to the extension logger.
 
 ## Human command surface

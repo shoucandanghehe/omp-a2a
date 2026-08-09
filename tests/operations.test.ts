@@ -88,6 +88,81 @@ test("one runtime path serves discovery, messaging, delivery, and history", asyn
 	await api.disconnect();
 });
 
+test("receiver injection completes in Hub message order", async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-runtime-order-"));
+	roots.push(dataDir);
+	const hub = await startHubServer({ port: 0, dataDir });
+	hubs.push(hub);
+	const client = new HubClient(hub.meta.baseUrl);
+	await client.createProject({ name: "runtime-order" });
+
+	const firstStarted = Promise.withResolvers<void>();
+	const releaseFirst = Promise.withResolvers<void>();
+	const barrierObserved = Promise.withResolvers<void>();
+	const bothDelivered = Promise.withResolvers<void>();
+	const injected: string[] = [];
+	const deliveries: string[] = [];
+	let activeInjections = 0;
+	let maxActiveInjections = 0;
+	const api = new A2aRuntime({
+		getClient: async () => client,
+		events: {
+			onDelivery: (delivery) => {
+				deliveries.push(delivery.messageId);
+				if (deliveries.length === 2) bothDelivered.resolve();
+			},
+		},
+	});
+	const web = new A2aRuntime({
+		getClient: async () => client,
+		events: {
+			onPresenceJoined: (peer) => {
+				if (peer.name === "barrier") barrierObserved.resolve();
+			},
+			onMessage: async (message) => {
+				activeInjections += 1;
+				maxActiveInjections = Math.max(maxActiveInjections, activeInjections);
+				if (message.text === "first") {
+					firstStarted.resolve();
+					await releaseFirst.promise;
+				}
+				injected.push(message.text);
+				activeInjections -= 1;
+			},
+		},
+	});
+	const barrier = new A2aRuntime({
+		getClient: async () => client,
+		events: {},
+	});
+
+	await api.connect("runtime-order", "api");
+	await web.connect("runtime-order", "web");
+	await api.message({
+		target: { type: "agent", name: "web" },
+		text: "first",
+		messageId: "ordered-first",
+	});
+	await firstStarted.promise;
+	await api.message({
+		target: { type: "agent", name: "web" },
+		text: "second",
+		messageId: "ordered-second",
+	});
+	await barrier.connect("runtime-order", "barrier");
+	await barrierObserved.promise;
+	releaseFirst.resolve();
+	await bothDelivered.promise;
+
+	expect(maxActiveInjections).toBe(1);
+	expect(injected).toEqual(["first", "second"]);
+	expect(deliveries).toEqual(["ordered-first", "ordered-second"]);
+
+	await barrier.disconnect();
+	await web.disconnect();
+	await api.disconnect();
+});
+
 test("receiver injection failure produces a terminal failed delivery", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-runtime-failure-"));
 	roots.push(dataDir);

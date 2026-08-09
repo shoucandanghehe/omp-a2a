@@ -64,7 +64,7 @@ An optional Message attachment is an immutable file-content value, not a durable
 
 ### Delivery
 
-Receiving extensions acknowledge only after all attachments are materialized and the OMP message is injected. The sender receives `delivered`, `failed`, or `disconnected` for each target. A failed materialization or injection reports `failed`; Delivery still proves neither model understanding nor task completion.
+Receiving extensions process Messages serially in Hub-assigned Project sequence, materialize all attachments, and inject each OMP message through `steer` delivery. An idle session starts a turn; a busy session queues the Message into the active turn. The sender receives `delivered`, `failed`, or `disconnected` for each target. A failed materialization or injection reports `failed`; Delivery still proves neither model understanding nor task completion.
 
 Delivery state is realtime and in-memory. ACK never deletes message history.
 
@@ -262,7 +262,7 @@ Only current-session `local://` regular files are accepted as attachment sources
 
 Queries already-persisted Project history by `before`, `after`, `limit`, or `from` when past context is intentionally needed. Persisted attachments are rematerialized as valid `local://` files in the calling session. History is not a wait primitive.
 
-Inbound messages are pushed automatically. Presence changes update the UI without starting an idle model turn. Messages trigger a turn and are acknowledged only after attachment materialization and successful injection. After `a2a_message`, models continue independent work or end the current turn; they never wait, sleep, or poll `a2a_history` for a reply.
+Inbound messages are pushed automatically and processed serially in Hub-assigned Project sequence. Presence changes update the UI without starting an idle model turn. Each Message uses `steer` delivery: an idle session starts a turn, while a busy session queues it into the active turn. Messages are acknowledged only after attachment materialization and successful injection. After `a2a_message`, models continue independent work or end the current turn; they never wait, sleep, or poll `a2a_history` for a reply.
 
 ## Payload and persistence
 

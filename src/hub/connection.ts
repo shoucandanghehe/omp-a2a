@@ -53,6 +53,7 @@ export class A2aConnection {
 	#closed: Promise<void>;
 	#resolveClosed!: () => void;
 	#manualClose = false;
+	#messageQueue = Promise.resolve();
 
 	private constructor(
 		baseUrl: string,
@@ -193,31 +194,9 @@ export class A2aConnection {
 				this.#events.onPresenceLeft?.({ ...frame.peer }, frame.reason);
 				return;
 			case "message":
-				void Promise.resolve(this.#events.onMessage?.(frame.message))
-					.then(() =>
-						this.#send({
-							type: "delivered",
-							messageId: frame.message.messageId,
-						}),
-					)
-					.catch((error) => {
-						const failure =
-							error instanceof Error ? error : new Error(String(error));
-						try {
-							this.#send({
-								type: "delivery_failed",
-								messageId: frame.message.messageId,
-								error: deliveryFailureMessage(failure),
-							});
-						} catch (sendError) {
-							this.#events.onError?.(
-								sendError instanceof Error
-									? sendError
-									: new Error(String(sendError)),
-							);
-						}
-						this.#events.onError?.(failure);
-					});
+				this.#messageQueue = this.#messageQueue.then(() =>
+					this.#deliverMessage(frame.message),
+				);
 				return;
 			case "delivery":
 				this.#events.onDelivery?.(
@@ -259,6 +238,30 @@ export class A2aConnection {
 				else this.#events.onError?.(failure);
 				return;
 			}
+		}
+	}
+
+	async #deliverMessage(message: RealtimeMessage): Promise<void> {
+		try {
+			await this.#events.onMessage?.(message);
+			this.#send({
+				type: "delivered",
+				messageId: message.messageId,
+			});
+		} catch (error) {
+			const failure = error instanceof Error ? error : new Error(String(error));
+			try {
+				this.#send({
+					type: "delivery_failed",
+					messageId: message.messageId,
+					error: deliveryFailureMessage(failure),
+				});
+			} catch (sendError) {
+				this.#events.onError?.(
+					sendError instanceof Error ? sendError : new Error(String(sendError)),
+				);
+			}
+			this.#events.onError?.(failure);
 		}
 	}
 

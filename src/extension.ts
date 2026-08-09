@@ -275,7 +275,7 @@ export default function a2aExtension(pi: ExtensionAPI) {
 						details: materialized,
 					},
 					{
-						deliverAs: context?.isIdle() === false ? "steer" : "followUp",
+						deliverAs: "steer",
 						triggerTurn: true,
 					},
 				);
