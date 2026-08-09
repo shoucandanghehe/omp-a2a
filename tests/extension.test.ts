@@ -50,6 +50,9 @@ test("human commands and model tools expose separate A2A surfaces", async () => 
 	let commandCompletions:
 		| ((argumentPrefix: string) => CompletionItem[] | null)
 		| undefined;
+	let beforeAgentStart:
+		| (() => { systemPrompt?: string[] } | Promise<{ systemPrompt?: string[] }>)
+		| undefined;
 	let help = "";
 
 	a2aExtension({
@@ -57,7 +60,10 @@ test("human commands and model tools expose separate A2A surfaces", async () => 
 			return definition;
 		},
 		setLabel() {},
-		on() {},
+		on(event: string, handler: unknown) {
+			if (event === "before_agent_start")
+				beforeAgentStart = handler as typeof beforeAgentStart;
+		},
 		logger: { warn() {} },
 		sendMessage() {},
 		registerCommand(
@@ -76,6 +82,13 @@ test("human commands and model tools expose separate A2A surfaces", async () => 
 	} as never);
 
 	expect(tools.sort()).toEqual(["a2a_history", "a2a_message", "a2a_peers"]);
+	if (!beforeAgentStart)
+		throw new Error("A2A identity system prompt was not registered");
+	const identityPrompt =
+		(await beforeAgentStart()).systemPrompt?.join("\n") ?? "";
+	expect(identityPrompt).toContain("independent top-level OMP session");
+	expect(identityPrompt).toContain("Main is local to one session's Task tree");
+	expect(identityPrompt).toContain("exact A2A roster name");
 	if (!commandHandler) throw new Error("a2a command was not registered");
 	await commandHandler("help", {
 		cwd: process.cwd(),
@@ -182,7 +195,7 @@ test("model tool contract makes replies push-driven instead of history-polled", 
 			throw new Error("a2a model tools were not registered");
 
 		expect(messageTool.description).toContain(
-			"Replies arrive automatically as inbound A2A messages",
+			"Replies arrive automatically as inbound A2A steer messages",
 		);
 		expect(messageTool.description).toContain(
 			"never wait, sleep, or call a2a_history",
@@ -199,7 +212,7 @@ test("model tool contract makes replies push-driven instead of history-polled", 
 			text: "reply with pong",
 		} as never);
 		expect(result.content[0]?.text).toContain(
-			"Replies arrive automatically as inbound A2A messages",
+			"Replies arrive automatically as inbound A2A steer messages",
 		);
 		expect(result.content[0]?.text).toContain(
 			"never wait, sleep, or call a2a_history",

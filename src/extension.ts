@@ -11,7 +11,9 @@ import { A2aRuntime, type MessageView } from "./operations";
 import { AGENT_NAME_RE, PROJECT_NAME_RE } from "./types";
 
 const ASYNC_REPLY_GUIDANCE =
-	"Replies arrive automatically as inbound A2A messages and start a later turn. After sending, continue only independent work; if blocked, end the current turn; never wait, sleep, or call a2a_history to poll for a reply.";
+	"Replies arrive automatically as inbound A2A steer messages and trigger or steer a turn. After sending, continue only independent work; if blocked, end the current turn; never wait, sleep, or call a2a_history to poll for a reply.";
+const A2A_IDENTITY_GUIDANCE =
+	"A2A peers are independent top-level OMP sessions/processes. Main is local to one session's Task tree and has no Project-wide meaning. A peer's A2A identity is its exact A2A roster name, not its local Main/subagent role. Address peers only by those roster names; never call a peer Main unless its roster name is literally Main.";
 
 function parseArgs(raw: string): {
 	positional: string[];
@@ -340,6 +342,14 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		desiredConnection = { project: config.project, name: config.name };
 		await connectDesired();
 	};
+
+	pi.on("before_agent_start", () => ({
+		systemPrompt: [
+			runtime.name
+				? `${A2A_IDENTITY_GUIDANCE} This session's current A2A roster name is ${runtime.name}.`
+				: A2A_IDENTITY_GUIDANCE,
+		],
+	}));
 
 	pi.on(
 		"session_start",
