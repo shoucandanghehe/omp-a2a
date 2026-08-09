@@ -245,9 +245,9 @@ Causal reply:
 
 ### `a2a_history`
 
-Queries Project history by `before`, `after`, `limit`, or `from`.
+Queries already-persisted Project history by `before`, `after`, `limit`, or `from` when past context is intentionally needed. It is not a wait primitive.
 
-Inbound messages are pushed automatically. Presence changes update the UI without starting an idle model turn. Messages trigger a turn and are acknowledged only after successful injection.
+Inbound messages are pushed automatically. Presence changes update the UI without starting an idle model turn. Messages trigger a turn and are acknowledged only after successful injection. After `a2a_message`, models continue independent work or end the current turn; they never wait, sleep, or poll `a2a_history` for a reply.
 
 ## Payload and persistence
 

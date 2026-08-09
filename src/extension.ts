@@ -5,6 +5,9 @@ import type { MessageRequestTarget } from "./hub/realtime-types";
 import { A2aRuntime, type MessageView } from "./operations";
 import { AGENT_NAME_RE, PROJECT_NAME_RE } from "./types";
 
+const ASYNC_REPLY_GUIDANCE =
+	"Replies arrive automatically as inbound A2A messages and start a later turn. After sending, continue only independent work; if blocked, end the current turn; never wait, sleep, or call a2a_history to poll for a reply.";
+
 function parseArgs(raw: string): {
 	positional: string[];
 	flags: Record<string, string | boolean>;
@@ -485,8 +488,7 @@ export default function a2aExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "a2a_message",
 		label: "A2A Message",
-		description:
-			"Send a direct message, Project broadcast, or causal reply. Use target.type=agent for one present name or project for the current Presence snapshot.",
+		description: `Send a direct message, Project broadcast, or causal reply. Use target.type=agent for one present name or project for the current Presence snapshot. ${ASYNC_REPLY_GUIDANCE}`,
 		parameters: type({
 			target: [{ type: "'agent'", name: "string" }, "|", { type: "'project'" }],
 			text: "string",
@@ -509,7 +511,7 @@ export default function a2aExtension(pi: ExtensionAPI) {
 					content: [
 						{
 							type: "text",
-							text: `Sent to ${target} ref=${accepted.message.messageRef}`,
+							text: `Sent to ${target} ref=${accepted.message.messageRef}\n${ASYNC_REPLY_GUIDANCE}`,
 						},
 					],
 					details: accepted,
@@ -529,7 +531,7 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		name: "a2a_history",
 		label: "A2A History",
 		description:
-			"Query persistent Project message history by cursor or sender. History is explicit and is never replayed automatically on connect.",
+			"Review already-persisted Project messages by cursor or sender. Use only when past context is needed; never call this tool to wait for or poll a new reply. Replies arrive automatically as inbound A2A messages.",
 		parameters: type({
 			"before?": "string",
 			"after?": "string",

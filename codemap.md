@@ -90,10 +90,10 @@ The Hub runs locally with `bun run hub` or in Docker Compose. Each Hub needs a u
 ### Model tools
 
 - `a2a_peers`: current Presence names in the connected Project.
-- `a2a_message`: direct message, Project broadcast, or causal reply.
-- `a2a_history`: explicit cursor/sender-filtered history lookup.
+- `a2a_message`: direct message, Project broadcast, or causal reply; successful sends direct the model to continue independent work or end its turn.
+- `a2a_history`: deliberate lookup of already-persisted context, never a reply-waiting primitive.
 
-Inbound messages are pushed through OMP `sendMessage`; models never poll an Inbox.
+Inbound messages are pushed through OMP `sendMessage` and start a later turn. Models never wait, sleep, or poll history for replies.
 
 ## Root asset map
 

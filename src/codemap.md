@@ -67,10 +67,10 @@ The extension uses the injected ArkType module as the canonical schema authoring
 | Tool | Contract |
 | --- | --- |
 | `a2a_peers` | Returns current peer names from the connected Presence snapshot. |
-| `a2a_message` | Requires a typed direct or Project target and text; accepts optional `replyTo` and `messageId`. |
-| `a2a_history` | Accepts `before`, `after`, `limit`, and `from`; history is explicit and never replayed on connect. |
+| `a2a_message` | Requires a typed direct or Project target and text; accepts optional `replyTo` and `messageId`; every description and success result states the push-driven reply control flow. |
+| `a2a_history` | Accepts `before`, `after`, `limit`, and `from`; it is only for deliberate review of persisted context, never waiting for a new reply. |
 
-There is no model-side connect/disconnect or Project administration. There is no Inbox polling tool.
+There is no model-side connect/disconnect or Project administration. Replies arrive as inbound messages that start a later turn; there is no Inbox polling tool or history-polling wait path.
 
 ## Runtime interface
 
