@@ -1,7 +1,7 @@
 {
 	"metadata": {
 		"version": "1.0.0",
-		"last_run": "2026-08-08T19:25:35Z",
+		"last_run": "2026-08-09T10:13:32Z",
 		"root": "/home/scdhh/code/omp-a2a",
 		"include_patterns": [
 			"src/**/*.ts",
@@ -26,7 +26,7 @@
 	},
 	"file_hashes": {
 		"Dockerfile": "53acdaf08b3f9df3ca4380135a6e630a",
-		"README.md": "6aee37eaa38a8d5a46cefceb35b367a0",
+		"README.md": "fe72bde619d1d5fa61001d1a0b89fc22",
 		"config.example.yml": "50cb75096863d76c0a750f7813286eb3",
 		"docker-compose.yml": "8b25f5fb06830f9ce387f3f862334d68",
 		"package.json": "add31b234138b58aebbea254692fa718",

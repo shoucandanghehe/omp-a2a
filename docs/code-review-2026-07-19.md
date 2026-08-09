@@ -1,4 +1,4 @@
-# omp-a2a 全项目审查报告
+# omp-a2a 历史全项目审查报告
 
 > 审查日期：2026-07-19
 > 固定快照：`ad6d8aa206fe96282e5f22390a3831308eeba1c8`
@@ -7,13 +7,15 @@
 
 本报告保留固定快照的历史审查事实；文中的源码和 README 行号均指向该快照。
 
-## Current-State Follow-up — 2026-07-23
+> 归档说明：本文中的 “current” 和 “current state” 只描述标题所标日期的代码，不代表当前仓库合同。当前合同以 [`README.md`](../README.md) 和 [`realtime-presence-architecture.md`](realtime-presence-architecture.md) 为准。
 
-This section reviews the current working tree and is separate from the fixed `ad6d8aa206fe96282e5f22390a3831308eeba1c8` snapshot preserved below. The nine original findings remain useful remediation history and are not reopened by this follow-up.
+## Historical follow-up snapshot — 2026-07-23
+
+This section reviews the 2026-07-23 working tree and is separate from the fixed `ad6d8aa206fe96282e5f22390a3831308eeba1c8` snapshot preserved below. The nine original findings remain useful remediation history and are not reopened by this follow-up.
 
 ### Current verification
 
-The following commands were observed against the current tree:
+The following commands were observed against the 2026-07-23 working tree:
 
 - `bun run smoke`: 39 tests passed, followed by successful Registry and live Hub/HubClient smoke scenarios.
 - `bun test --coverage`: 77.23% line coverage and 69.04% function coverage overall. `src/hub/inbox.ts` reached 99.75% line coverage and `src/operations.ts` reached 95.09%; `src/extension.ts` reached 19.26%.

@@ -4,7 +4,7 @@
 
 `omp-a2a` provides anonymous realtime Agent chat between independent Oh My Pi (OMP) processes. A standalone Hub owns persistent Projects and message history, current WebSocket Presence, and realtime routing. The OMP extension is a pure client.
 
-The wire protocol is private to this repository. It is not the standard A2A protocol and assumes a fully trusted private network.
+The wire protocol is private version `2`. It is not the standard A2A protocol, requires matching Hub and extension versions, and assumes a fully trusted private network.
 
 ## System entry points
 
@@ -101,6 +101,7 @@ Inbound messages are pushed through OMP `sendMessage`; models never poll an Inbo
 | --- | --- |
 | `package.json` | Bun metadata, OMP extension registration, Hub executable, and smoke scripts. |
 | `bun.lock` | Locked dependency graph. |
+| `AGENTS.md` | Repository map, commit-message style, signing, and history-rewrite rules. |
 | `README.md` | Operator and user how-to plus public behavior contract. |
 | `config.example.yml` | Global Hub URL example. |
 | `.env.example` | Docker Compose environment defaults. |
@@ -115,15 +116,15 @@ Inbound messages are pushed through OMP `sendMessage`; models never poll an Inbo
 | `src/hub/` | HTTP/WebSocket protocol, Presence, routing, message history, payloads, locking, and process lifecycle. | [`src/hub/codemap.md`](src/hub/codemap.md) |
 | `scripts/` | Executable Registry, Hub, and Docker smoke scenarios. | [`scripts/codemap.md`](scripts/codemap.md) |
 | `tests/` | Bun behavior tests for configuration, payloads, message history, realtime routing, control routes, runtime, and extension registration/completion. | Tests are excluded from generated map state. |
-| `docs/` | Historical fixed-snapshot review material. | Documentation is excluded from generated map state. |
+| `docs/` | Implemented architecture decisions and historical fixed-snapshot review material. | Documentation is excluded from generated map state. |
 
 ## Verification
 
-`bun run smoke` runs all Bun tests, the Project Registry smoke, and the live in-process Hub smoke. It covers Project isolation and deletion, WebSocket Presence and name conflicts, notifications, direct and broadcast routing, delivery outcomes, persistent history and migration, payload limits, and Hub restart.
+The local release gate runs Biome, `bun run smoke`, both Bun entry-point builds, and `docker compose config`. It covers Project isolation and deletion, WebSocket Presence and name conflicts, Presence notifications, direct and broadcast routing, delivery outcomes, persistent history and migration, payload limits, Hub restart, extension registration, and command completion.
 
-`bun run smoke:docker` exercises the public HTTP and WebSocket surfaces of the selected running Hub and removes its temporary Project.
+`bun run smoke:docker` crosses the public HTTP/WebSocket process boundary of the selected running Hub, verifies persisted history, and removes its temporary Project.
 
-Biome, Bun builds, and a real Docker image/network smoke are separate release checks.
+The implemented realtime model is documented in [`docs/realtime-presence-architecture.md`](docs/realtime-presence-architecture.md). The dated review in `docs/code-review-2026-07-19.md` is archival and does not define the current contract.
 
 ## Operational boundaries
 

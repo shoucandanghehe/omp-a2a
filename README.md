@@ -22,6 +22,7 @@ omp-a2a-hub
 - **Extension:** a pure client. It never starts the Hub or reads the Hub data directory.
 - **Docker:** only keeps the Hub running. Users manage Projects and their own connection through `/a2a` commands.
 - **Multiple Hubs:** supported when each Hub has a different URL and data directory. Same-named Projects on different Hubs are unrelated.
+- **Wire protocol:** private protocol version `2`; Hub and extension reject mismatched versions. It is not the standard A2A protocol.
 
 ## Domain model
 
@@ -200,6 +201,8 @@ Humans manage Projects, their own connection, and read-only views:
 /a2a help
 ```
 
+`/a2a` provides context-aware Tab completion for root commands, `project create|list|delete`, `connect ... --as`, and the remaining compatible `history` flags. `--before` and `--after` are never suggested together. Project names, Agent names, and message references remain explicit values.
+
 Project deletion requires confirmation. Humans do not use send, broadcast, reply, Inbox, join, or leave protocol commands.
 
 ## Model tools
@@ -259,15 +262,26 @@ On first start with an old `inbox.sqlite`, the Hub imports ordinary `message_led
 
 ## Verify
 
+### Local release gate
+
 ```bash
+biome check .slim/codemap.json src tests scripts package.json
 bun run smoke
+bun build src/extension.ts --target=bun --outdir=/tmp/omp-a2a-extension-build
+bun build src/hub/cli.ts --target=bun --outdir=/tmp/omp-a2a-hub-build
+docker compose config
 ```
 
-This runs the Bun tests, Project registry smoke, and a real Hub/client smoke covering WebSocket Presence, name conflicts, join/leave notifications, direct messaging, Project broadcast, delivery outcomes, Project history, legacy message migration, payload limits, Project deletion, and Hub restart semantics.
+These commands check formatting, run the Bun tests plus Project Registry and live Hub/client smokes, build both executable entry points, and validate the Compose model. The behavioral coverage includes WebSocket Presence, name conflicts, Presence join/leave notifications, direct messaging, Project broadcast, delivery outcomes, Project history, legacy message migration, payload limits, Project deletion, Hub restart semantics, and command completion.
 
-`bun run smoke:docker` targets the already-running Hub selected by `OMP_A2A_HUB_URL`, exercises the public HTTP and WebSocket surfaces, verifies persisted history, and deletes its temporary Project.
+### Docker boundary
 
-The verification command does not run a standalone TypeScript type check, a linter, or a Docker image/network smoke. Those remain separate release checks, and extension lifecycle behavior currently has substantially less automated coverage than the Hub persistence path.
+```bash
+docker compose up -d --build --force-recreate --wait --wait-timeout 60 hub
+bun run smoke:docker
+```
+
+`smoke:docker` targets the running Hub selected by `OMP_A2A_HUB_URL`, crosses the public HTTP and WebSocket boundary, verifies persisted history, and deletes its temporary Project. `bun run smoke` alone does not build or start a container.
 
 ## Layout
 
@@ -291,3 +305,5 @@ src/
 ```
 
 Detailed repository maps are available in [`codemap.md`](codemap.md), [`src/codemap.md`](src/codemap.md), [`src/hub/codemap.md`](src/hub/codemap.md), and [`scripts/codemap.md`](scripts/codemap.md).
+
+The implemented realtime model and its accepted tradeoffs are recorded in [`docs/realtime-presence-architecture.md`](docs/realtime-presence-architecture.md).
