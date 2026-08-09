@@ -94,7 +94,7 @@ The Hub runs locally with `bun run hub` or in Docker Compose. Each Hub needs a u
 - `a2a_message`: direct message, Project broadcast, or causal reply, with optional current-session `local://` attachment sources; successful sends direct the model to continue independent work or end its turn.
 - `a2a_history`: deliberate lookup of already-persisted context, never a reply-waiting primitive.
 
-Every model turn receives identity guidance that A2A identities are opaque exact roster names and must never be inferred from roles or labels in other coordination systems.
+Connected model turns receive the current A2A roster name and use only `a2a_peers` results or inbound sender names to address peers; disconnected turns receive no A2A identity prompt.
 
 Inbound messages are pushed through OMP `sendMessage` in Hub-assigned Project sequence using `steer` delivery: idle sessions start a turn and busy sessions queue the Message into the active turn. Models never wait, sleep, or poll history for replies.
 The sender Extension snapshots attachment bytes before sending. Receivers and history callers materialize new URLs in their own session-local storage; the Hub never resolves `local://`.

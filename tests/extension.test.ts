@@ -51,7 +51,10 @@ test("human commands and model tools expose separate A2A surfaces", async () => 
 		| ((argumentPrefix: string) => CompletionItem[] | null)
 		| undefined;
 	let beforeAgentStart:
-		| (() => { systemPrompt?: string[] } | Promise<{ systemPrompt?: string[] }>)
+		| (() =>
+				| { systemPrompt?: string[] }
+				| undefined
+				| Promise<{ systemPrompt?: string[] } | undefined>)
 		| undefined;
 	let help = "";
 
@@ -84,13 +87,7 @@ test("human commands and model tools expose separate A2A surfaces", async () => 
 	expect(tools.sort()).toEqual(["a2a_history", "a2a_message", "a2a_peers"]);
 	if (!beforeAgentStart)
 		throw new Error("A2A identity system prompt was not registered");
-	const identityPrompt =
-		(await beforeAgentStart()).systemPrompt?.join("\n") ?? "";
-	expect(identityPrompt).toContain("opaque exact A2A roster names");
-	expect(identityPrompt).toContain("other coordination systems");
-	expect(identityPrompt).not.toContain("Main");
-	expect(identityPrompt).not.toContain("subagent");
-	expect(identityPrompt).not.toContain("Task tree");
+	expect(await beforeAgentStart()).toBeUndefined();
 	if (!commandHandler) throw new Error("a2a command was not registered");
 	await commandHandler("help", {
 		cwd: process.cwd(),
@@ -155,6 +152,9 @@ test("model tool contract makes replies push-driven instead of history-polled", 
 				context: { cwd: string; ui: { notify(message: string): void } },
 		  ) => Promise<void>)
 		| undefined;
+	let beforeAgentStart:
+		| (() => { systemPrompt?: string[] } | undefined)
+		| undefined;
 	let worker: A2aConnection | null = null;
 	const context = { cwd, ui: { notify() {} } };
 
@@ -175,7 +175,10 @@ test("model tool contract makes replies push-driven instead of history-polled", 
 				return definition;
 			},
 			setLabel() {},
-			on() {},
+			on(event: string, handler: unknown) {
+				if (event === "before_agent_start")
+					beforeAgentStart = handler as typeof beforeAgentStart;
+			},
 			logger: { warn() {} },
 			sendMessage() {},
 			registerCommand(
@@ -191,6 +194,11 @@ test("model tool contract makes replies push-driven instead of history-polled", 
 
 		if (!commandHandler) throw new Error("a2a command was not registered");
 		await commandHandler(`connect ${project} --as api`, context);
+		if (!beforeAgentStart)
+			throw new Error("A2A identity system prompt was not registered");
+		expect(beforeAgentStart()?.systemPrompt).toEqual([
+			"Your A2A roster name is api. Address peers only by exact names returned by a2a_peers or by sender names in inbound A2A messages.",
+		]);
 		const peersTool = tools.get("a2a_peers");
 		const messageTool = tools.get("a2a_message");
 		const historyTool = tools.get("a2a_history");
@@ -201,28 +209,20 @@ test("model tool contract makes replies push-driven instead of history-polled", 
 			"List the exact A2A roster names currently addressable in this Project. Use only a returned name for target.type=agent.",
 		);
 
-		expect(messageTool.description).toContain(
-			"Replies arrive automatically as inbound A2A steer messages",
+		expect(messageTool.description).toBe(
+			"Send to one current peer or all current peers. Use target.type=agent with a name from a2a_peers, or target.type=project for all current peers. Set replyTo to reply to an earlier Project message. Attachments must be current-session local:// regular files. Replies arrive automatically. After sending, continue independent work; if blocked, end the current turn. Never wait, sleep, or poll a2a_history for a reply.",
 		);
-		expect(messageTool.description).toContain(
-			"never wait, sleep, or call a2a_history",
-		);
-		expect(historyTool.description).toContain(
-			"Use only when past context is needed",
-		);
-		expect(historyTool.description).toContain(
-			"never call this tool to wait for or poll a new reply",
+		expect(historyTool.description).toBe(
+			"Review earlier Project messages using before, after, limit, or from. Returned attachment links are valid in the current session. Use only for past context; never wait or poll for new replies.",
 		);
 
 		const result = await messageTool.execute("send-1", {
 			target: { type: "agent", name: "worker" },
 			text: "reply with pong",
 		} as never);
+		expect(result.content[0]?.text).toContain("Replies arrive automatically.");
 		expect(result.content[0]?.text).toContain(
-			"Replies arrive automatically as inbound A2A steer messages",
-		);
-		expect(result.content[0]?.text).toContain(
-			"never wait, sleep, or call a2a_history",
+			"Never wait, sleep, or poll a2a_history for a reply.",
 		);
 	} finally {
 		if (commandHandler) await commandHandler("disconnect", context);

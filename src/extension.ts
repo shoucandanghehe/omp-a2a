@@ -11,9 +11,7 @@ import { A2aRuntime, type MessageView } from "./operations";
 import { AGENT_NAME_RE, PROJECT_NAME_RE } from "./types";
 
 const ASYNC_REPLY_GUIDANCE =
-	"Replies arrive automatically as inbound A2A steer messages and trigger or steer a turn. After sending, continue only independent work; if blocked, end the current turn; never wait, sleep, or call a2a_history to poll for a reply.";
-const A2A_IDENTITY_GUIDANCE =
-	"A2A identities are opaque exact A2A roster names. Each roster entry names one current peer. Use only the current connection name, names returned by a2a_peers, and sender names from inbound message metadata. Never infer, translate, or replace these names using roles, labels, thread names, task names, or terminology from other coordination systems.";
+	"Replies arrive automatically. After sending, continue independent work; if blocked, end the current turn. Never wait, sleep, or poll a2a_history for a reply.";
 
 function parseArgs(raw: string): {
 	positional: string[];
@@ -343,13 +341,15 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		await connectDesired();
 	};
 
-	pi.on("before_agent_start", () => ({
-		systemPrompt: [
-			runtime.name
-				? `${A2A_IDENTITY_GUIDANCE} This session's current A2A roster name is ${runtime.name}.`
-				: A2A_IDENTITY_GUIDANCE,
-		],
-	}));
+	pi.on("before_agent_start", () => {
+		const name = runtime.name;
+		if (!name) return;
+		return {
+			systemPrompt: [
+				`Your A2A roster name is ${name}. Address peers only by exact names returned by a2a_peers or by sender names in inbound A2A messages.`,
+			],
+		};
+	});
 
 	pi.on(
 		"session_start",
@@ -540,7 +540,7 @@ export default function a2aExtension(pi: ExtensionAPI) {
 	pi.registerTool({
 		name: "a2a_message",
 		label: "A2A Message",
-		description: `Send a direct message, Project broadcast, or causal reply. Use target.type=agent for one present name or project for the current Presence snapshot. Optional attachments must be current-session local:// regular files; their immutable contents enter Project history with the Message. ${ASYNC_REPLY_GUIDANCE}`,
+		description: `Send to one current peer or all current peers. Use target.type=agent with a name from a2a_peers, or target.type=project for all current peers. Set replyTo to reply to an earlier Project message. Attachments must be current-session local:// regular files. ${ASYNC_REPLY_GUIDANCE}`,
 		parameters: type({
 			target: [{ type: "'agent'", name: "string" }, "|", { type: "'project'" }],
 			text: "string",
@@ -600,7 +600,7 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		name: "a2a_history",
 		label: "A2A History",
 		description:
-			"Review already-persisted Project messages by cursor or sender. Attachments are rematerialized as current-session local:// files. Use only when past context is needed; never call this tool to wait for or poll a new reply. Replies arrive automatically as inbound A2A messages.",
+			"Review earlier Project messages using before, after, limit, or from. Returned attachment links are valid in the current session. Use only for past context; never wait or poll for new replies.",
 		parameters: type({
 			"before?": "string",
 			"after?": "string",
