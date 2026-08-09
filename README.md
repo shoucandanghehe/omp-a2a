@@ -86,11 +86,11 @@ omp-a2a is for a fully trusted private network.
 
 - **Custom protocol:** this repository implements a private realtime protocol, not the standard A2A protocol. Do not assume interoperability with standard A2A clients or servers.
 - **OMP runtime:** attachment transfer requires `@oh-my-pi/pi-coding-agent` `>=17.2.11`, whose public local-protocol resolver provides session-scoped `local://` access.
-- **Hub changes while connected:** an established WebSocket remains bound to the Hub that accepted it. After changing `hubUrl`, disconnect and reconnect before issuing Project or history operations against the new Hub.
-- **Interrupted Project deletion:** Project metadata is removed from the filesystem Registry before its SQLite message history is purged. After a crash or storage failure during deletion, verify or clear the old Project state before reusing the same Project name.
-- **Stalled HTTP requests:** the initial Hub probe has a timeout, but ordinary Project and history requests currently do not. A Hub that accepts connections without completing responses can stall the invoking command; restart the Hub and affected OMP session if this occurs.
+- **Hub changes while connected:** the realtime socket, connected status, and connected history remain bound to the Hub that accepted the Presence. Project administration resolves the currently selected Hub. Disconnect and reconnect to move the connected Project to a new `hubUrl`.
+- **Cancelled messages:** cancellation before WebSocket dispatch prevents the message. Cancellation after dispatch returns an explicit unknown-outcome error because the Hub may already have accepted and routed it.
+- **Compose publication:** the default Compose port mapping binds all host interfaces. Narrow the mapping to loopback unless remote clients on the trusted network require access.
 
-These are current implementation boundaries, not delivery guarantees. The most important deployment boundary remains the trusted-network requirement above.
+These are protocol and deployment boundaries, not delivery guarantees. The primary security boundary remains the trusted-network requirement above.
 
 ## Install
 
@@ -163,6 +163,8 @@ OMP_A2A_HUB_DATA_DIR
 `OMP_A2A_HUB_PUBLIC_URL` controls the `baseUrl` reported by `/healthz` and `/v1/meta`; it does not override a client's configured Hub URL.
 
 The default data directory is `~/.omp/a2a`. Persistent history is `<data-dir>/messages.sqlite`.
+
+CLI flags take precedence over these environment variables. `startHubServer` itself accepts explicit options only, so embedding it is isolated from deployment environment state. A wildcard listen host requires an explicit client-facing public URL; the returned `listenUrl` remains the process-reachable local endpoint.
 
 ## Point OMP at a Hub
 
@@ -276,11 +278,15 @@ Inbound messages are pushed automatically and processed serially in Hub-assigned
 - Attachment bytes use Base64 and use gzip first when that reduces payload size.
 - One Message accepts at most eight attachments.
 - Decoded text plus attachment content is limited to 4 MiB per Message and per history page.
+- Encoded payloads reserve 64 KiB for message metadata inside the 6 MiB frame and history-response envelope.
 - `messageId` is an opaque idempotency key. Reusing it with different text, attachment names, attachment order, attachment content, target, or causal parent fails.
 - History uses SQLite WAL with `synchronous = FULL`.
 - The Hub data directory has an exclusive lock; two Hub processes cannot write the same data.
+- Project deletion writes a durable marker before touching either store. Startup reconciles interrupted deletion before listening or allowing name reuse.
+- History pages are bounded to 500 messages, 4 MiB of decoded content, and 6 MiB of serialized JSON.
+- Accepted recipient Presence snapshots are durable. An idempotent retry returns the original recipients without redelivery, even after Presence changes.
 
-On first start with an old `inbox.sqlite`, the Hub imports ordinary `message_ledger` rows into `messages.sqlite` in deterministic `(project, created_at, msg_id)` order. Old Presence, cursor, ACK, receipt, and offline-delivery state are not migrated. Pending messages become history only and are never delivered to future connections.
+On first eligible start with an old `inbox.sqlite`, the Hub imports every ordinary `message_ledger` row into `messages.sqlite` through deterministic ordered streaming passes inside one transaction. A durable migration marker prevents replay after all history is deleted; pre-marker databases are identified before crash-atomic schema initialization and backfilled during upgrade. Old Presence, cursor, ACK, receipt-state, and offline-delivery state are not migrated. Pending messages become history only and are never delivered to future connections.
 
 Opening a protocol version `2` `messages.sqlite` adds the attachment columns in place. Existing Messages receive an empty attachment list and retain their original sequence, reference, text, and causality.
 
@@ -289,14 +295,12 @@ Opening a protocol version `2` `messages.sqlite` adds the attachment columns in 
 ### Local release gate
 
 ```bash
-biome check .slim/codemap.json src tests scripts package.json
-bun run smoke
-bun build src/extension.ts --target=bun --external @oh-my-pi/pi-coding-agent/internal-urls/local-protocol --outdir=/tmp/omp-a2a-extension-build
-bun build src/hub/cli.ts --target=bun --outdir=/tmp/omp-a2a-hub-build
-docker compose config
+bun run check
 ```
 
-These commands check formatting, run the Bun tests plus Project Registry and live Hub/client smokes, build both executable entry points, and validate the Compose model. The behavioral coverage includes WebSocket Presence, name conflicts, Presence notifications, direct and broadcast routing, successful/failed/disconnected Delivery, cross-session attachment snapshot/materialization/history, protocol version `2` and legacy Inbox migration, payload limits, Project deletion, Hub restart semantics, and command completion.
+`check` runs strict TypeScript no-emit validation, Oxlint, all Bun tests, the Project Registry smoke, and the live in-process Hub smoke. Runtime coverage includes configuration failures, session/Hub transitions, bounded and cancellable WebSocket handshakes, request cancellation and deadlines, Presence lifetime, direct and broadcast routing, canonical retries, successful/failed/disconnected Delivery outcomes, cross-session attachment snapshot/materialization/history, bounded payload/history work, protocol version `2` and legacy Inbox migration, recoverable Project deletion, startup unwind, Hub restart, extension registration, and command completion.
+
+Use `bun run smoke` when only runtime behavior needs to be exercised.
 
 ### Docker boundary
 
@@ -305,7 +309,7 @@ docker compose up -d --build --force-recreate --wait --wait-timeout 60 hub
 bun run smoke:docker
 ```
 
-`smoke:docker` targets the running Hub selected by `OMP_A2A_HUB_URL`, crosses the public HTTP and WebSocket boundary, verifies persisted history, and deletes its temporary Project. `bun run smoke` alone does not build or start a container.
+`smoke:docker` targets the running Hub selected by `OMP_A2A_HUB_URL`, crosses the public HTTP and WebSocket boundary, verifies persisted history, and deletes its temporary Project. A real Docker image/network smoke remains an explicit release boundary because it owns an external container lifecycle; `bun run smoke` alone does not build or start a container.
 
 ## Layout
 

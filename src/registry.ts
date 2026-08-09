@@ -4,19 +4,36 @@ import { ensureDir, projectDir, projectMetaPath, projectsRoot } from "./paths";
 import type { A2aProject } from "./types";
 import { PROJECT_NAME_RE } from "./types";
 
-export class RegistryConflictError extends Error {}
+export class RegistryOperationError extends Error {}
+export class RegistryConflictError extends RegistryOperationError {}
+export class RegistryPersistenceError extends Error {}
 
 function assertProjectName(name: string): void {
 	if (!PROJECT_NAME_RE.test(name)) {
-		throw new Error(
+		throw new RegistryOperationError(
 			`invalid project name "${name}" (use [a-zA-Z0-9._-], start alnum, max 64)`,
 		);
 	}
 }
 
 function readProjectFile(file: string): A2aProject | null {
-	if (!fs.existsSync(file)) return null;
-	return JSON.parse(fs.readFileSync(file, "utf8")) as A2aProject;
+	let source: string;
+	try {
+		source = fs.readFileSync(file, "utf8");
+	} catch (error) {
+		if (error instanceof Error && "code" in error && error.code === "ENOENT")
+			return null;
+		throw new RegistryPersistenceError(
+			`failed to read Registry JSON ${file}: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	try {
+		return JSON.parse(source) as A2aProject;
+	} catch (error) {
+		throw new RegistryPersistenceError(
+			`invalid Registry JSON ${file}: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
 }
 
 function writeJsonAtomic(file: string, data: unknown): void {
@@ -57,9 +74,9 @@ export function createProject(options: {
 
 export function deleteProject(name: string, dataDir?: string): boolean {
 	assertProjectName(name);
-	if (!getProject(name, dataDir)) return false;
-	fs.rmSync(projectDir(name, dataDir), { recursive: true });
-	return true;
+	const existed = getProject(name, dataDir) !== null;
+	fs.rmSync(projectDir(name, dataDir), { recursive: true, force: true });
+	return existed;
 }
 
 export function getProject(name: string, dataDir?: string): A2aProject | null {

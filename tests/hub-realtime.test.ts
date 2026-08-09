@@ -1,10 +1,23 @@
+import { Database } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
+import { createServer } from "node:http";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import WebSocket from "ws";
+import { gzipSync } from "node:zlib";
+import WebSocket, { WebSocketServer } from "ws";
+import {
+	A2aConnection,
+	CLOSE_TIMEOUT_MS,
+	GOODBYE_TIMEOUT_MS,
+	MessageOutcomeUnknownError,
+} from "../src/hub/connection";
 import { HubClient } from "../src/hub/client";
-import { decodeTextPayload, encodeTextPayload } from "../src/hub/payload";
+import {
+	decodeTextPayload,
+	encodeTextPayload,
+	MAX_TEXT_BYTES,
+} from "../src/hub/payload";
 import {
 	A2A_PROTOCOL_VERSION,
 	type ServerFrame,
@@ -28,6 +41,10 @@ class FrameQueue {
 		const frame = this.#frames.shift();
 		if (frame) return Promise.resolve(frame);
 		return new Promise<ServerFrame>((resolve) => this.#waiters.push(resolve));
+	}
+
+	takeNow(): ServerFrame | undefined {
+		return this.#frames.shift();
 	}
 }
 
@@ -67,10 +84,10 @@ test("WebSocket lifetime is the complete Presence lifetime", async () => {
 	roots.push(dataDir);
 	const hub = await startHubServer({ port: 0, dataDir });
 	hubs.push(hub);
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "room" });
 
-	const api = await connect(hub.meta.baseUrl, "room", "api");
+	const api = await connect(hub.listenUrl, "room", "api");
 	const apiClaimed = await api.frames.next();
 	expect(apiClaimed).toMatchObject({
 		type: "claimed",
@@ -79,14 +96,14 @@ test("WebSocket lifetime is the complete Presence lifetime", async () => {
 		peers: [],
 	});
 
-	const duplicate = await connect(hub.meta.baseUrl, "room", "api");
+	const duplicate = await connect(hub.listenUrl, "room", "api");
 	expect(await duplicate.frames.next()).toMatchObject({
 		type: "error",
 		code: "name_in_use",
 	});
 	duplicate.socket.terminate();
 
-	const web = await connect(hub.meta.baseUrl, "room", "web");
+	const web = await connect(hub.listenUrl, "room", "web");
 	const webClaimed = await web.frames.next();
 	expect(webClaimed).toMatchObject({
 		type: "claimed",
@@ -104,7 +121,7 @@ test("WebSocket lifetime is the complete Presence lifetime", async () => {
 		peer: { name: "web" },
 	});
 
-	const replacement = await connect(hub.meta.baseUrl, "room", "web");
+	const replacement = await connect(hub.listenUrl, "room", "web");
 	const replacementClaimed = await replacement.frames.next();
 	expect(replacementClaimed).toMatchObject({
 		type: "claimed",
@@ -125,15 +142,15 @@ test("direct messages and broadcasts target the current Presence snapshot", asyn
 	roots.push(dataDir);
 	const hub = await startHubServer({ port: 0, dataDir });
 	hubs.push(hub);
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "chat" });
 
-	const api = await connect(hub.meta.baseUrl, "chat", "api");
+	const api = await connect(hub.listenUrl, "chat", "api");
 	await api.frames.next();
-	const web = await connect(hub.meta.baseUrl, "chat", "web");
+	const web = await connect(hub.listenUrl, "chat", "web");
 	await web.frames.next();
 	await api.frames.next();
-	const testPeer = await connect(hub.meta.baseUrl, "chat", "test");
+	const testPeer = await connect(hub.listenUrl, "chat", "test");
 	await testPeer.frames.next();
 	await api.frames.next();
 	await web.frames.next();
@@ -243,7 +260,7 @@ test("direct messages and broadcasts target the current Presence snapshot", asyn
 		type: "presence_left",
 		peer: { name: "web" },
 	});
-	const replacement = await connect(hub.meta.baseUrl, "chat", "web");
+	const replacement = await connect(hub.listenUrl, "chat", "web");
 	const replacementClaimed = await replacement.frames.next();
 	if (replacementClaimed.type !== "claimed")
 		throw new Error("expected replacement claim");
@@ -268,18 +285,18 @@ test("message history survives Hub restart while Presence does not", async () =>
 	roots.push(dataDir);
 	const first = await startHubServer({ port: 0, dataDir });
 	hubs.push(first);
-	const firstClient = new HubClient(first.meta.baseUrl);
+	const firstClient = new HubClient(first.listenUrl);
 	await firstClient.createProject({ name: "durable-chat" });
-	const api = await connect(first.meta.baseUrl, "durable-chat", "api");
+	const api = await connect(first.listenUrl, "durable-chat", "api");
 	await api.frames.next();
-	const web = await connect(first.meta.baseUrl, "durable-chat", "web");
+	const web = await connect(first.listenUrl, "durable-chat", "web");
 	await web.frames.next();
 	await api.frames.next();
 	const attachmentBytes = Buffer.from("# Training handoff\nseed=20\n", "utf8");
 	const attachment = {
 		name: "training-handoff.md",
 		payload: {
-			encoding: "base64",
+			encoding: "base64" as const,
 			data: attachmentBytes.toString("base64"),
 			uncompressedBytes: attachmentBytes.byteLength,
 		},
@@ -304,7 +321,7 @@ test("message history survives Hub restart while Presence does not", async () =>
 
 	const second = await startHubServer({ port: 0, dataDir });
 	hubs.push(second);
-	const secondClient = new HubClient(second.meta.baseUrl);
+	const secondClient = new HubClient(second.listenUrl);
 	const history = await secondClient.history({
 		project: "durable-chat",
 		limit: 10,
@@ -321,10 +338,393 @@ test("message history survives Hub restart while Presence does not", async () =>
 		"attachments" in persisted ? persisted.attachments : undefined,
 	).toEqual([attachment]);
 
-	const replacement = await connect(second.meta.baseUrl, "durable-chat", "web");
+	const replacement = await connect(second.listenUrl, "durable-chat", "web");
 	expect(await replacement.frames.next()).toMatchObject({
 		type: "claimed",
 		peers: [],
 	});
 	replacement.socket.close();
 });
+
+test("message retries use original Presence snapshots without redelivery", async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-realtime-"));
+	roots.push(dataDir);
+	const hub = await startHubServer({ port: 0, dataDir });
+	hubs.push(hub);
+	const client = new HubClient(hub.listenUrl);
+	await client.createProject({ name: "retry-chat" });
+	const api = await connect(hub.listenUrl, "retry-chat", "api");
+	await api.frames.next();
+	const web = await connect(hub.listenUrl, "retry-chat", "web");
+	const webClaimed = await web.frames.next();
+	await api.frames.next();
+	if (webClaimed.type !== "claimed") throw new Error("expected web claim");
+
+	const directFrame = {
+		type: "message",
+		messageId: "canonical-direct",
+		target: { type: "agent", name: "web" },
+		payload: encodeTextPayload("canonical direct"),
+		attachments: [],
+	};
+	api.socket.send(JSON.stringify({ ...directFrame, requestId: "direct-first" }));
+	await web.frames.next();
+	expect(await api.frames.next()).toMatchObject({
+		type: "accepted",
+		recipients: ["web"],
+		message: {
+			messageRef: "retry-chat:1",
+			target: { presenceId: webClaimed.self.presenceId },
+		},
+	});
+	web.socket.close();
+	expect(await api.frames.next()).toMatchObject({
+		type: "delivery",
+		status: "disconnected",
+	});
+	await api.frames.next();
+
+	api.socket.send(
+		JSON.stringify({ ...directFrame, requestId: "direct-offline-retry" }),
+	);
+	expect(await api.frames.next()).toMatchObject({
+		type: "accepted",
+		requestId: "direct-offline-retry",
+		recipients: ["web"],
+		message: { target: { presenceId: webClaimed.self.presenceId } },
+	});
+
+	const replacement = await connect(hub.listenUrl, "retry-chat", "web");
+	await replacement.frames.next();
+	await api.frames.next();
+	api.socket.send(
+		JSON.stringify({ ...directFrame, requestId: "direct-replaced-retry" }),
+	);
+	expect(await api.frames.next()).toMatchObject({
+		type: "accepted",
+		requestId: "direct-replaced-retry",
+		recipients: ["web"],
+		message: { target: { presenceId: webClaimed.self.presenceId } },
+	});
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect(replacement.frames.takeNow()).toBeUndefined();
+	const testPeer = await connect(hub.listenUrl, "retry-chat", "test");
+	await testPeer.frames.next();
+	await api.frames.next();
+	await replacement.frames.next();
+	const broadcastFrame = {
+		type: "message",
+		messageId: "canonical-broadcast",
+		target: { type: "project" },
+		payload: encodeTextPayload("canonical broadcast"),
+		attachments: [],
+	};
+	api.socket.send(
+		JSON.stringify({ ...broadcastFrame, requestId: "broadcast-first" }),
+	);
+	await replacement.frames.next();
+	await testPeer.frames.next();
+	expect(await api.frames.next()).toMatchObject({
+		type: "accepted",
+		recipients: ["web", "test"],
+		message: { messageRef: "retry-chat:2" },
+	});
+	replacement.socket.close();
+	expect(await api.frames.next()).toMatchObject({
+		type: "delivery",
+		status: "disconnected",
+	});
+	await api.frames.next();
+	await testPeer.frames.next();
+	const aux = await connect(hub.listenUrl, "retry-chat", "aux");
+	await aux.frames.next();
+	await api.frames.next();
+	await testPeer.frames.next();
+
+	api.socket.send(
+		JSON.stringify({ ...broadcastFrame, requestId: "broadcast-retry" }),
+	);
+	expect(await api.frames.next()).toMatchObject({
+		type: "accepted",
+		requestId: "broadcast-retry",
+		recipients: ["web", "test"],
+	});
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	expect(testPeer.frames.takeNow()).toBeUndefined();
+	expect(aux.frames.takeNow()).toBeUndefined();
+
+	api.socket.send(
+		JSON.stringify({
+			...directFrame,
+			requestId: "direct-conflict",
+			payload: encodeTextPayload("changed"),
+		}),
+	);
+	expect(await api.frames.next()).toMatchObject({
+		type: "error",
+		requestId: "direct-conflict",
+		code: "message_id_conflict",
+	});
+	api.socket.close();
+	testPeer.socket.close();
+	aux.socket.close();
+});
+
+test("realtime validation classifies payload bounds and hides persistence details", async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-realtime-"));
+	roots.push(dataDir);
+	const hub = await startHubServer({ port: 0, dataDir });
+	hubs.push(hub);
+	const client = new HubClient(hub.listenUrl);
+	await client.createProject({ name: "rejections" });
+	const api = await connect(hub.listenUrl, "rejections", "api");
+	await api.frames.next();
+	const web = await connect(hub.listenUrl, "rejections", "web");
+	await web.frames.next();
+	await api.frames.next();
+
+	api.socket.send(
+		JSON.stringify({
+			type: "message",
+			requestId: "blank-reply",
+			messageId: "blank-reply",
+			target: { type: "agent", name: "web" },
+			payload: encodeTextPayload("body"),
+			attachments: [],
+			replyTo: " \t",
+		}),
+	);
+	expect(await api.frames.next()).toMatchObject({
+		type: "error",
+		requestId: "blank-reply",
+		code: "message_rejected",
+	});
+
+	api.socket.send(
+		JSON.stringify({
+			type: "message",
+			requestId: "gzip-bomb",
+			messageId: "gzip-bomb",
+			target: { type: "agent", name: "web" },
+			payload: {
+				encoding: "gzip+base64",
+				data: gzipSync(Buffer.alloc(MAX_TEXT_BYTES + 1)).toString("base64"),
+				uncompressedBytes: MAX_TEXT_BYTES,
+			},
+			attachments: [],
+		}),
+	);
+	expect(await api.frames.next()).toMatchObject({
+		type: "error",
+		requestId: "gzip-bomb",
+		code: "payload_too_large",
+	});
+
+	const database = new Database(join(dataDir, "messages.sqlite"));
+	database.run(`
+		CREATE TRIGGER reject_message_insert
+		BEFORE INSERT ON messages
+		BEGIN
+			SELECT RAISE(ABORT, 'sensitive storage detail');
+		END
+	`);
+	api.socket.send(
+		JSON.stringify({
+			type: "message",
+			requestId: "persistence-failure",
+			messageId: "persistence-failure",
+			target: { type: "agent", name: "web" },
+			payload: encodeTextPayload("body"),
+			attachments: [],
+		}),
+	);
+	const failure = await api.frames.next();
+	expect(failure).toMatchObject({
+		type: "error",
+		requestId: "persistence-failure",
+		code: "internal_error",
+	});
+	if (failure.type !== "error") throw new Error("expected error frame");
+	expect(failure.message).not.toContain("sensitive storage detail");
+	database.run("DROP TRIGGER reject_message_insert");
+	database.close();
+
+	api.socket.send(
+		JSON.stringify({
+			type: "message",
+			requestId: "valid",
+			messageId: "valid",
+			target: { type: "agent", name: "web" },
+			payload: encodeTextPayload("valid"),
+			attachments: [],
+		}),
+	);
+	expect(await web.frames.next()).toMatchObject({
+		type: "message",
+		message: { messageRef: "rejections:1" },
+	});
+	expect(await api.frames.next()).toMatchObject({
+		type: "accepted",
+		requestId: "valid",
+	});
+	api.socket.close();
+	web.socket.close();
+});
+
+test(
+	"message aborts report an unknown outcome and close has a bounded fallback",
+	async () => {
+		const server = createServer();
+		const sockets = new WebSocketServer({ server });
+		let receivedGoodbye = false;
+		let resolveMessage!: () => void;
+		const receivedMessage = new Promise<void>((resolve) => {
+			resolveMessage = resolve;
+		});
+		sockets.on("connection", (socket) => {
+			socket.on("message", (data) => {
+				const frame = JSON.parse(data.toString()) as { type?: string };
+				if (frame.type === "hello") {
+					socket.send(
+						JSON.stringify({
+							type: "claimed",
+							protocolVersion: A2A_PROTOCOL_VERSION,
+							project: "stalled",
+							self: { name: "api", presenceId: "presence-api" },
+							peers: [],
+						} satisfies ServerFrame),
+					);
+				} else if (frame.type === "message") {
+					resolveMessage();
+				} else if (frame.type === "goodbye") {
+					receivedGoodbye = true;
+				}
+			});
+		});
+		await new Promise<void>((resolve, reject) => {
+			server.once("error", reject);
+			server.listen(0, "127.0.0.1", resolve);
+		});
+		try {
+			const address = server.address();
+			if (!address || typeof address === "string")
+				throw new Error("test server did not expose a TCP address");
+			const connection = await A2aConnection.connect({
+				baseUrl: `http://127.0.0.1:${address.port}`,
+				project: "stalled",
+				name: "api",
+			});
+			const controller = new AbortController();
+			const pendingMessage = connection.send(
+				{ target: { type: "project" }, text: "may be accepted" },
+				{ signal: controller.signal },
+			);
+			await receivedMessage;
+			const cancellation = new Error("cancelled by model");
+			controller.abort(cancellation);
+			let messageFailure: unknown;
+			try {
+				await pendingMessage;
+			} catch (error) {
+				messageFailure = error;
+			}
+			expect(messageFailure).toBeInstanceOf(MessageOutcomeUnknownError);
+			expect((messageFailure as Error).cause).toBe(cancellation);
+			const startedAt = Date.now();
+			await connection.close();
+			expect(receivedGoodbye).toBe(true);
+			expect(Date.now() - startedAt).toBeGreaterThanOrEqual(
+				GOODBYE_TIMEOUT_MS - 100,
+			);
+			expect(Date.now() - startedAt).toBeLessThan(
+				GOODBYE_TIMEOUT_MS + CLOSE_TIMEOUT_MS + 1_000,
+			);
+		} finally {
+			for (const socket of sockets.clients) socket.terminate();
+			sockets.close();
+			server.closeAllConnections();
+			await new Promise<void>((resolve) => server.close(() => resolve()));
+		}
+	},
+	5_000,
+);
+
+test(
+	"stalled handshakes time out or abort and terminate their sockets",
+	async () => {
+		const server = createServer();
+		const sockets = new WebSocketServer({ server });
+		let resolveFirstConnected!: () => void;
+		let resolveSecondConnected!: () => void;
+		let resolveFirstClosed!: () => void;
+		let resolveSecondClosed!: () => void;
+		const firstConnected = new Promise<void>((resolve) => {
+			resolveFirstConnected = resolve;
+		});
+		const secondConnected = new Promise<void>((resolve) => {
+			resolveSecondConnected = resolve;
+		});
+		const firstClosed = new Promise<void>((resolve) => {
+			resolveFirstClosed = resolve;
+		});
+		const secondClosed = new Promise<void>((resolve) => {
+			resolveSecondClosed = resolve;
+		});
+		let acceptedSockets = 0;
+		sockets.on("connection", (socket) => {
+			acceptedSockets++;
+			if (acceptedSockets === 1) resolveFirstConnected();
+			else resolveSecondConnected();
+			socket.once("close", () => {
+				if (acceptedSockets === 1) resolveFirstClosed();
+				else resolveSecondClosed();
+			});
+		});
+		await new Promise<void>((resolve, reject) => {
+			server.once("error", reject);
+			server.listen(0, "127.0.0.1", resolve);
+		});
+		try {
+			const address = server.address();
+			if (!address || typeof address === "string")
+				throw new Error("test server did not expose a TCP address");
+			const baseUrl = `http://127.0.0.1:${address.port}`;
+			const timed = A2aConnection.connect({
+				baseUrl,
+				project: "stalled",
+				name: "timeout",
+				handshakeTimeoutMs: 50,
+			});
+			await firstConnected;
+			let timeoutFailure: unknown;
+			try {
+				await timed;
+			} catch (error) {
+				timeoutFailure = error;
+			}
+			expect(timeoutFailure).toBeInstanceOf(DOMException);
+			expect((timeoutFailure as DOMException).name).toBe("TimeoutError");
+			await firstClosed;
+
+			const controller = new AbortController();
+			const aborted = A2aConnection.connect({
+				baseUrl,
+				project: "stalled",
+				name: "aborted",
+				signal: controller.signal,
+			});
+			await secondConnected;
+			const reason = new Error("session shut down");
+			controller.abort(reason);
+			await expect(aborted).rejects.toBe(reason);
+			await secondClosed;
+			expect(sockets.clients.size).toBe(0);
+		} finally {
+			for (const socket of sockets.clients) socket.terminate();
+			sockets.close();
+			server.closeAllConnections();
+			await new Promise<void>((resolve) => server.close(() => resolve()));
+		}
+	},
+	2_000,
+);

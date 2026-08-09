@@ -12,7 +12,7 @@
 | `smoke-hub.ts` | `bun run scripts/smoke-hub.ts` | Two real in-process HTTP/WebSocket Hubs with temporary persistent storage. |
 | `smoke-docker.ts` | `bun run smoke:docker` | Public HTTP and WebSocket interfaces of an already-running selected Hub. |
 
-`bun run smoke` executes `bun test`, `smoke.ts`, then `smoke-hub.ts`. Docker is intentionally separate because it needs an already-running container boundary.
+`bun run smoke` executes `bun test`, `smoke.ts`, then `smoke-hub.ts`; `bun run check` runs TypeScript and Oxlint first. Docker is intentionally separate because it needs an already-running container boundary.
 
 ## `smoke.ts`
 
@@ -43,6 +43,7 @@ Exercise the actual HTTP server, WebSocket protocol, realtime Presence, message 
 
 - Create two temporary Hub data directories.
 - Start two `HubServerHandle` instances on ephemeral ports.
+- Use each handle's process-reachable `listenUrl`; advertised `meta.baseUrl` is not an embedded control address.
 - Track every handle for asynchronous `finally` shutdown.
 - Use `AsyncQueue` to await concrete Presence, message, and delivery events instead of sleeping.
 

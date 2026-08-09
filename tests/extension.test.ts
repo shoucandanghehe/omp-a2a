@@ -1,8 +1,10 @@
 import { expect, test } from "bun:test";
 import {
+	existsSync,
 	mkdirSync,
 	mkdtempSync,
 	readFileSync,
+	readdirSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
@@ -38,6 +40,8 @@ interface RegisteredTool {
 		isError?: boolean;
 	}>;
 }
+
+type SessionHandler = (event: unknown, context: unknown) => Promise<void>;
 
 test("human commands and model tools expose separate A2A surfaces", async () => {
 	const tools: string[] = [];
@@ -104,7 +108,9 @@ test("human commands and model tools expose separate A2A surfaces", async () => 
 	expect(help).not.toContain("/a2a join");
 	if (!commandCompletions)
 		throw new Error("a2a command completions were not registered");
-	expect(commandCompletions("").map((item) => item.label)).toEqual([
+	const rootCompletions = commandCompletions("");
+	if (!rootCompletions) throw new Error("root completions were not returned");
+	expect(rootCompletions.map((item) => item.label)).toEqual([
 		"hub",
 		"project",
 		"connect",
@@ -128,8 +134,13 @@ test("human commands and model tools expose separate A2A surfaces", async () => 
 			description: "Set this Presence name",
 		},
 	]);
+	const historyCompletions = commandCompletions(
+		"history --before billing:42 ",
+	);
+	if (!historyCompletions)
+		throw new Error("history completions were not returned");
 	expect(
-		commandCompletions("history --before billing:42 ").map(
+		historyCompletions.map(
 			(item) => item.value,
 		),
 	).toEqual([
@@ -137,6 +148,73 @@ test("human commands and model tools expose separate A2A surfaces", async () => 
 		"history --before billing:42 --from ",
 	]);
 	expect(commandCompletions("history --limit ")).toBeNull();
+	const invalidHistory = [
+		"history --unknown value",
+		"history --before",
+		"history --before project:1 --after project:2",
+		"history --before invalid",
+		"history --limit 0",
+		"history --limit 1.5",
+		"history --from invalid/name",
+		"history stray",
+	];
+	for (const args of invalidHistory) {
+		await commandHandler(args, {
+			cwd: process.cwd(),
+			ui: {
+				notify(message) {
+					help = message;
+				},
+			},
+		});
+		expect(help).toMatch(/history|invalid|unknown/);
+	}
+});
+
+test("latest session activation contains malformed local config", async () => {
+	const first = mkdtempSync(join(tmpdir(), "omp-a2a-extension-first-"));
+	const second = mkdtempSync(join(tmpdir(), "omp-a2a-extension-second-"));
+	mkdirSync(join(first, ".omp"));
+	mkdirSync(join(second, ".omp"));
+	writeFileSync(join(first, ".omp", "a2a.yml"), "project: [broken\n");
+	writeFileSync(join(second, ".omp", "a2a.yml"), "unknown: value\n");
+	const sessionHandlers: Array<
+		(event: unknown, context: unknown) => Promise<void>
+	> = [];
+	const notifications: string[] = [];
+	try {
+		a2aExtension({
+			arktype(definition: unknown) {
+				return definition;
+			},
+			setLabel() {},
+			on(event: string, handler: (event: unknown, context: unknown) => Promise<void>) {
+				if (event === "session_start" || event === "session_switch")
+					sessionHandlers.push(handler);
+			},
+			logger: { warn() {} },
+			sendMessage() {},
+			registerCommand() {},
+			registerTool() {},
+		} as never);
+		const context = (cwd: string) => ({
+			cwd,
+			ui: {
+				notify(message: string) {
+					notifications.push(`${cwd}:${message}`);
+				},
+			},
+		});
+		const firstActivation = sessionHandlers[0]?.({}, context(first));
+		const secondActivation = sessionHandlers[1]?.({}, context(second));
+		await Promise.all([firstActivation, secondActivation]);
+		expect(notifications).toHaveLength(1);
+		expect(notifications[0]).toContain(second);
+		expect(notifications[0]).toContain("A2A config error:");
+	} finally {
+		rmSync(first, { recursive: true, force: true });
+		rmSync(second, { recursive: true, force: true });
+	}
 });
 
 test("model tool contract makes replies push-driven instead of history-polled", async () => {
@@ -157,6 +235,7 @@ test("model tool contract makes replies push-driven instead of history-polled", 
 		| undefined;
 	let worker: A2aConnection | null = null;
 	const context = { cwd, ui: { notify() {} } };
+	let sessionStartHandler: SessionHandler | undefined;
 
 	try {
 		await client.createProject({ name: project });
@@ -178,6 +257,8 @@ test("model tool contract makes replies push-driven instead of history-polled", 
 			on(event: string, handler: unknown) {
 				if (event === "before_agent_start")
 					beforeAgentStart = handler as typeof beforeAgentStart;
+				if (event === "session_start")
+					sessionStartHandler = handler as SessionHandler;
 			},
 			logger: { warn() {} },
 			sendMessage() {},
@@ -191,6 +272,9 @@ test("model tool contract makes replies push-driven instead of history-polled", 
 				tools.set(tool.name, tool);
 			},
 		} as never);
+		if (!sessionStartHandler)
+			throw new Error("session_start handler was not registered");
+		await sessionStartHandler({}, context);
 
 		if (!commandHandler) throw new Error("a2a command was not registered");
 		await commandHandler(`connect ${project} --as api`, context);
@@ -253,6 +337,8 @@ test("a2a_message snapshots a sender local file into the receiver session and hi
 		  ) => Promise<void>)
 		| undefined;
 	let receiverCommand: typeof senderCommand;
+	let senderSessionStart: SessionHandler | undefined;
+	let receiverSessionStart: SessionHandler | undefined;
 	const inbound = Promise.withResolvers<{
 		content: string;
 		details: unknown;
@@ -309,13 +395,16 @@ test("a2a_message snapshots a sender local file into the receiver session and hi
 					triggerTurn?: boolean;
 				},
 			) => void,
+			setSessionStart: (handler: SessionHandler) => void,
 		) => {
 			a2aExtension({
 				arktype(definition: unknown) {
 					return definition;
 				},
 				setLabel() {},
-				on() {},
+				on(event: string, handler: SessionHandler) {
+					if (event === "session_start") setSessionStart(handler);
+				},
 				logger: { warn() {} },
 				sendMessage,
 				registerCommand(
@@ -335,6 +424,9 @@ test("a2a_message snapshots a sender local file into the receiver session and hi
 				senderCommand = handler;
 			},
 			() => {},
+			(handler) => {
+				senderSessionStart = handler;
+			},
 		);
 		installExtension(
 			receiverTools,
@@ -345,10 +437,20 @@ test("a2a_message snapshots a sender local file into the receiver session and hi
 				inboundDelivery = options;
 				inbound.resolve(message);
 			},
+			(handler) => {
+				receiverSessionStart = handler;
+			},
 		);
 
-		if (!senderCommand || !receiverCommand)
-			throw new Error("a2a command was not registered");
+		if (
+			!senderCommand ||
+			!receiverCommand ||
+			!senderSessionStart ||
+			!receiverSessionStart
+		)
+			throw new Error("A2A extension handlers were not registered");
+		await receiverSessionStart({}, receiverContext);
+		await senderSessionStart({}, senderContext);
 		await receiverCommand(`connect ${project} --as receiver`, receiverContext);
 		await senderCommand(`connect ${project} --as sender`, senderContext);
 		const messageTool = senderTools.get("a2a_message");
@@ -442,13 +544,29 @@ test("session switch cancels an in-flight inbound injection", async () => {
 	const hub = await startHubServer({ port: 0, dataDir });
 	const client = new HubClient(hub.meta.baseUrl);
 	const delivery = Promise.withResolvers<DeliveryEvent>();
-	const receiverError = Promise.withResolvers<void>();
+	const waitForCompletedMaterialization = async (): Promise<void> => {
+		const localRoot = join(receiverArtifacts, "local");
+		for (let attempt = 0; attempt < 100; attempt++) {
+			if (existsSync(localRoot)) {
+				for (const directory of readdirSync(localRoot)) {
+					const file = join(localRoot, directory, "handoff.txt");
+					if (existsSync(file) && readFileSync(file, "utf8") === "old session") {
+						await Bun.sleep(0);
+						return;
+					}
+				}
+			}
+			await Bun.sleep(10);
+		}
+		throw new Error("in-flight attachment materialization did not complete");
+	};
 	const injected: string[] = [];
 	let sender: A2aConnection | undefined;
 	let switchPromise: Promise<void> | undefined;
 	let sessionSwitch:
 		| ((event: unknown, context: typeof switchedContext) => Promise<void>)
 		| undefined;
+	let sessionStart: typeof sessionSwitch;
 	let commandHandler:
 		| ((args: string, context: typeof receiverContext) => Promise<void>)
 		| undefined;
@@ -493,10 +611,12 @@ test("session switch cancels an in-flight inbound injection", async () => {
 			},
 			setLabel() {},
 			on(event: string, handler: unknown) {
+				if (event === "session_start")
+					sessionStart = handler as typeof sessionStart;
 				if (event === "session_switch")
 					sessionSwitch = handler as typeof sessionSwitch;
 			},
-			logger: { warn: () => receiverError.resolve() },
+			logger: { warn() {} },
 			sendMessage(message: { content: string }) {
 				injected.push(message.content);
 			},
@@ -508,7 +628,9 @@ test("session switch cancels an in-flight inbound injection", async () => {
 			},
 			registerTool() {},
 		} as never);
-		if (!commandHandler) throw new Error("a2a command was not registered");
+		if (!commandHandler || !sessionStart)
+			throw new Error("A2A extension handlers were not registered");
+		await sessionStart({}, receiverContext);
 		await commandHandler(
 			"connect session-switch --as receiver",
 			receiverContext,
@@ -531,9 +653,9 @@ test("session switch cancels an in-flight inbound injection", async () => {
 			],
 			messageId: "switch-in-flight",
 		});
-		const outcome = await delivery.promise;
-		if (outcome.status === "disconnected") await receiverError.promise;
+		await delivery.promise;
 		await switchPromise;
+		await waitForCompletedMaterialization();
 
 		expect(injected).toEqual([]);
 	} finally {

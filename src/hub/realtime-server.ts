@@ -1,9 +1,14 @@
+import * as fs from "node:fs";
 import type { IncomingMessage, Server } from "node:http";
 import type { Socket } from "node:net";
 import { WebSocket, WebSocketServer } from "ws";
+import { projectDeletionMarkerPath } from "../paths";
 import { getProject } from "../registry";
 import {
+	type MessageAppendResult,
 	MessageIdConflictError,
+	type MessageRetryResult,
+	MessageValidationError,
 	type MessageStore,
 	UnknownReplyTargetError,
 } from "./messages";
@@ -22,6 +27,7 @@ const HELLO_TIMEOUT_MS = 5_000;
 const MAX_DELIVERY_ERROR_BYTES = 512;
 
 class RecipientNotPresentError extends Error {}
+class RealtimePersistenceError extends Error {}
 
 type PendingDelivery = {
 	messageId: string;
@@ -156,6 +162,23 @@ export class RealtimeHub {
 			);
 			return;
 		}
+		if (value.type === "goodbye") {
+			this.#alive.delete(socket);
+			const presence = this.#presences.remove(socket);
+			if (presence) {
+				this.#failDeliveriesFor(presence);
+				if (!this.#closing) {
+					this.#broadcast(presence.project, presence.presenceId, {
+						type: "presence_left",
+						peer: { name: presence.name, presenceId: presence.presenceId },
+						reason: "connection_closed",
+					});
+				}
+			}
+			this.#send(socket, { type: "goodbye" });
+			socket.close(1000, "client disconnect");
+			return;
+		}
 		if (value.type === "message") {
 			this.#handleMessage(
 				claimed,
@@ -202,6 +225,11 @@ export class RealtimeHub {
 			}
 			if (typeof frame.project !== "string" || typeof frame.name !== "string") {
 				throw new Error("project and name are required");
+			}
+			if (
+				fs.existsSync(projectDeletionMarkerPath(frame.project, this.#dataDir))
+			) {
+				throw new Error(`project deletion pending: ${frame.project}`);
 			}
 			if (!getProject(frame.project, this.#dataDir))
 				throw new Error(`unknown project: ${frame.project}`);
@@ -257,9 +285,54 @@ export class RealtimeHub {
 			}
 			if (frame.target.type !== "agent" && frame.target.type !== "project")
 				throw new Error("invalid message target");
-			if (frame.replyTo !== undefined && typeof frame.replyTo !== "string")
+			if (
+				frame.replyTo !== undefined &&
+				(typeof frame.replyTo !== "string" ||
+					frame.replyTo.trim().length === 0)
+			) {
 				throw new Error("invalid replyTo");
-			// MessageStore owns content validation and persistence atomically.
+			}
+			const retryTarget: MessageTarget =
+				frame.target.type === "agent"
+					? {
+							type: "agent",
+							name:
+								typeof frame.target.name === "string"
+									? frame.target.name
+									: "",
+						}
+					: { type: "project" };
+			let retry: MessageRetryResult | null;
+			try {
+				retry = this.#messages.findRetry({
+					messageId: frame.messageId,
+					project: presence.project,
+					from: { name: presence.name, presenceId: presence.presenceId },
+					target: retryTarget,
+					payload: frame.payload,
+					attachments: frame.attachments,
+					replyTo: frame.replyTo,
+				});
+			} catch (error) {
+				if (
+					error instanceof MessageIdConflictError ||
+					error instanceof MessageValidationError ||
+					error instanceof UnknownReplyTargetError ||
+					error instanceof PayloadTooLargeError
+				) {
+					throw error;
+				}
+				throw new RealtimePersistenceError();
+			}
+			if (retry) {
+				this.#send(presence.socket, {
+					type: "accepted",
+					requestId,
+					message: retry.message,
+					recipients: retry.recipients.map((recipient) => recipient.name),
+				});
+				return;
+			}
 			let target: MessageTarget;
 			let recipients: Presence[];
 			if (frame.target.type === "agent") {
@@ -287,16 +360,33 @@ export class RealtimeHub {
 					.connections(presence.project)
 					.filter((recipient) => recipient.presenceId !== presence.presenceId);
 			}
-			const appended = this.#messages.append({
-				messageId: frame.messageId,
-				project: presence.project,
-				from: { name: presence.name, presenceId: presence.presenceId },
-				target,
-				payload: frame.payload,
-				attachments: frame.attachments,
-				createdAt: Date.now(),
-				replyTo: frame.replyTo,
-			});
+			let appended: MessageAppendResult;
+			try {
+				appended = this.#messages.append({
+					messageId: frame.messageId,
+					project: presence.project,
+					from: { name: presence.name, presenceId: presence.presenceId },
+					target,
+					payload: frame.payload,
+					attachments: frame.attachments,
+					createdAt: Date.now(),
+					replyTo: frame.replyTo,
+					recipients: recipients.map((recipient) => ({
+						name: recipient.name,
+						presenceId: recipient.presenceId,
+					})),
+				});
+			} catch (error) {
+				if (
+					error instanceof MessageIdConflictError ||
+					error instanceof MessageValidationError ||
+					error instanceof UnknownReplyTargetError ||
+					error instanceof PayloadTooLargeError
+				) {
+					throw error;
+				}
+				throw new RealtimePersistenceError();
+			}
 			if (appended.inserted) {
 				for (const recipient of recipients) {
 					this.#pendingDeliveries.set(
@@ -318,7 +408,7 @@ export class RealtimeHub {
 				type: "accepted",
 				requestId,
 				message: appended.message,
-				recipients: recipients.map((recipient) => recipient.name),
+				recipients: appended.recipients.map((recipient) => recipient.name),
 			});
 		} catch (error) {
 			const code =
@@ -330,12 +420,19 @@ export class RealtimeHub {
 							? "unknown_reply"
 							: error instanceof PayloadTooLargeError
 								? "payload_too_large"
-								: "message_rejected";
+								: error instanceof RealtimePersistenceError
+									? "internal_error"
+									: "message_rejected";
 			this.#send(presence.socket, {
 				type: "error",
 				requestId,
 				code,
-				message: error instanceof Error ? error.message : String(error),
+				message:
+					error instanceof RealtimePersistenceError
+						? "message persistence failed"
+						: error instanceof Error
+							? error.message
+							: String(error),
 			});
 		}
 	}
@@ -375,6 +472,10 @@ export class RealtimeHub {
 
 	#failDeliveriesFor(presence: Presence): void {
 		for (const [key, pending] of this.#pendingDeliveries) {
+			if (pending.senderPresenceId === presence.presenceId) {
+				this.#pendingDeliveries.delete(key);
+				continue;
+			}
 			if (pending.recipientPresenceId !== presence.presenceId) continue;
 			this.#pendingDeliveries.delete(key);
 			const sender = this.#presences

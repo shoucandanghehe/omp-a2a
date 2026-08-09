@@ -3,6 +3,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HubClient } from "../src/hub/client";
+import type {
+	A2aConnection,
+	A2aConnectionEvents,
+} from "../src/hub/connection";
 import type { DeliveryEvent } from "../src/hub/realtime-types";
 import { type HubServerHandle, startHubServer } from "../src/hub/server";
 import { A2aRuntime, type MessageView } from "../src/operations";
@@ -21,7 +25,7 @@ test("one runtime path serves discovery, messaging, delivery, and history", asyn
 	roots.push(dataDir);
 	const hub = await startHubServer({ port: 0, dataDir });
 	hubs.push(hub);
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "runtime" });
 
 	let resolveMessage!: (message: MessageView) => void;
@@ -208,4 +212,254 @@ test("receiver injection failure produces a terminal failed delivery", async () 
 
 	await web.disconnect();
 	await api.disconnect();
+});
+
+test("connection stays bound to its HubClient and failed switches preserve it", async () => {
+	const calls: string[] = [];
+	const makeClient = (baseUrl: string) =>
+		({
+			baseUrl,
+			async meta() {
+				calls.push(`meta:${baseUrl}`);
+				return { baseUrl };
+			},
+			async history() {
+				calls.push(`history:${baseUrl}`);
+				return { messages: [] };
+			},
+		}) as unknown as HubClient;
+	const firstClient = makeClient("http://first");
+	const secondClient = makeClient("http://second");
+	let selected = firstClient;
+	const closed: string[] = [];
+	const connect = async (options: {
+		baseUrl: string;
+		project: string;
+		name: string;
+		events?: A2aConnectionEvents;
+	}) => {
+		if (options.name === "failure") throw new Error("candidate failed");
+		return {
+			project: options.project,
+			name: options.name,
+			self: { presenceId: `${options.baseUrl}:presence`, name: options.name },
+			peers: () => [],
+			close: async () => {
+				closed.push(options.baseUrl);
+				options.events?.onClose?.({
+					manual: true,
+					code: 1000,
+					reason: "closed",
+				});
+			},
+		} as unknown as A2aConnection;
+	};
+	const runtime = new A2aRuntime({
+		getClient: async () => selected,
+		connect,
+	});
+
+	await runtime.connect("project", "agent");
+	selected = secondClient;
+	await expect(runtime.connect("project", "failure")).rejects.toThrow(
+		"candidate failed",
+	);
+	expect(runtime.connected).toBe(true);
+	expect((await runtime.status()).hub.baseUrl).toBe("http://first");
+	await runtime.history();
+	expect(calls).toContain("history:http://first");
+
+	await runtime.connect("project", "agent");
+	expect(closed).toContain("http://first");
+	expect((await runtime.status()).hub.baseUrl).toBe("http://second");
+	await runtime.history();
+	expect(calls).toContain("history:http://second");
+});
+
+test("latest concurrent transition wins and suppresses stale candidate events", async () => {
+	const client = { baseUrl: "http://hub" } as HubClient;
+	const candidates: Array<{
+		options: {
+			baseUrl: string;
+			project: string;
+			name: string;
+			events?: A2aConnectionEvents;
+		};
+		resolve(connection: A2aConnection): void;
+	}> = [];
+	const closes: string[] = [];
+	const events: string[] = [];
+	const makeConnection = (
+		name: string,
+		options: { events?: A2aConnectionEvents },
+	) =>
+		({
+			project: "project",
+			name,
+			self: { presenceId: `${name}:presence`, name },
+			peers: () => [],
+			close: async () => {
+				closes.push(name);
+				options.events?.onClose?.({
+					manual: true,
+					code: 1000,
+					reason: "closed",
+				});
+			},
+		}) as unknown as A2aConnection;
+	const runtime = new A2aRuntime({
+		getClient: async () => client,
+		events: { onPresenceJoined: (peer) => events.push(peer.name) },
+		connect: async (options) =>
+			await new Promise<A2aConnection>((resolve) => {
+				candidates.push({ options, resolve });
+			}),
+	});
+
+	const stale = runtime.connect("project", "stale");
+	await Promise.resolve();
+	const latest = runtime.connect("project", "latest");
+	await Promise.resolve();
+	const latestCandidate = candidates.find(
+		(candidate) => candidate.options.name === "latest",
+	);
+	if (!latestCandidate) throw new Error("latest candidate was not created");
+	latestCandidate.resolve(makeConnection("latest", latestCandidate.options));
+	await latest;
+	const staleCandidate = candidates.find(
+		(candidate) => candidate.options.name === "stale",
+	);
+	if (!staleCandidate) throw new Error("stale candidate was not created");
+	staleCandidate.options.events?.onPresenceJoined?.({
+		presenceId: "peer:presence",
+		name: "stale-peer",
+	});
+	staleCandidate.resolve(makeConnection("stale", staleCandidate.options));
+	await expect(stale).rejects.toThrow("superseded");
+	expect(runtime.name).toBe("latest");
+	expect(events).toEqual([]);
+	expect(closes).toContain("stale");
+
+	const disconnectRace = runtime.connect("project", "disconnect-race");
+	await Promise.resolve();
+	const disconnect = runtime.disconnect();
+	const raceCandidate = candidates.find(
+		(candidate) => candidate.options.name === "disconnect-race",
+	);
+	if (!raceCandidate) throw new Error("disconnect candidate was not created");
+	raceCandidate.resolve(
+		makeConnection("disconnect-race", raceCandidate.options),
+	);
+	await disconnect;
+	await expect(disconnectRace).rejects.toThrow("superseded");
+	expect(runtime.connected).toBe(false);
+	expect(closes).toContain("disconnect-race");
+});
+
+test("a published candidate that closes during predecessor cleanup cannot report success", async () => {
+	const client = { baseUrl: "http://hub" } as HubClient;
+	let releasePreviousClose!: () => void;
+	let markPreviousCloseStarted!: () => void;
+	const previousCloseStarted = new Promise<void>((resolve) => {
+		markPreviousCloseStarted = resolve;
+	});
+	const previousClose = new Promise<void>((resolve) => {
+		releasePreviousClose = resolve;
+	});
+	let latestEvents: A2aConnectionEvents | undefined;
+	const runtime = new A2aRuntime({
+		getClient: async () => client,
+		connect: async (options) => {
+			const connection = {
+				project: options.project,
+				name: options.name,
+				self: {
+					presenceId: `${options.name}:presence`,
+					name: options.name,
+				},
+				peers: () => [],
+				close: async () => {
+					if (options.name === "previous") {
+						markPreviousCloseStarted();
+						await previousClose;
+					}
+				},
+			} as unknown as A2aConnection;
+			if (options.name === "latest") latestEvents = options.events;
+			return connection;
+		},
+	});
+
+	await runtime.connect("project", "previous");
+	const switching = runtime.connect("project", "latest");
+	await previousCloseStarted;
+	latestEvents?.onClose?.({
+		manual: false,
+		code: 1006,
+		reason: "candidate lost",
+	});
+	releasePreviousClose();
+	await expect(switching).rejects.toThrow("candidate lost");
+	expect(runtime.connected).toBe(false);
+});
+
+test("disconnect aborts an in-flight connection handshake", async () => {
+	const client = { baseUrl: "http://hub" } as HubClient;
+	let resolveStarted!: () => void;
+	const started = new Promise<void>((resolve) => {
+		resolveStarted = resolve;
+	});
+	let handshakeSignal: AbortSignal | undefined;
+	const runtime = new A2aRuntime({
+		getClient: async () => client,
+		connect: async (options) =>
+			await new Promise<A2aConnection>((_resolve, reject) => {
+				handshakeSignal = options.signal;
+				if (!options.signal)
+					throw new Error("runtime did not provide a handshake signal");
+				options.signal.addEventListener(
+					"abort",
+					() => reject(options.signal?.reason),
+					{ once: true },
+				);
+				resolveStarted();
+			}),
+	});
+
+	const connecting = runtime.connect("project", "stalled");
+	await started;
+	expect(await runtime.disconnect()).toBe(false);
+	await expect(connecting).rejects.toThrow("superseded");
+	expect(handshakeSignal?.aborted).toBe(true);
+	expect(runtime.connected).toBe(false);
+});
+
+test("history forwards caller cancellation to the bound HubClient", async () => {
+	const controller = new AbortController();
+	let receivedSignal: AbortSignal | undefined;
+	const client = {
+		baseUrl: "http://hub",
+		async history(_query: unknown, options: { signal?: AbortSignal }) {
+			receivedSignal = options.signal;
+			throw options.signal?.reason;
+		},
+	} as unknown as HubClient;
+	const runtime = new A2aRuntime({
+		getClient: async () => client,
+		connect: async (options) =>
+			({
+				project: options.project,
+				name: options.name,
+				self: { presenceId: "presence", name: options.name },
+				peers: () => [],
+				close: async () => {},
+			}) as unknown as A2aConnection,
+	});
+	await runtime.connect("project", "agent");
+	const reason = new Error("cancelled by model");
+	controller.abort(reason);
+	await expect(runtime.history({}, { signal: controller.signal })).rejects.toBe(
+		reason,
+	);
+	expect(receivedSignal).toBe(controller.signal);
 });

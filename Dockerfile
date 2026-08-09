@@ -1,5 +1,5 @@
 # Standalone omp-a2a hub (no omp runtime inside).
-FROM oven/bun:1.2-alpine
+FROM oven/bun:1.3.14-alpine
 
 WORKDIR /app
 

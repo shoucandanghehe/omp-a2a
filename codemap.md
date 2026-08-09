@@ -40,7 +40,7 @@ OMP session
 
 ### Control and history plane
 
-`HubClient` uses HTTP for Hub metadata, Project create/list/delete, and explicit history queries. Project metadata lives under `<dataDir>/projects/<name>/project.json`. Deletion is rejected while a Project has an active Presence, then removes Project metadata and its message history.
+`HubClient` uses bounded, cancellable HTTP for Hub metadata, Project create/list/delete, and explicit history queries. Project metadata lives under `<dataDir>/projects/<name>/project.json`. Deletion rejects active Presence, durably records intent, removes both metadata and history, then removes the intent; startup reconciles interrupted intent before listening.
 
 ### Realtime plane
 
@@ -48,10 +48,10 @@ OMP session
 2. `RealtimeHub` verifies the Project and atomically claims the name in `PresenceRegistry`.
 3. The client receives its `presenceId` and the current peer snapshot; current peers receive `presence_joined`.
 4. A message request resolves either one current Presence or the current Project Presence snapshot.
-5. `MessageStore` atomically appends one immutable Message—including encoded attachment content—and assigns the next Project sequence.
+5. `MessageStore` atomically appends one immutable Message—including encoded attachment content and the original recipient Presence snapshot—and assigns the next Project sequence.
 6. The Hub pushes the Message to selected sockets. Each receiver materializes attachments, injects the Message into OMP, then reports `delivered` or `failed`.
 7. The sender receives one in-memory `delivered`, `failed`, or `disconnected` outcome per selected Presence.
-8. Socket close or heartbeat timeout deletes the Presence and broadcasts `presence_left`.
+8. Graceful `goodbye`, socket close, or heartbeat timeout deletes the Presence and broadcasts `presence_left`; graceful close has bounded client fallbacks.
 
 A same-named later connection is a new Presence and never inherits pending delivery. History is never replayed automatically.
 
@@ -60,14 +60,14 @@ A same-named later connection is a new Presence and never inherits pending deliv
 - Message references are `<project>:<sequence>` and sequence is monotonic per Project.
 - `messageId` is the persistent idempotency key; conflicting reuse fails.
 - `replyTo` must resolve inside the same Project.
-- Direct messages are bound to the resolved `presenceId`; Project broadcasts freeze their recipient snapshot at acceptance.
-- History is append-only until Project deletion. Presence and delivery events are not persisted.
+- Direct messages are bound to the resolved `presenceId`; Project broadcasts durably freeze their recipient snapshot at acceptance. Canonical retries return that snapshot without redelivery.
+- History is append-only until recoverable Project deletion. Pages have row, decoded-content, and serialized-response limits. Presence and delivery events are not persisted.
 - Attachments are ordered immutable values inside a Message. Their names and bytes participate in `messageId` idempotency; they share the Message lifecycle.
-- Legacy `inbox.sqlite` message-ledger rows migrate once into `messages.sqlite`; old membership, cursor, ACK, receipt, and offline-delivery semantics do not migrate.
+- Legacy `inbox.sqlite` message-ledger rows migrate once through bounded-memory ordered streaming passes; old membership, cursor, ACK, receipt, and offline-delivery semantics do not migrate.
 
 ### Payload contract
 
-Text smaller than 32 KiB remains identity encoded. Larger text uses gzip plus Base64. Attachment bytes use Base64 and use gzip when smaller. Encoding and decoding enforce a 4 MiB total decoded-content limit across text and at most eight attachments, including bounded decompression.
+Text smaller than 32 KiB remains identity encoded. Larger text uses canonical gzip plus Base64. Attachment bytes use Base64 and use gzip when smaller. Encoding and decoding enforce a 4 MiB total decoded-content limit across text and at most eight attachments, an encoded bound with 64 KiB reserved inside the 6 MiB frame/history envelope, exact size metadata, and bounded decompression.
 
 ## Configuration and deployment
 
@@ -126,16 +126,17 @@ The sender Extension snapshots attachment bytes before sending. Receivers and hi
 
 ## Verification
 
-The local release gate runs Biome, `bun run smoke`, both Bun entry-point builds, and `docker compose config`. It covers Project isolation and deletion, WebSocket Presence and name conflicts, Presence notifications, direct and broadcast routing, successful/failed/disconnected Delivery outcomes, attachment snapshot/materialization/history, persistent history and protocol version `2`/legacy migration, payload limits, Hub restart, extension registration, and command completion.
+`bun run check` runs strict TypeScript no-emit validation, Oxlint, all Bun tests, the Project Registry smoke, and the live in-process Hub smoke. Runtime coverage includes Project isolation and recoverable deletion, configuration/session transitions, bounded and cancellable WebSocket handshakes, bounded HTTP, WebSocket Presence and graceful close, notifications, direct and broadcast routing, canonical retries, successful/failed/disconnected Delivery outcomes, attachment snapshot/materialization/history, bounded persistent history and protocol version `2`/legacy migration, payload limits, startup unwind, Hub restart, extension registration, and command completion.
 
-`bun run smoke:docker` crosses the public HTTP/WebSocket process boundary of the selected running Hub, verifies persisted history, and removes its temporary Project.
+`bun run smoke` runs the runtime portion without static checks. `bun run smoke:docker` exercises the public HTTP and WebSocket surfaces of a selected running Hub and removes its temporary Project.
 
-The implemented realtime model is documented in [`docs/realtime-presence-architecture.md`](docs/realtime-presence-architecture.md). The dated review in `docs/code-review-2026-07-19.md` is archival and does not define the current contract.
+A real Docker image/network smoke remains an explicit release boundary because it owns an external container lifecycle.
+
+The implemented realtime model is documented in [`docs/realtime-presence-architecture.md`](docs/realtime-presence-architecture.md). The dated findings in `docs/code-review-2026-07-19.md` are archival; its 2026-08-09 revalidation records the current remediation, while this atlas and the realtime architecture define the current contract.
 
 ## Operational boundaries
 
 - No authentication, authorization, tenant isolation, or confidentiality guarantee exists.
-- Established WebSockets do not move when `hubUrl` changes; disconnect and reconnect.
-- Project metadata deletion and SQLite history deletion are separate operations rather than one transaction.
-- Ordinary HTTP Project/history calls have no default deadline.
+- Established WebSockets and their connected history/status remain on the accepting Hub until explicit reconnect.
+- Cancellation after a message frame is dispatched reports an unknown acceptance/delivery outcome.
 - The default Compose port publication binds all host interfaces unless the operator narrows it.

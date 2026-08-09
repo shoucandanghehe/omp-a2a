@@ -37,8 +37,8 @@ async function main() {
 	const first = await startHubServer({ dataDir: firstDataDir, port: 0 });
 	const second = await startHubServer({ dataDir: secondDataDir, port: 0 });
 	handles.push(first, second);
-	const client = new HubClient(first.meta.baseUrl);
-	const otherClient = new HubClient(second.meta.baseUrl);
+	const client = new HubClient(first.listenUrl);
+	const otherClient = new HubClient(second.listenUrl);
 	await client.createProject({ name: "mesh-demo" });
 	assert(
 		(await otherClient.listProjects()).length === 0,
@@ -51,7 +51,7 @@ async function main() {
 	const webMessages = new AsyncQueue<RealtimeMessage>();
 	const testMessages = new AsyncQueue<RealtimeMessage>();
 	const api = await A2aConnection.connect({
-		baseUrl: first.meta.baseUrl,
+		baseUrl: first.listenUrl,
 		project: "mesh-demo",
 		name: "api",
 		events: {
@@ -60,14 +60,14 @@ async function main() {
 		},
 	});
 	const web = await A2aConnection.connect({
-		baseUrl: first.meta.baseUrl,
+		baseUrl: first.listenUrl,
 		project: "mesh-demo",
 		name: "web",
 		events: { onMessage: (message) => webMessages.push(message) },
 	});
 	assert((await joined.next()) === "web", "web join is announced");
 	const test = await A2aConnection.connect({
-		baseUrl: first.meta.baseUrl,
+		baseUrl: first.listenUrl,
 		project: "mesh-demo",
 		name: "test",
 		events: { onMessage: (message) => testMessages.push(message) },
@@ -129,14 +129,14 @@ async function main() {
 	await first.stop();
 	const restarted = await startHubServer({ dataDir: firstDataDir, port: 0 });
 	handles.push(restarted);
-	const restartedClient = new HubClient(restarted.meta.baseUrl);
+	const restartedClient = new HubClient(restarted.listenUrl);
 	const history = await restartedClient.history({
 		project: "mesh-demo",
 		limit: 10,
 	});
 	assert(history.messages.length === 2, "history survives Hub restart");
 	const replacement = await A2aConnection.connect({
-		baseUrl: restarted.meta.baseUrl,
+		baseUrl: restarted.listenUrl,
 		project: "mesh-demo",
 		name: "web",
 	});

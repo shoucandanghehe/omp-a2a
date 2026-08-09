@@ -1,4 +1,5 @@
 import type { ExtensionAPI, ExtensionContext } from "@oh-my-pi/pi-coding-agent";
+import type * as OmpType from "@oh-my-pi/omptype";
 import { loadLocalConfig } from "./config";
 import { HubClient, resolveHubUrl } from "./hub/client";
 import type { MessageRequestTarget } from "./hub/realtime-types";
@@ -8,7 +9,7 @@ import {
 	snapshotLocalAttachments,
 } from "./local-attachments";
 import { A2aRuntime, type MessageView } from "./operations";
-import { AGENT_NAME_RE, PROJECT_NAME_RE } from "./types";
+import { AGENT_NAME_RE, PROJECT_NAME_RE, type A2aLocalConfig } from "./types";
 
 const ASYNC_REPLY_GUIDANCE =
 	"Replies arrive automatically. After sending, continue independent work; if blocked, end the current turn. Never wait, sleep, or poll a2a_history for a reply.";
@@ -42,6 +43,59 @@ function parseArgs(raw: string): {
 		}
 	}
 	return { positional, flags };
+}
+
+function parseHistoryQuery(
+	positional: string[],
+	flags: Record<string, string | boolean>,
+): {
+	before?: string;
+	after?: string;
+	limit?: number;
+	from?: string;
+} {
+	if (positional.length !== 1) {
+		throw new Error(
+			"usage: /a2a history [--before <ref> | --after <ref>] [--limit <n>] [--from <name>]",
+		);
+	}
+	const allowed: Record<string, true> = {
+		before: true,
+		after: true,
+		limit: true,
+		from: true,
+	};
+	for (const [name, value] of Object.entries(flags)) {
+		if (!allowed[name]) throw new Error(`unknown history flag: --${name}`);
+		if (typeof value !== "string" || value.length === 0)
+			throw new Error(`history flag --${name} requires a value`);
+	}
+	if (flags.before !== undefined && flags.after !== undefined)
+		throw new Error("history accepts --before or --after, not both");
+	const before = typeof flags.before === "string" ? flags.before : undefined;
+	const after = typeof flags.after === "string" ? flags.after : undefined;
+	for (const reference of [before, after]) {
+		if (!reference) continue;
+		const separator = reference.lastIndexOf(":");
+		if (
+			separator <= 0 ||
+			!PROJECT_NAME_RE.test(reference.slice(0, separator)) ||
+			!/^[1-9]\d*$/.test(reference.slice(separator + 1)) ||
+			!Number.isSafeInteger(Number(reference.slice(separator + 1)))
+		)
+			throw new Error(`invalid message reference: ${reference}`);
+	}
+	const from = typeof flags.from === "string" ? flags.from : undefined;
+	if (from !== undefined && !AGENT_NAME_RE.test(from))
+		throw new Error(`invalid name: ${from}`);
+	const limit =
+		typeof flags.limit === "string" ? Number(flags.limit) : undefined;
+	if (
+		limit !== undefined &&
+		(!Number.isSafeInteger(limit) || limit < 1 || limit > 500)
+	)
+		throw new Error("history limit must be an integer between 1 and 500");
+	return { before, after, from, limit };
 }
 
 interface CompletionOption {
@@ -229,7 +283,21 @@ function formatMessages(messages: MaterializedMessageView[]): string {
 }
 
 export default function a2aExtension(pi: ExtensionAPI) {
-	const type = pi.arktype;
+	const type = pi.arktype as unknown as typeof OmpType.type;
+	const peersParameters = type({});
+	const messageParameters = type({
+		target: [{ type: "'agent'", name: "string" }, "|", { type: "'project'" }],
+		text: "string",
+		"attachments?": "string[]",
+		"replyTo?": "string",
+		"messageId?": "string",
+	});
+	const historyParameters = type({
+		"before?": "string",
+		"after?": "string",
+		"limit?": "number",
+		"from?": "string",
+	});
 	pi.setLabel("A2A Realtime Chat");
 
 	let client: HubClient | null = null;
@@ -238,37 +306,58 @@ export default function a2aExtension(pi: ExtensionAPI) {
 	let desiredConnection: { project: string; name: string } | null = null;
 	let reconnectTimer: NodeJS.Timeout | undefined;
 	let reconnectDelayMs = 500;
+	let sessionGeneration = 0;
+	let desiredRevision = 0;
+	let eventGeneration = 0;
 
-	const refreshHubUrl = (cwd: string) => {
-		configuredHubUrl = loadLocalConfig(cwd)?.hubUrl;
-	};
-	const ensureClient = async (): Promise<HubClient> => {
+	const ensureClient = async (signal?: AbortSignal): Promise<HubClient> => {
+		if (signal?.aborted)
+			throw signal.reason ?? new Error("A2A operation aborted");
 		const target = resolveHubUrl({ hubUrl: configuredHubUrl });
 		if (client?.baseUrl !== target) client = null;
-		client ??= await HubClient.connect({ hubUrl: configuredHubUrl });
+		client ??= await HubClient.connect({ hubUrl: configuredHubUrl, signal });
+		if (signal?.aborted)
+			throw signal.reason ?? new Error("A2A operation aborted");
 		return client;
 	};
+
+	const eventIsCurrent = (): boolean =>
+		eventGeneration === sessionGeneration && activeContext !== null;
 
 	const runtime = new A2aRuntime({
 		getClient: ensureClient,
 		events: {
-			onPresenceJoined: (peer) =>
-				activeContext?.ui.notify(`[a2a] ${peer.name} joined`, "info"),
-			onPresenceLeft: (peer) =>
-				activeContext?.ui.notify(`[a2a] ${peer.name} left`, "info"),
-			onDelivery: (delivery) =>
-				activeContext?.ui.notify(
-					`[a2a] ${delivery.to} ${delivery.status}${delivery.status === "failed" ? `: ${delivery.error}` : ""}`,
-					delivery.status === "failed" ? "error" : "info",
-				),
-			onError: (error) =>
-				pi.logger?.warn?.(`a2a realtime error: ${error.message}`),
+			onPresenceJoined: (peer) => {
+				if (eventIsCurrent())
+					activeContext?.ui.notify(`[a2a] ${peer.name} joined`, "info");
+			},
+			onPresenceLeft: (peer) => {
+				if (eventIsCurrent())
+					activeContext?.ui.notify(`[a2a] ${peer.name} left`, "info");
+			},
+			onDelivery: (delivery) => {
+				if (eventIsCurrent())
+					activeContext?.ui.notify(
+						`[a2a] ${delivery.to} ${delivery.status}${delivery.status === "failed" ? `: ${delivery.error}` : ""}`,
+						delivery.status === "failed" ? "error" : "info",
+					);
+			},
+			onError: (error) => {
+				if (eventIsCurrent())
+					pi.logger?.warn?.(`a2a realtime error: ${error.message}`);
+			},
 			onMessage: async (message) => {
+				if (!eventIsCurrent()) return;
+				const generation = eventGeneration;
 				const context = activeContext;
 				if (!context)
 					throw new Error("A2A inbound message has no active session");
 				const materialized = await materializeMessage(message, context);
-				if (activeContext !== context)
+				if (
+					generation !== eventGeneration ||
+					!eventIsCurrent() ||
+					activeContext !== context
+				)
 					throw new Error("A2A inbound message cancelled after session change");
 				const attachments = formatAttachments(materialized.attachments);
 				pi.sendMessage(
@@ -285,60 +374,110 @@ export default function a2aExtension(pi: ExtensionAPI) {
 				);
 			},
 			onClose: ({ manual }) => {
-				if (manual || !desiredConnection) return;
+				if (manual || !eventIsCurrent() || !desiredConnection) return;
+				const generation = sessionGeneration;
+				const revision = desiredRevision;
 				activeContext?.ui.notify(
 					"[a2a] connection lost; reconnecting",
 					"warning",
 				);
-				scheduleReconnect();
+				scheduleReconnect(generation, revision);
 			},
 		},
 	});
 
-	const connectDesired = async (): Promise<void> => {
-		if (!desiredConnection) return;
+	const connectDesired = async (
+		generation: number,
+		revision: number,
+	): Promise<void> => {
+		const desired = desiredConnection;
+		if (
+			!desired ||
+			generation !== sessionGeneration ||
+			revision !== desiredRevision
+		)
+			return;
+		eventGeneration = generation;
 		try {
-			await runtime.connect(desiredConnection.project, desiredConnection.name);
+			await runtime.connect(desired.project, desired.name);
+			if (
+				generation !== sessionGeneration ||
+				revision !== desiredRevision ||
+				desiredConnection !== desired
+			)
+				return;
 			reconnectDelayMs = 500;
 			activeContext?.ui.notify(
-				`Connected to ${desiredConnection.project} as ${desiredConnection.name}`,
+				`Connected to ${desired.project} as ${desired.name}`,
 				"info",
 			);
 		} catch (error) {
+			if (
+				generation !== sessionGeneration ||
+				revision !== desiredRevision ||
+				desiredConnection !== desired
+			)
+				return;
 			const message = error instanceof Error ? error.message : String(error);
 			if (message.includes("name_in_use")) {
 				desiredConnection = null;
+				desiredRevision++;
 				activeContext?.ui.notify(message, "error");
 				return;
 			}
 			activeContext?.ui.notify(`A2A connect failed: ${message}`, "warning");
-			scheduleReconnect();
+			scheduleReconnect(generation, revision);
 		}
 	};
 
-	function scheduleReconnect(): void {
-		if (reconnectTimer || !desiredConnection) return;
+	function scheduleReconnect(generation: number, revision: number): void {
+		if (
+			reconnectTimer ||
+			!desiredConnection ||
+			generation !== sessionGeneration ||
+			revision !== desiredRevision
+		)
+			return;
 		reconnectTimer = setTimeout(() => {
 			reconnectTimer = undefined;
-			void connectDesired();
+			if (
+				generation === sessionGeneration &&
+				revision === desiredRevision &&
+				desiredConnection
+			)
+				void connectDesired(generation, revision);
 		}, reconnectDelayMs);
 		reconnectDelayMs = Math.min(reconnectDelayMs * 2, 10_000);
 	}
 
 	const activateSession = async (context: ExtensionContext) => {
+		const generation = ++sessionGeneration;
+		const revision = ++desiredRevision;
 		activeContext = null;
+		desiredConnection = null;
 		if (reconnectTimer) {
 			clearTimeout(reconnectTimer);
 			reconnectTimer = undefined;
 		}
 		await runtime.disconnect();
+		if (generation !== sessionGeneration || revision !== desiredRevision) return;
 		activeContext = context;
-		refreshHubUrl(context.cwd);
-		desiredConnection = null;
-		const config = loadLocalConfig(context.cwd);
+		configuredHubUrl = undefined;
+		client = null;
+		let config: A2aLocalConfig | null;
+		try {
+			config = loadLocalConfig(context.cwd);
+			configuredHubUrl = config?.hubUrl;
+		} catch (error) {
+			if (generation === sessionGeneration && revision === desiredRevision) {
+				const message = error instanceof Error ? error.message : String(error);
+				context.ui.notify(`A2A config error: ${message}`, "error");
+			}
+			return;
+		}
 		if (!config || config.autoConnect === false) return;
 		desiredConnection = { project: config.project, name: config.name };
-		await connectDesired();
+		await connectDesired(generation, revision);
 	};
 
 	pi.on("before_agent_start", () => {
@@ -360,8 +499,11 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		async (_event, context) => await activateSession(context),
 	);
 	pi.on("session_shutdown", async () => {
-		activeContext = null;
+		sessionGeneration++;
+		desiredRevision++;
+		eventGeneration = -1;
 		desiredConnection = null;
+		activeContext = null;
 		clearTimeout(reconnectTimer);
 		reconnectTimer = undefined;
 		await runtime.disconnect();
@@ -372,7 +514,6 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		getArgumentCompletions: completeA2aArguments,
 		handler: async (raw, context) => {
 			activeContext = context;
-			refreshHubUrl(context.cwd);
 			const { positional, flags } = parseArgs(raw);
 			const command = positional[0] ?? "help";
 			try {
@@ -440,20 +581,28 @@ export default function a2aExtension(pi: ExtensionAPI) {
 					) {
 						throw new Error("usage: /a2a connect <project> --as <name>");
 					}
+					const revision = ++desiredRevision;
+					clearTimeout(reconnectTimer);
+					reconnectTimer = undefined;
 					desiredConnection = { project, name };
-					await connectDesired();
+					await connectDesired(sessionGeneration, revision);
 					return;
 				}
 				if (command === "disconnect") {
+					const generation = sessionGeneration;
+					const revision = ++desiredRevision;
 					desiredConnection = null;
 					clearTimeout(reconnectTimer);
 					reconnectTimer = undefined;
-					context.ui.notify(
-						(await runtime.disconnect())
-							? "Disconnected"
-							: "A2A is not connected",
-						"info",
-					);
+					const disconnected = await runtime.disconnect();
+					if (
+						generation === sessionGeneration &&
+						revision === desiredRevision
+					)
+						context.ui.notify(
+							disconnected ? "Disconnected" : "A2A is not connected",
+							"info",
+						);
 					return;
 				}
 				if (command === "status") {
@@ -477,14 +626,8 @@ export default function a2aExtension(pi: ExtensionAPI) {
 					return;
 				}
 				if (command === "history") {
-					const limit =
-						flags.limit === undefined ? undefined : Number(flags.limit);
-					const messages = await runtime.history({
-						before: typeof flags.before === "string" ? flags.before : undefined,
-						after: typeof flags.after === "string" ? flags.after : undefined,
-						from: typeof flags.from === "string" ? flags.from : undefined,
-						limit,
-					});
+					const query = parseHistoryQuery(positional, flags);
+					const messages = await runtime.history(query);
 					context.ui.notify(
 						formatMessages(
 							await Promise.all(
@@ -505,12 +648,15 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerTool({
+	pi.registerTool<
+		typeof peersParameters,
+		{ peers: ReturnType<A2aRuntime["peers"]> } | { error: string }
+	>({
 		name: "a2a_peers",
 		label: "A2A Peers",
 		description:
 			"List the exact A2A roster names currently addressable in this Project. Use only a returned name for target.type=agent.",
-		parameters: type({}),
+		parameters: peersParameters,
 		async execute() {
 			try {
 				const peers = runtime.peers();
@@ -537,31 +683,32 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerTool({
+	pi.registerTool<
+		typeof messageParameters,
+		| { message: MaterializedMessageView; recipients: string[] }
+		| { error: string }
+	>({
 		name: "a2a_message",
 		label: "A2A Message",
 		description: `Send to one current peer or all current peers. Use target.type=agent with a name from a2a_peers, or target.type=project for all current peers. Set replyTo to reply to an earlier Project message. Attachments must be current-session local:// regular files. ${ASYNC_REPLY_GUIDANCE}`,
-		parameters: type({
-			target: [{ type: "'agent'", name: "string" }, "|", { type: "'project'" }],
-			text: "string",
-			"attachments?": "string[]",
-			"replyTo?": "string",
-			"messageId?": "string",
-		}),
-		async execute(_id, parameters, _signal, _onUpdate, context) {
+		parameters: messageParameters,
+		async execute(_id, parameters, signal, _onUpdate, context) {
 			try {
 				const attachmentSources = parameters.attachments ?? [];
 				const attachments = await snapshotLocalAttachments(
 					attachmentSources,
 					context?.localProtocolOptions,
 				);
-				const accepted = await runtime.message({
-					target: parameters.target as MessageRequestTarget,
-					text: parameters.text,
-					attachments,
-					replyTo: parameters.replyTo,
-					messageId: parameters.messageId,
-				});
+				const accepted = await runtime.message(
+					{
+						target: parameters.target as MessageRequestTarget,
+						text: parameters.text,
+						attachments,
+						replyTo: parameters.replyTo,
+						messageId: parameters.messageId,
+					},
+					{ signal },
+				);
 				const target =
 					parameters.target.type === "project"
 						? `${accepted.recipients.length} Agents`
@@ -579,7 +726,7 @@ export default function a2aExtension(pi: ExtensionAPI) {
 							...accepted.message,
 							attachments: attachments.map((attachment, index) => ({
 								name: attachment.name,
-								url: attachmentSources[index],
+								url: attachmentSources[index]!,
 								uncompressedBytes: attachment.payload.uncompressedBytes,
 							})),
 						},
@@ -596,20 +743,18 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerTool({
+	pi.registerTool<
+		typeof historyParameters,
+		{ messages: MaterializedMessageView[] } | { error: string }
+	>({
 		name: "a2a_history",
 		label: "A2A History",
 		description:
 			"Review earlier Project messages using before, after, limit, or from. Returned attachment links are valid in the current session. Use only for past context; never wait or poll for new replies.",
-		parameters: type({
-			"before?": "string",
-			"after?": "string",
-			"limit?": "number",
-			"from?": "string",
-		}),
-		async execute(_id, parameters, _signal, _onUpdate, context) {
+		parameters: historyParameters,
+		async execute(_id, parameters, signal, _onUpdate, context) {
 			try {
-				const messages = await runtime.history(parameters);
+				const messages = await runtime.history(parameters, { signal });
 				const materialized = await Promise.all(
 					messages.map((message) => materializeMessage(message, context)),
 				);

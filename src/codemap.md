@@ -14,6 +14,7 @@ The central seam is `A2aRuntime`: extension callbacks and commands depend on one
 | `local-attachments.ts` | Snapshot sender-session `local://` files and materialize received/history attachment bytes into the calling session. | `snapshotLocalAttachments`, `materializeLocalAttachments` |
 | `operations.ts` | Connected runtime over one WebSocket plus HTTP Project/history operations. | `A2aRuntime`, `MessageView`, `RuntimeStatus` |
 | `config.ts` | Strict repository-local YAML/JSON connection defaults. | `loadLocalConfig` |
+| `simple-yaml.ts` | Shared quote-aware strict YAML subset for local and global Hub configuration. | `parseSimpleYaml` |
 | `paths.ts` | Hub storage paths and local config candidates. | path functions |
 | `registry.ts` | Filesystem-backed persistent Project metadata. | `createProject`, `getProject`, `listProjects`, `deleteProject` |
 | `types.ts` | Project/config domain shapes and name validation regexes. | `A2aProject`, `A2aLocalConfig` |
@@ -23,19 +24,21 @@ The central seam is `A2aRuntime`: extension callbacks and commands depend on one
 
 `a2aExtension(pi)` owns one session-local `A2aRuntime` and the following state:
 
-- cached `HubClient`, invalidated when the resolved Hub URL changes;
+- cached current-selection `HubClient`;
 - active OMP `ExtensionContext` for message injection and notifications;
 - desired `{ project, name }` used by reconnect;
-- one bounded exponential reconnect timer, from 500 ms to 10 seconds.
+- one bounded exponential reconnect timer, from 500 ms to 10 seconds;
+- monotonic session and desired-state generations that fence every asynchronous transition and callback.
 
 On `session_start` and `session_switch`, the extension:
 
-1. clears the active context so in-flight inbound callbacks cannot inject into the new session;
-2. cancels pending reconnect and disconnects the old Presence;
-3. activates the new context and resolves its repository-local configuration;
-4. clears prior desired connection state and auto-connects only when configuration exists and `autoConnect !== false`.
+1. advances both generations, clears the active context so in-flight inbound callbacks cannot inject into the new session, and clears reconnect intent;
+2. disconnects the old Presence and clears the prior Hub selection;
+3. activates the new context and loads its repository-local configuration exactly once;
+4. contains malformed configuration as a UI error with no stale Presence or Hub client;
+5. clears prior desired connection state and auto-connects only when configuration exists and `autoConnect !== false`.
 
-On `session_shutdown`, it clears the active context and desired state, cancels reconnect, and closes the socket. Unexpected socket close schedules reconnect. A `name_in_use` response is terminal for that desired connection rather than repeatedly displacing or retrying the owner.
+On `session_shutdown`, it advances the generations, clears the active context and desired state, cancels reconnect, and closes the socket. Unexpected current-socket close schedules reconnect. A `name_in_use` response is terminal for that exact desired generation rather than repeatedly displacing or retrying the owner. Events, completions, and failures from retired sockets or superseded transitions are discarded.
 
 ### Inbound events
 
@@ -75,15 +78,15 @@ Connected model turns receive the current A2A roster name and use only `a2a_peer
 
 ## Runtime interface
 
-`A2aRuntime` owns at most one `A2aConnection`.
+`A2aRuntime` publishes at most one `{ A2aConnection, HubClient }` pair.
 
-- `connect(project, name)` cleanly closes any old connection, obtains the current Hub client, and returns self plus peer snapshot.
-- `disconnect()` is idempotent and clears the stored connection before awaiting close.
+- `connect(project, name)` establishes a bounded and cancellable buffered candidate first, atomically publishes it, then gracefully closes the predecessor. Candidate failure preserves the working predecessor; a later connect/disconnect generation aborts and closes stale candidates, including sockets still awaiting the handshake.
+- `disconnect()` invalidates in-flight candidates and clears the published pair before awaiting bounded graceful close.
 - `peers()` returns the current client-side Presence map.
-- `message()` requires a live connection, sends through it, and decodes the accepted persistent message for callers.
-- `history()` requires a connected Project but uses HTTP through the current Hub client.
-- `status()` combines Hub metadata with connected Presence state.
-- Project create/list/delete are thin HTTP operations and do not require a Presence.
+- `message()` requires a live connection and decodes the accepted persistent message. Pre-dispatch cancellation prevents sending; post-dispatch cancellation reports an explicit unknown outcome and removes the pending request.
+- `history()` uses the HubClient bound to the published Presence, not a later configuration selection.
+- `status()` combines metadata from that same bound Hub with connected Presence state; when disconnected it uses the current selection.
+- Project create/list/delete use the current selected Hub and do not require a Presence.
 
 `MessageView` is the persistent realtime Message shape with decoded text and attachment bytes replacing encoded wire payloads.
 
@@ -137,9 +140,9 @@ OMP callbacks / slash / tools
 
 ## Tests touching this directory
 
-- `extension.test.ts`: registered surfaces, help contract, ArkType schemas, multi-level completion, and cross-session attachment snapshot/materialization/history.
-- `operations.test.ts`: runtime connect, snapshots, message and successful/failed Delivery callbacks, and disconnected errors.
-- `config.test.ts`: strict configuration parsing and migration failures.
-- `hub-control.test.ts`: public Project control behavior reached through `HubClient`.
+- `extension.test.ts`: registered surfaces, help contract, ArkType schemas, multi-level command parsing/completion, malformed-config containment, superseded session transitions, and cross-session attachment snapshot/materialization/history.
+- `operations.test.ts`: atomic connection swaps, accepting-Hub binding, stalled-handshake cancellation, snapshots, message and successful/failed Delivery callbacks, cancellation, and disconnected errors.
+- `config.test.ts` and `hub-client.test.ts`: strict shared YAML/JSON loading, authoritative precedence, migration failures, external response validation, deadlines, and cancellation.
+- `hub-control.test.ts`: public Project control, listener/public URL separation, recoverable deletion, startup unwind, and strict HTTP errors reached through `HubClient`.
 
 See the repository root `codemap.md` for deployment and verification contracts.

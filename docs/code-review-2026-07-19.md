@@ -7,7 +7,29 @@
 
 本报告保留固定快照的历史审查事实；文中的源码和 README 行号均指向该快照。
 
-> 归档说明：本文中的 “current” 和 “current state” 只描述标题所标日期的代码，不代表当前仓库合同。当前合同以 [`README.md`](../README.md) 和 [`realtime-presence-architecture.md`](realtime-presence-architecture.md) 为准。
+> 归档说明：本文中的 “current” 和 “current state” 只描述各节所标日期的代码。下方 2026-07-19 与 2026-07-23 的审查内容是历史记录，不代表当前仓库合同；当前合同以 [`README.md`](../README.md) 和 [`realtime-presence-architecture.md`](realtime-presence-architecture.md) 为准。
+
+## Current-State Revalidation — 2026-08-09
+
+The original `feat/code-review` branch diverged before the protocol-v2 rewrite. Its seven commits were re-evaluated by behavioral intent against current `main`; fixes were reimplemented on `feat/code-review-revalidation` rather than merging the retired member/Inbox architecture.
+
+### Revalidation result
+
+- **Obsolete by architecture:** persistent member leases, HTTP heartbeat/unregister ownership, Inbox polling/ACK batches, and persisted receipt messages. WebSocket-owned Presence, `presenceId` recipient fencing, and in-memory delivery outcomes replace those surfaces.
+- **Repaired in the current architecture:** accepting-Hub binding, bounded/cancellable WebSocket handshakes, candidate-first and generation-fenced session transitions, malformed-config containment, strict shared YAML/JSON boundaries, bounded/cancellable HTTP, validated successful responses, graceful Presence close, recoverable cross-store Project deletion, post-listen startup unwind, strict HTTP/protocol validation, canonical retry recipient snapshots, bounded once-only legacy migration, and bounded payload/history work.
+- **Preserved from current `main`:** immutable ordered attachments remain part of the Message lifecycle through extension snapshotting, realtime transport, payload encoding, SQLite history, rematerialization, idempotency, and verification.
+- **Restored verification contract:** strict TypeScript no-emit checking, Oxlint, the executable Bun Hub entry point, frozen Bun CI, listener/public URL separation, CLI-owned deployment environment resolution, and Compose port advertisement.
+
+### Revalidation verification
+
+- `bun install --frozen-lockfile`: completed with no dependency changes.
+- `bun run check`: strict TypeScript, Oxlint, the Bun test suite, and Registry and live in-process Hub smoke scenarios passed.
+- The graceful-close deletion regression passed 50 consecutive reruns.
+- The executable `src/hub/cli.ts` started directly and served `/healthz`.
+- `OMP_A2A_HUB_PORT=4174 docker compose config` rendered matching published and advertised ports.
+- A freshly built Bun 1.3.14 Docker image passed `bun run smoke:docker` through the published HTTP/WebSocket boundary; its isolated Project, volume, and network were removed afterward.
+
+The fixed-snapshot findings and the 2026-07-23 follow-up below remain historical evidence. Their statements that ordinary HTTP is unbounded or Project deletion is unrecoverable no longer describe this revalidation branch.
 
 ## Historical follow-up snapshot — 2026-07-23
 

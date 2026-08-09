@@ -65,7 +65,8 @@ export type ClientFrame =
 			replyTo?: string;
 	  }
 	| { type: "delivered"; messageId: string }
-	| { type: "delivery_failed"; messageId: string; error: string };
+	| { type: "delivery_failed"; messageId: string; error: string }
+	| { type: "goodbye" };
 
 export type ServerFrame =
 	| {
@@ -89,4 +90,5 @@ export type ServerFrame =
 	  }
 	| { type: "message"; message: RealtimeMessage }
 	| ({ type: "delivery" } & DeliveryEvent)
+	| { type: "goodbye" }
 	| { type: "error"; code: string; message: string; requestId?: string };
