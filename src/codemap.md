@@ -11,7 +11,7 @@ The central seam is `A2aRuntime`: extension callbacks and commands depend on one
 | File | Responsibility | Primary interface |
 | --- | --- | --- |
 | `extension.ts` | OMP registration, session lifecycle, UI notifications, reconnect policy, slash commands, completions, and model tools. | default extension factory |
-| `local-attachments.ts` | Snapshot sender-session `local://` files and materialize received/history attachment bytes into the calling session. | `snapshotLocalAttachments`, `materializeLocalAttachments` |
+| `local-attachments.ts` | Snapshots actual sender-session `local://` file bytes without application count or size caps and materializes received/history bytes into the calling session. | `snapshotLocalAttachments`, `materializeLocalAttachments` |
 | `operations.ts` | Connected runtime over one WebSocket plus HTTP Project/history operations. | `A2aRuntime`, `MessageView`, `RuntimeStatus` |
 | `config.ts` | Strict repository-local YAML/JSON connection defaults. | `loadLocalConfig` |
 | `paths.ts` | Hub storage paths and local config candidates. | path functions |
@@ -85,7 +85,7 @@ Connected model turns receive the current A2A roster name and use only `a2a_peer
 - `status()` combines Hub metadata with connected Presence state.
 - Project create/list/delete are thin HTTP operations and do not require a Presence.
 
-`MessageView` is the persistent realtime Message shape with decoded text and attachment bytes replacing encoded wire payloads.
+`MessageView` is the persistent realtime Message shape with decoded text and attachment bytes replacing encoded wire payloads. Matching private-protocol clients are trusted; codecs fail loudly on malformed data and do not enforce application resource caps.
 
 ## Configuration contract
 

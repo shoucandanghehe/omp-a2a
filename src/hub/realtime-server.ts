@@ -7,7 +7,6 @@ import {
 	type MessageStore,
 	UnknownReplyTargetError,
 } from "./messages";
-import { PayloadTooLargeError } from "./payload";
 import { NameInUseError, type Presence, PresenceRegistry } from "./presence";
 import {
 	A2A_PROTOCOL_VERSION,
@@ -16,10 +15,8 @@ import {
 	type ServerFrame,
 } from "./realtime-types";
 
-const MAX_FRAME_BYTES = 6 * 1024 * 1024;
 const HEARTBEAT_MS = 10_000;
 const HELLO_TIMEOUT_MS = 5_000;
-const MAX_DELIVERY_ERROR_BYTES = 512;
 
 class RecipientNotPresentError extends Error {}
 
@@ -56,7 +53,7 @@ export class RealtimeHub {
 		this.#dataDir = dataDir;
 		this.#wss = new WebSocketServer({
 			noServer: true,
-			maxPayload: MAX_FRAME_BYTES,
+			maxPayload: 0,
 		});
 		this.#upgradeHandler = (request, socket, head) => {
 			const pathname = new URL(request.url ?? "/", "http://localhost").pathname;
@@ -174,11 +171,7 @@ export class RealtimeHub {
 			const frame = value as Partial<
 				Extract<ClientFrame, { type: "delivery_failed" }>
 			>;
-			if (
-				typeof frame.error !== "string" ||
-				frame.error.length === 0 ||
-				Buffer.byteLength(frame.error, "utf8") > MAX_DELIVERY_ERROR_BYTES
-			) {
+			if (typeof frame.error !== "string" || frame.error.length === 0) {
 				throw new Error("delivery failure error is invalid");
 			}
 			this.#handleDeliveryResult(
@@ -328,9 +321,7 @@ export class RealtimeHub {
 						? "message_id_conflict"
 						: error instanceof UnknownReplyTargetError
 							? "unknown_reply"
-							: error instanceof PayloadTooLargeError
-								? "payload_too_large"
-								: "message_rejected";
+							: "message_rejected";
 			this.#send(presence.socket, {
 				type: "error",
 				requestId,

@@ -58,6 +58,17 @@ describe("Hub Project control plane", () => {
 		expect(await secondClient.listProjects()).toEqual([]);
 	});
 
+	test("control requests have no application body cap", async () => {
+		const hub = await startHubServer({ port: 0, dataDir: dataDir() });
+		hubs.push(hub);
+		const description = "x".repeat(6 * 1024 * 1024 + 1);
+		const project = await new HubClient(hub.meta.baseUrl).createProject({
+			name: "large-control-body",
+			description,
+		});
+		expect(project.description).toBe(description);
+	});
+
 	test("the same Hub data directory cannot be opened twice", async () => {
 		const root = dataDir();
 		const hub = await startHubServer({ port: 0, dataDir: root });

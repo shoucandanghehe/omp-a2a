@@ -4,57 +4,61 @@ import {
 	decodeTextPayload,
 	encodeBinaryPayload,
 	encodeTextPayload,
-	MAX_ATTACHMENT_COUNT,
-	MAX_MESSAGE_CONTENT_BYTES,
-	MAX_TEXT_BYTES,
 	parseEncodedAttachments,
-	validateMessageContent,
+	PAYLOAD_COMPRESSION_THRESHOLD_BYTES,
 } from "../src/hub/payload";
 
-test("large text compresses and round-trips while decoded size stays bounded", () => {
+function pseudoRandomBytes(size: number): Buffer {
+	const bytes = Buffer.allocUnsafe(size);
+	let state = 0x9e3779b9;
+	for (let index = 0; index < bytes.byteLength; index++) {
+		state ^= state << 13;
+		state ^= state >>> 17;
+		state ^= state << 5;
+		bytes[index] = state & 0xff;
+	}
+	return bytes;
+}
+
+test("text payloads round-trip through identity and gzip encodings", () => {
+	expect(encodeTextPayload("small")).toEqual({
+		encoding: "identity",
+		data: "small",
+	});
 	const text = "compressible payload line\n".repeat(2_000);
 	const payload = encodeTextPayload(text);
 	expect(payload.encoding).toBe("gzip+base64");
 	expect(decodeTextPayload(payload)).toBe(text);
-	expect(() => encodeTextPayload("x".repeat(MAX_TEXT_BYTES + 1))).toThrow(
-		`exceeds ${MAX_TEXT_BYTES} bytes`,
+});
+
+test("binary payloads use gzip only when it is smaller", () => {
+	const compressible = Buffer.alloc(PAYLOAD_COMPRESSION_THRESHOLD_BYTES, 0);
+	const compressed = encodeBinaryPayload(compressible);
+	expect(compressed.encoding).toBe("gzip+base64");
+	expect(decodeBinaryPayload(compressed)).toEqual(compressible);
+
+	const incompressible = pseudoRandomBytes(
+		PAYLOAD_COMPRESSION_THRESHOLD_BYTES,
 	);
+	const identity = encodeBinaryPayload(incompressible);
+	expect(identity.encoding).toBe("base64");
+	expect(decodeBinaryPayload(identity)).toEqual(incompressible);
 });
 
-test("small text remains identity encoded", () => {
-	expect(encodeTextPayload("small")).toEqual({
-		encoding: "identity",
-		data: "small",
-		uncompressedBytes: 5,
-	});
+test("attachment parsing has no application count limit", () => {
+	const attachments = Array.from({ length: 12 }, (_, index) => ({
+		name: `${index}.txt`,
+		payload: encodeBinaryPayload(Buffer.from([index])),
+	}));
+	expect(parseEncodedAttachments(attachments)).toEqual(attachments);
 });
 
-test("binary attachment payload round-trips arbitrary bytes", () => {
-	const bytes = Buffer.from([0, 1, 2, 127, 128, 254, 255]);
-	const payload = encodeBinaryPayload(bytes);
-	expect(decodeBinaryPayload(payload)).toEqual(bytes);
+test("malformed compressed payloads throw their codec errors", () => {
+	const data = Buffer.from("not gzip", "utf8").toString("base64");
 	expect(() =>
-		decodeBinaryPayload({
-			...payload,
-			uncompressedBytes: bytes.byteLength + 1,
-		}),
-	).toThrow("size does not match");
-});
-
-test("message content and attachment count share explicit bounds", () => {
-	const fullSizeAttachment = {
-		name: "full.bin",
-		payload: encodeBinaryPayload(Buffer.alloc(MAX_MESSAGE_CONTENT_BYTES)),
-	};
+		decodeTextPayload({ encoding: "gzip+base64", data }),
+	).toThrow();
 	expect(() =>
-		validateMessageContent(encodeTextPayload("x"), [fullSizeAttachment]),
-	).toThrow(`exceeds ${MAX_MESSAGE_CONTENT_BYTES} bytes`);
-	expect(() =>
-		parseEncodedAttachments(
-			Array.from({ length: MAX_ATTACHMENT_COUNT + 1 }, (_, index) => ({
-				name: `${index}.txt`,
-				payload: encodeBinaryPayload(Buffer.alloc(0)),
-			})),
-		),
-	).toThrow(`more than ${MAX_ATTACHMENT_COUNT} attachments`);
+		decodeBinaryPayload({ encoding: "gzip+base64", data }),
+	).toThrow();
 });

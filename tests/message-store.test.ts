@@ -3,11 +3,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import {
-	MAX_HISTORY_BYTES,
-	MessageIdConflictError,
-	MessageStore,
-} from "../src/hub/messages";
+import { MessageIdConflictError, MessageStore } from "../src/hub/messages";
 import { encodeBinaryPayload, encodeTextPayload } from "../src/hub/payload";
 
 const roots: string[] = [];
@@ -20,7 +16,8 @@ afterEach(() => {
 test("messages form one immutable sequence per Project", () => {
 	const root = mkdtempSync(join(tmpdir(), "omp-a2a-messages-"));
 	roots.push(root);
-	const store = new MessageStore(join(root, "messages.sqlite"));
+	const databasePath = join(root, "messages.sqlite");
+	const store = new MessageStore(databasePath);
 
 	const first = store.append({
 		messageId: "message-1",
@@ -79,6 +76,14 @@ test("messages form one immutable sequence per Project", () => {
 	).toThrow(MessageIdConflictError);
 
 	store.close();
+	const database = new Database(databasePath);
+	const columns = database
+		.query<{ name: string }, []>("PRAGMA table_info(messages)")
+		.all()
+		.map((column) => column.name);
+	expect(columns).not.toContain("uncompressed_bytes");
+	expect(columns).not.toContain("content_bytes");
+	database.close();
 });
 
 test("legacy message ledger migrates once into Project history", () => {
@@ -189,87 +194,36 @@ test("history uses stable Project cursors and sender filters", () => {
 	store.close();
 });
 
-test("history response has an explicit decoded-byte bound", () => {
+test("history keeps its default page and accepts explicit large limits", () => {
 	const root = mkdtempSync(join(tmpdir(), "omp-a2a-messages-"));
 	roots.push(root);
 	const store = new MessageStore(join(root, "messages.sqlite"));
-	const text = "x".repeat(MAX_HISTORY_BYTES / 2);
-	for (let index = 1; index <= 3; index++) {
+	for (let index = 1; index <= 501; index++) {
 		store.append({
-			messageId: `bounded-${index}`,
-			project: "bounded",
+			messageId: `large-limit-${index}`,
+			project: "large-limit",
 			from: { name: "api", presenceId: "presence-api" },
 			target: { type: "project" },
-			payload: encodeTextPayload(text),
+			payload: encodeTextPayload(`message ${index}`),
 			attachments: [],
 			createdAt: index,
 		});
 	}
+	const defaultPage = store.history({ project: "large-limit" }).messages;
+	expect(defaultPage).toHaveLength(50);
+	expect(defaultPage[0]?.messageRef).toBe("large-limit:452");
 	expect(
-		store
-			.history({ project: "bounded", limit: 10 })
-			.messages.map((message) => message.messageRef),
-	).toEqual(["bounded:2", "bounded:3"]);
+		store.history({ project: "large-limit", limit: 501 }).messages,
+	).toHaveLength(501);
+	expect(() => store.history({ project: "large-limit", limit: 0 })).toThrow(
+		"positive integer",
+	);
+	expect(() => store.history({ project: "large-limit", limit: 1.5 })).toThrow(
+		"positive integer",
+	);
 	store.close();
 });
 
-test("protocol v2 message databases migrate with empty attachments", () => {
-	const root = mkdtempSync(join(tmpdir(), "omp-a2a-messages-v2-"));
-	roots.push(root);
-	const databasePath = join(root, "messages.sqlite");
-	const previous = new Database(databasePath, { create: true });
-	previous.run(`
-		CREATE TABLE messages (
-			project TEXT NOT NULL,
-			project_sequence INTEGER NOT NULL,
-			msg_id TEXT NOT NULL UNIQUE,
-			sender_name TEXT NOT NULL,
-			sender_presence_id TEXT,
-			target_kind TEXT NOT NULL,
-			target_name TEXT,
-			target_presence_id TEXT,
-			encoding TEXT NOT NULL,
-			data TEXT NOT NULL,
-			uncompressed_bytes INTEGER NOT NULL,
-			created_at INTEGER NOT NULL,
-			reply_to_sequence INTEGER,
-			PRIMARY KEY(project, project_sequence)
-		)
-	`);
-	previous
-		.query(
-			"INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		)
-		.run(
-			"migration",
-			1,
-			"v2-message",
-			"api",
-			"presence-api",
-			"project",
-			null,
-			null,
-			"identity",
-			"persisted before attachments",
-			28,
-			100,
-			null,
-		);
-	previous.close();
-
-	const store = new MessageStore(databasePath);
-	expect(store.history({ project: "migration" }).messages).toMatchObject([
-		{
-			messageId: "v2-message",
-			attachments: [],
-		},
-	]);
-	store.close();
-	const reopened = new MessageStore(databasePath);
-	expect(reopened.integrityCheck()).toBe("ok");
-	expect(reopened.history({ project: "migration" }).messages).toHaveLength(1);
-	reopened.close();
-});
 
 test("attachment content participates in messageId idempotency", () => {
 	const root = mkdtempSync(join(tmpdir(), "omp-a2a-attachment-idempotency-"));

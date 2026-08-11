@@ -6,93 +6,36 @@ import type {
 } from "./types";
 
 export const PAYLOAD_COMPRESSION_THRESHOLD_BYTES = 32 * 1024;
-export const MAX_MESSAGE_CONTENT_BYTES = 4 * 1024 * 1024;
-export const MAX_TEXT_BYTES = MAX_MESSAGE_CONTENT_BYTES;
-export const MAX_ATTACHMENT_COUNT = 8;
-export const MAX_ATTACHMENT_NAME_BYTES = 255;
-
-export class PayloadTooLargeError extends Error {}
-
-function assertUncompressedBytes(value: unknown, label: string): number {
-	if (
-		typeof value !== "number" ||
-		!Number.isSafeInteger(value) ||
-		value < 0 ||
-		value > MAX_MESSAGE_CONTENT_BYTES
-	) {
-		throw new PayloadTooLargeError(
-			`${label} has invalid uncompressed byte count`,
-		);
-	}
-	return value;
-}
-
-function decodeBase64(data: unknown, label: string): Buffer {
-	if (typeof data !== "string")
-		throw new Error(`${label} data must be a string`);
-	const bytes = Buffer.from(data, "base64");
-	if (bytes.toString("base64") !== data)
-		throw new Error(`${label} data is not canonical base64`);
-	return bytes;
-}
 
 export function encodeTextPayload(text: string): EncodedTextPayload {
+	const byteLength = Buffer.byteLength(text, "utf8");
+	if (byteLength < PAYLOAD_COMPRESSION_THRESHOLD_BYTES) {
+		return { encoding: "identity", data: text };
+	}
 	const bytes = Buffer.from(text, "utf8");
-	if (bytes.byteLength > MAX_TEXT_BYTES) {
-		throw new PayloadTooLargeError(
-			`message text exceeds ${MAX_TEXT_BYTES} bytes`,
-		);
-	}
-	if (bytes.byteLength < PAYLOAD_COMPRESSION_THRESHOLD_BYTES) {
-		return {
-			encoding: "identity",
-			data: text,
-			uncompressedBytes: bytes.byteLength,
-		};
-	}
-	return {
-		encoding: "gzip+base64",
-		data: gzipSync(bytes).toString("base64"),
-		uncompressedBytes: bytes.byteLength,
-	};
+	const compressed = gzipSync(bytes);
+	return compressed.byteLength < bytes.byteLength
+		? { encoding: "gzip+base64", data: compressed.toString("base64") }
+		: { encoding: "identity", data: text };
 }
 
 export function decodeTextPayload(payload: EncodedTextPayload): string {
 	if (!payload || typeof payload !== "object")
 		throw new Error("message text payload is required");
-	const expectedBytes = assertUncompressedBytes(
-		payload.uncompressedBytes,
-		"message text",
-	);
-	let bytes: Buffer;
 	if (payload.encoding === "identity") {
 		if (typeof payload.data !== "string")
 			throw new Error("message text data must be a string");
-		bytes = Buffer.from(payload.data, "utf8");
-	} else if (payload.encoding === "gzip+base64") {
-		bytes = gunzipSync(decodeBase64(payload.data, "message text"), {
-			maxOutputLength: MAX_TEXT_BYTES + 1,
-		});
-	} else {
-		throw new Error("unsupported message text encoding");
+		return payload.data;
 	}
-	if (bytes.byteLength > MAX_TEXT_BYTES) {
-		throw new PayloadTooLargeError(
-			`message text exceeds ${MAX_TEXT_BYTES} bytes after decoding`,
-		);
+	if (payload.encoding === "gzip+base64") {
+		if (typeof payload.data !== "string")
+			throw new Error("message text data must be a string");
+		return gunzipSync(Buffer.from(payload.data, "base64")).toString("utf8");
 	}
-	if (bytes.byteLength !== expectedBytes) {
-		throw new Error("message text size does not match payload metadata");
-	}
-	return bytes.toString("utf8");
+	throw new Error("unsupported message text encoding");
 }
 
 export function encodeBinaryPayload(bytes: Uint8Array): EncodedBinaryPayload {
-	if (bytes.byteLength > MAX_MESSAGE_CONTENT_BYTES) {
-		throw new PayloadTooLargeError(
-			`attachment exceeds ${MAX_MESSAGE_CONTENT_BYTES} bytes`,
-		);
-	}
 	const input = Buffer.from(bytes.buffer, bytes.byteOffset, bytes.byteLength);
 	if (bytes.byteLength >= PAYLOAD_COMPRESSION_THRESHOLD_BYTES) {
 		const compressed = gzipSync(input);
@@ -100,53 +43,25 @@ export function encodeBinaryPayload(bytes: Uint8Array): EncodedBinaryPayload {
 			return {
 				encoding: "gzip+base64",
 				data: compressed.toString("base64"),
-				uncompressedBytes: bytes.byteLength,
 			};
 		}
 	}
-	return {
-		encoding: "base64",
-		data: input.toString("base64"),
-		uncompressedBytes: bytes.byteLength,
-	};
+	return { encoding: "base64", data: input.toString("base64") };
 }
 
 export function decodeBinaryPayload(payload: EncodedBinaryPayload): Buffer {
 	if (!payload || typeof payload !== "object")
 		throw new Error("attachment payload is required");
-	const expectedBytes = assertUncompressedBytes(
-		payload.uncompressedBytes,
-		"attachment",
-	);
-	const encoded = decodeBase64(payload.data, "attachment");
-	let bytes: Buffer;
-	if (payload.encoding === "base64") {
-		bytes = encoded;
-	} else if (payload.encoding === "gzip+base64") {
-		bytes = gunzipSync(encoded, {
-			maxOutputLength: MAX_MESSAGE_CONTENT_BYTES + 1,
-		});
-	} else {
-		throw new Error("unsupported attachment encoding");
-	}
-	if (bytes.byteLength > MAX_MESSAGE_CONTENT_BYTES) {
-		throw new PayloadTooLargeError(
-			`attachment exceeds ${MAX_MESSAGE_CONTENT_BYTES} bytes after decoding`,
-		);
-	}
-	if (bytes.byteLength !== expectedBytes)
-		throw new Error("attachment size does not match payload metadata");
-	return bytes;
+	if (typeof payload.data !== "string")
+		throw new Error("attachment data must be a string");
+	const encoded = Buffer.from(payload.data, "base64");
+	if (payload.encoding === "base64") return encoded;
+	if (payload.encoding === "gzip+base64") return gunzipSync(encoded);
+	throw new Error("unsupported attachment encoding");
 }
 
 export function parseEncodedAttachments(value: unknown): EncodedAttachment[] {
 	if (!Array.isArray(value)) throw new Error("attachments must be an array");
-	if (value.length > MAX_ATTACHMENT_COUNT) {
-		throw new PayloadTooLargeError(
-			`message has more than ${MAX_ATTACHMENT_COUNT} attachments`,
-		);
-	}
-	const names = new Set<string>();
 	return value.map((candidate) => {
 		if (
 			!candidate ||
@@ -157,28 +72,6 @@ export function parseEncodedAttachments(value: unknown): EncodedAttachment[] {
 		) {
 			throw new Error("invalid attachment");
 		}
-		const name = candidate.name;
-		let hasControlCharacter = false;
-		for (const character of name) {
-			const codePoint = character.codePointAt(0);
-			if (codePoint !== undefined && (codePoint < 0x20 || codePoint === 0x7f)) {
-				hasControlCharacter = true;
-				break;
-			}
-		}
-		if (
-			name.length === 0 ||
-			Buffer.byteLength(name, "utf8") > MAX_ATTACHMENT_NAME_BYTES ||
-			name === "." ||
-			name === ".." ||
-			name.includes("/") ||
-			name.includes("\\") ||
-			hasControlCharacter
-		) {
-			throw new Error(`invalid attachment name: ${name}`);
-		}
-		if (names.has(name)) throw new Error(`duplicate attachment name: ${name}`);
-		names.add(name);
 		const payload = candidate.payload;
 		if (
 			!payload ||
@@ -186,40 +79,17 @@ export function parseEncodedAttachments(value: unknown): EncodedAttachment[] {
 			!("encoding" in payload) ||
 			(payload.encoding !== "base64" && payload.encoding !== "gzip+base64") ||
 			!("data" in payload) ||
-			typeof payload.data !== "string" ||
-			!("uncompressedBytes" in payload) ||
-			typeof payload.uncompressedBytes !== "number"
+			typeof payload.data !== "string"
 		) {
-			throw new Error(`invalid attachment payload: ${name}`);
+			throw new Error(`invalid attachment payload: ${candidate.name}`);
 		}
-		const normalized: EncodedAttachment = {
-			name,
+		const attachment: EncodedAttachment = {
+			name: candidate.name,
 			payload: {
 				encoding: payload.encoding,
 				data: payload.data,
-				uncompressedBytes: payload.uncompressedBytes,
 			},
 		};
-		decodeBinaryPayload(normalized.payload);
-		return normalized;
+		return attachment;
 	});
-}
-
-export function validateMessageContent(
-	payload: EncodedTextPayload,
-	attachmentsValue: unknown,
-): { attachments: EncodedAttachment[]; contentBytes: number } {
-	const text = decodeTextPayload(payload);
-	if (text.trim().length === 0) throw new Error("message text required");
-	const attachments = parseEncodedAttachments(attachmentsValue);
-	const contentBytes = attachments.reduce(
-		(total, attachment) => total + attachment.payload.uncompressedBytes,
-		payload.uncompressedBytes,
-	);
-	if (contentBytes > MAX_MESSAGE_CONTENT_BYTES) {
-		throw new PayloadTooLargeError(
-			`message content exceeds ${MAX_MESSAGE_CONTENT_BYTES} bytes`,
-		);
-	}
-	return { attachments, contentBytes };
 }

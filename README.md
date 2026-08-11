@@ -76,10 +76,12 @@ Because this deployment has no accounts or durable identities, direct messaging 
 
 ## Trust model
 
-omp-a2a is for a fully trusted private network.
+omp-a2a is for a fully trusted private network of matching Hub and Extension versions.
 
 - No accounts, authentication, authorization, or tenant isolation.
-- Project, name, sender content, and history access are trusted claims.
+- Project, name, sender content, payload shape, and history access are trusted claims.
+- The application imposes no payload-size, attachment-count, or history-response cap. Deployment memory and container limits own resource isolation.
+- Malformed internal payloads are client bugs and fail loudly through the underlying codec or storage operation.
 - Do not expose the Hub to the public Internet or an untrusted network.
 
 ## Current operational constraints
@@ -272,17 +274,15 @@ Inbound messages are pushed automatically and processed serially in Hub-assigned
 
 ## Payload and persistence
 
-- Text below 32 KiB uses identity encoding; larger text uses gzip + Base64.
-- Attachment bytes use Base64 and use gzip first when that reduces payload size.
-- One Message accepts at most eight attachments.
-- Decoded text plus attachment content is limited to 4 MiB per Message and per history page.
+- Text below 32 KiB uses identity encoding; larger text uses gzip + Base64 only when compression is smaller.
+- Attachment bytes use Base64 and use gzip first only when that reduces payload size.
+- Messages, attachments, WebSocket frames, JSON bodies, and history responses have no application-level resource cap.
+- History keeps stable Project-sequence cursors, a default 50-item page, and accepts any explicit positive integer limit without silent truncation.
 - `messageId` is an opaque idempotency key. Reusing it with different text, attachment names, attachment order, attachment content, target, or causal parent fails.
-- History uses SQLite WAL with `synchronous = FULL`.
+- History uses SQLite WAL with `synchronous = FULL`; it stores canonical encoded payload fields rather than derived byte counts.
 - The Hub data directory has an exclusive lock; two Hub processes cannot write the same data.
 
 On first start with an old `inbox.sqlite`, the Hub imports ordinary `message_ledger` rows into `messages.sqlite` in deterministic `(project, created_at, msg_id)` order. Old Presence, cursor, ACK, receipt, and offline-delivery state are not migrated. Pending messages become history only and are never delivered to future connections.
-
-Opening a protocol version `2` `messages.sqlite` adds the attachment columns in place. Existing Messages receive an empty attachment list and retain their original sequence, reference, text, and causality.
 
 ## Verify
 
@@ -296,7 +296,7 @@ bun build src/hub/cli.ts --target=bun --outdir=/tmp/omp-a2a-hub-build
 docker compose config
 ```
 
-These commands check formatting, run the Bun tests plus Project Registry and live Hub/client smokes, build both executable entry points, and validate the Compose model. The behavioral coverage includes WebSocket Presence, name conflicts, Presence notifications, direct and broadcast routing, successful/failed/disconnected Delivery, cross-session attachment snapshot/materialization/history, protocol version `2` and legacy Inbox migration, payload limits, Project deletion, Hub restart semantics, and command completion.
+These commands check formatting, run the Bun tests plus Project Registry and live Hub/client smokes, build both executable entry points, and validate the Compose model. The behavioral coverage includes WebSocket Presence, name conflicts, Presence notifications, direct and broadcast routing, successful/failed/disconnected Delivery, cross-session attachment snapshot/materialization/history, legacy Inbox migration, uncapped trusted payload/history paths, Project deletion, Hub restart semantics, and command completion.
 
 ### Docker boundary
 
@@ -323,7 +323,7 @@ src/
     presence.ts            # in-memory Presence registry
     messages.ts            # append-only Project history + legacy migration
     realtime-types.ts      # versioned protocol types
-    payload.ts             # gzip and decoded-size limits
+    payload.ts             # text and attachment codecs
     client.ts              # HTTP Project/history client
     data-lock.ts           # exclusive Hub data directory ownership
     cli.ts                 # standalone Hub process

@@ -7,7 +7,7 @@
 - HTTP Project administration and explicit history;
 - WebSocket Presence, realtime messages, and delivery outcomes;
 - append-only SQLite Project history and legacy migration;
-- payload encoding limits;
+- functional payload encoding and decoding without application resource caps;
 - exclusive data-directory ownership and process lifecycle.
 
 ## Module map
@@ -22,13 +22,13 @@
 | `messages.ts` | SQLite append-only message log, history queries, idempotency, references, deletion, and migration. | `MessageStore` |
 | `client.ts` | Hub URL resolution and HTTP meta/Project/history client. | `HubClient`, `connectHub`, `resolveHubUrl` |
 | `realtime-types.ts` | Versioned WebSocket frames and public realtime/history shapes. | protocol types, `A2A_PROTOCOL_VERSION` |
-| `payload.ts` | Text/binary encoding, attachment validation, and bounded decoded-content accounting. | text/binary codecs, `validateMessageContent` |
+| `payload.ts` | Text and binary encoding/decoding plus attachment wire parsing. | text/binary codecs, `parseEncodedAttachments` |
 | `data-lock.ts` | Exclusive ownership of one Hub data directory. | `HubDataLock` |
 | `types.ts` | Hub metadata plus encoded text, binary, and attachment values. | `HubMeta`, encoded payload types |
 
 ## HTTP surface
 
-`server.ts` creates one Express app with a 6 MiB JSON body cap.
+`server.ts` configures Express JSON parsing without an application byte limit; deployment memory and container limits own resource isolation.
 
 | Method and path | Behavior |
 | --- | --- |
@@ -37,7 +37,7 @@
 | `GET /v1/projects` | Sorted persistent Project list. |
 | `POST /v1/projects` | Create Project metadata; duplicate returns `409`. |
 | `DELETE /v1/projects/:name` | Reject active Presence, remove Project metadata, then delete message history. |
-| `GET /v1/history` | Query one existing Project by cursor, sender name, and bounded limit. |
+| `GET /v1/history` | Query one existing Project by cursor, sender name, and positive item limit. |
 | `GET /v1/connect` upgrade | Hand the socket to `RealtimeHub`. |
 
 The public `baseUrl` reported in Hub metadata can differ from the listen host. Clients retain their resolved configuration URL as the authoritative HTTP and WebSocket route.
@@ -63,7 +63,7 @@ The client sends `message` with `requestId`, opaque `messageId`, typed target, e
 - Direct target resolves the current name and freezes its `presenceId`.
 - Project target snapshots all current Presence except the sender.
 - A missing direct target fails before persistence.
-- Text, attachment structure/content, total decoded size, and causal references are validated before append.
+- Text and attachment wire shapes plus causal references are checked before append; codecs surface malformed internal data directly.
 - `MessageStore.append` atomically commits one immutable Message—including attachments—and the next Project sequence.
 - The sender receives `accepted` with the canonical message and selected recipient names.
 - Each selected socket receives the canonical `message` frame.
@@ -102,7 +102,7 @@ WebSocket -> Presence
 - globally idempotent `messageId` content comparison;
 - sender name and accepting `presenceId`;
 - direct/Project target, including resolved target Presence for direct messages;
-- encoded text, ordered attachment names/content, and total decoded-content bytes;
+- canonical encoded text and ordered attachment names/content;
 - creation timestamp and optional same-Project causal parent sequence.
 
 Message references use `<project>:<sequence>`. Parsing rejects invalid Project names, non-positive/unsafe sequences, and cross-Project history cursors.
@@ -113,13 +113,12 @@ Message references use `<project>:<sequence>`. Parsing rejects invalid Project n
 
 - `before` or `after`, never both;
 - optional exact sender-name filter;
-- positive bounded item limit;
-- deterministic Project-sequence ordering;
-- a 4 MiB cumulative decoded-content budget, including attachments, per history page.
+- a default 50-item page or any explicit positive integer limit;
+- deterministic Project-sequence ordering.
 
 ### Idempotency and causality
 
-Reusing `messageId` with the same Project, sender name, target kind/name, text encoding/data/size, ordered attachment names/encoding/data/size, and causal parent returns the canonical stored Message. A difference in any compared field raises `MessageIdConflictError`.
+Reusing `messageId` with the same Project, sender name, target kind/name, text encoding/data, ordered attachment names/encoding/data, and causal parent returns the canonical stored Message. A difference in any compared field raises `MessageIdConflictError`.
 
 `replyTo` must resolve to an existing message in the same Project or `UnknownReplyTargetError` is raised.
 
@@ -127,19 +126,17 @@ Reusing `messageId` with the same Project, sender name, target kind/name, text e
 
 When `messages.sqlite` is first created and old `inbox.sqlite` exists, ordinary `message_ledger` rows are imported in deterministic `(project, created_at, msg_id)` order. Delivery-receipt rows are excluded. Old pending messages become history only; no old Presence, recipient cursor, ACK, receipt, or offline-delivery state survives.
 
-Opening a protocol version `2` `messages.sqlite` adds attachment JSON and total decoded-content columns in place. Existing rows receive `attachments = []` and `content_bytes = uncompressed_bytes`.
 
 Migration runs in the new database transaction and validates imported row count plus `PRAGMA integrity_check`. The old database is not modified.
 
 ## Payload codec
 
-- Text `< 32 KiB`: `{ encoding: "identity", data, uncompressedBytes }`.
-- Larger text: gzip bytes encoded as Base64.
-- Attachment bytes: Base64, optionally gzip-compressed first when smaller.
-- At most eight attachments per Message.
-- Text plus attachments `> 4 MiB`: rejected before persistence.
-- gzip decode uses `maxOutputLength`, and decoded byte counts must match their metadata.
-- The WebSocket server caps a complete frame at 6 MiB.
+- Text `< 32 KiB`: `{ encoding: "identity", data }`.
+- Larger text: gzip plus Base64 only when smaller, otherwise identity.
+- Attachment bytes: Base64, optionally gzip-compressed first only when smaller.
+- Payloads carry no derived byte metadata and codecs perform no bounded decompression or canonical Base64 re-encoding.
+- Express JSON parsing and both WebSocket endpoints are configured without an application payload cap.
+- Matching private-protocol clients are trusted; malformed payloads fail loudly and deployment limits own resource isolation.
 
 ## HTTP client
 
@@ -163,9 +160,9 @@ Stop closes realtime clients, the HTTP server, message storage, metadata files, 
 ## Test coverage
 
 - `hub-realtime.test.ts`: Presence lifetime, duplicate names, direct/broadcast snapshots, Delivery outcomes, attachment persistence, and restart.
-- `message-store.test.ts`: ordering, attachment-aware idempotency, causal references, filters, protocol version `2`/legacy migration, integrity, and deletion.
+- `message-store.test.ts`: ordering, attachment-aware idempotency, causal references, cursor/filter/default/explicit-limit behavior, canonical schema, legacy migration, integrity, and deletion.
 - `hub-control.test.ts`: independent Hubs, Project control, active-Presence deletion rejection, and safe name reuse.
-- `payload.test.ts`: text/binary compression, attachment count, and decoded-size enforcement.
+- `payload.test.ts`: identity/gzip/Base64 round trips, compression choice, uncapped attachment parsing, and malformed codec failures.
 - `operations.test.ts`: client/runtime integration plus successful and failed Delivery callbacks.
 
 See `scripts/codemap.md` for executable boundary scenarios.

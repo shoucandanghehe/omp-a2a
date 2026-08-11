@@ -209,10 +209,7 @@ async function materializeMessage(
 function formatAttachments(attachments: LocalAttachmentReference[]): string {
 	if (attachments.length === 0) return "";
 	return `\nAttachments:\n${attachments
-		.map(
-			(attachment) =>
-				`- ${attachment.name} (${attachment.uncompressedBytes} bytes): ${attachment.url}`,
-		)
+		.map((attachment) => `- ${attachment.name}: ${attachment.url}`)
 		.join("\n")}`;
 }
 
@@ -580,7 +577,6 @@ export default function a2aExtension(pi: ExtensionAPI) {
 							attachments: attachments.map((attachment, index) => ({
 								name: attachment.name,
 								url: attachmentSources[index],
-								uncompressedBytes: attachment.payload.uncompressedBytes,
 							})),
 						},
 					},

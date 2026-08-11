@@ -8,12 +8,12 @@ export type HubMeta = {
 };
 
 export type EncodedTextPayload =
-	| { encoding: "identity"; data: string; uncompressedBytes: number }
-	| { encoding: "gzip+base64"; data: string; uncompressedBytes: number };
+	| { encoding: "identity"; data: string }
+	| { encoding: "gzip+base64"; data: string };
 
 export type EncodedBinaryPayload =
-	| { encoding: "base64"; data: string; uncompressedBytes: number }
-	| { encoding: "gzip+base64"; data: string; uncompressedBytes: number };
+	| { encoding: "base64"; data: string }
+	| { encoding: "gzip+base64"; data: string };
 
 export type EncodedAttachment = {
 	name: string;

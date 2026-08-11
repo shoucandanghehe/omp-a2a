@@ -12,33 +12,22 @@ import {
 	resolveLocalUrlToFile,
 	resolveLocalUrlToPath,
 } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
-import {
-	encodeBinaryPayload,
-	MAX_ATTACHMENT_COUNT,
-	MAX_MESSAGE_CONTENT_BYTES,
-} from "./hub/payload";
+import { encodeBinaryPayload } from "./hub/payload";
 import type { EncodedAttachment } from "./hub/types";
 import type { MessageAttachment } from "./operations";
 
 export type LocalAttachmentReference = {
 	name: string;
 	url: string;
-	uncompressedBytes: number;
 };
 
-async function readStableFile(
-	filePath: string,
-	maxBytes: number,
-	source: string,
-): Promise<Buffer> {
+async function readStableFile(filePath: string, source: string): Promise<Buffer> {
 	const file = await open(filePath, "r");
 	try {
 		const before = await file.stat();
 		if (!before.isFile())
 			throw new Error(`attachment source must be a regular file: ${source}`);
-		if (before.size > maxBytes)
-			throw new Error(`attachments exceed ${MAX_MESSAGE_CONTENT_BYTES} bytes`);
-		const buffer = Buffer.allocUnsafe(before.size + 1);
+		const buffer = Buffer.allocUnsafe(before.size);
 		let offset = 0;
 		while (offset < buffer.byteLength) {
 			const { bytesRead } = await file.read(
@@ -53,7 +42,7 @@ async function readStableFile(
 		const after = await file.stat();
 		if (offset !== before.size || after.size !== before.size)
 			throw new Error(`attachment changed while being read: ${source}`);
-		return buffer.subarray(0, offset);
+		return buffer;
 	} finally {
 		await file.close();
 	}
@@ -66,13 +55,9 @@ export async function snapshotLocalAttachments(
 	if (sources.length === 0) return [];
 	if (!localProtocolOptions)
 		throw new Error("current OMP session does not expose local:// storage");
-	if (sources.length > MAX_ATTACHMENT_COUNT)
-		throw new Error(
-			`message has more than ${MAX_ATTACHMENT_COUNT} attachments`,
-		);
 
 	const attachments: EncodedAttachment[] = [];
-	let totalBytes = 0;
+	const names = new Set<string>();
 	for (const source of sources) {
 		if (!source.startsWith("local://"))
 			throw new Error(`attachment source must use local://: ${source}`);
@@ -81,14 +66,12 @@ export async function snapshotLocalAttachments(
 		});
 		if (!resolved)
 			throw new Error(`attachment source must be a regular file: ${source}`);
-		const bytes = await readStableFile(
-			resolved.path,
-			MAX_MESSAGE_CONTENT_BYTES - totalBytes,
-			source,
-		);
-		totalBytes += bytes.byteLength;
+		const bytes = await readStableFile(resolved.path, source);
+		const name = path.basename(resolved.path);
+		if (names.has(name)) throw new Error(`duplicate attachment name: ${name}`);
+		names.add(name);
 		attachments.push({
-			name: path.basename(resolved.path),
+			name,
 			payload: encodeBinaryPayload(bytes),
 		});
 	}
@@ -115,7 +98,6 @@ export async function materializeLocalAttachments(
 			references.push({
 				name: attachment.name,
 				url: `local://${encodeURIComponent(path.basename(outputDirectory))}/${encodeURIComponent(attachment.name)}`,
-				uncompressedBytes: attachment.bytes.byteLength,
 			});
 		}
 		return references;

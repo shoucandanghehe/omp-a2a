@@ -67,7 +67,7 @@ A same-named later connection is a new Presence and never inherits pending deliv
 
 ### Payload contract
 
-Text smaller than 32 KiB remains identity encoded. Larger text uses gzip plus Base64. Attachment bytes use Base64 and use gzip when smaller. Encoding and decoding enforce a 4 MiB total decoded-content limit across text and at most eight attachments, including bounded decompression.
+Text below 32 KiB remains identity encoded. Larger text and attachment bytes use gzip plus Base64 only when compression is smaller; other attachment bytes use Base64. Matching Hub and Extension versions are trusted, so payloads and history have no application-level resource cap or derived byte metadata. Malformed internal payloads fail loudly, while deployment memory and container limits own resource isolation.
 
 ## Configuration and deployment
 
@@ -126,7 +126,7 @@ The sender Extension snapshots attachment bytes before sending. Receivers and hi
 
 ## Verification
 
-The local release gate runs Biome, `bun run smoke`, both Bun entry-point builds, and `docker compose config`. It covers Project isolation and deletion, WebSocket Presence and name conflicts, Presence notifications, direct and broadcast routing, successful/failed/disconnected Delivery outcomes, attachment snapshot/materialization/history, persistent history and protocol version `2`/legacy migration, payload limits, Hub restart, extension registration, and command completion.
+The local release gate runs Biome, `bun run smoke`, both Bun entry-point builds, and `docker compose config`. It covers Project isolation and deletion, WebSocket Presence and name conflicts, Presence notifications, direct and broadcast routing, successful/failed/disconnected Delivery outcomes, attachment snapshot/materialization/history, persistent history and legacy migration, uncapped trusted payload/history behavior, Hub restart, extension registration, and command completion.
 
 `bun run smoke:docker` crosses the public HTTP/WebSocket process boundary of the selected running Hub, verifies persisted history, and removes its temporary Project.
 

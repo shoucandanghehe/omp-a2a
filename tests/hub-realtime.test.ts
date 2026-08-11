@@ -3,12 +3,19 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import WebSocket from "ws";
+import { A2aConnection } from "../src/hub/connection";
 import { HubClient } from "../src/hub/client";
-import { decodeTextPayload, encodeTextPayload } from "../src/hub/payload";
+import {
+	decodeBinaryPayload,
+	decodeTextPayload,
+	encodeTextPayload,
+} from "../src/hub/payload";
 import {
 	A2A_PROTOCOL_VERSION,
+	type RealtimeMessage,
 	type ServerFrame,
 } from "../src/hub/realtime-types";
+import type { EncodedAttachment } from "../src/hub/types";
 import { type HubServerHandle, startHubServer } from "../src/hub/server";
 
 const roots: string[] = [];
@@ -281,7 +288,6 @@ test("message history survives Hub restart while Presence does not", async () =>
 		payload: {
 			encoding: "base64",
 			data: attachmentBytes.toString("base64"),
-			uncompressedBytes: attachmentBytes.byteLength,
 		},
 	};
 	api.socket.send(
@@ -327,4 +333,53 @@ test("message history survives Hub restart while Presence does not", async () =>
 		peers: [],
 	});
 	replacement.socket.close();
+});
+
+test("same-version clients carry large messages and arbitrary attachment counts", async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-realtime-"));
+	roots.push(dataDir);
+	const hub = await startHubServer({ port: 0, dataDir });
+	hubs.push(hub);
+	const client = new HubClient(hub.meta.baseUrl);
+	await client.createProject({ name: "trusted-payloads" });
+	const inbound = Promise.withResolvers<RealtimeMessage>();
+	const receiver = await A2aConnection.connect({
+		baseUrl: hub.meta.baseUrl,
+		project: "trusted-payloads",
+		name: "receiver",
+		events: { onMessage: inbound.resolve },
+	});
+	const sender = await A2aConnection.connect({
+		baseUrl: hub.meta.baseUrl,
+		project: "trusted-payloads",
+		name: "sender",
+	});
+	const largeBytes = Buffer.alloc(4_800_000, 0x61);
+	const attachments: EncodedAttachment[] = Array.from(
+		{ length: 9 },
+		(_, index) => ({
+			name: `${index}.bin`,
+			payload: {
+				encoding: "base64",
+				data:
+					index === 8
+						? largeBytes.toString("base64")
+						: Buffer.from([index]).toString("base64"),
+			},
+		}),
+	);
+	const accepted = await sender.send({
+		target: { type: "agent", name: "receiver" },
+		text: "large trusted payload",
+		attachments,
+		messageId: "large-trusted-payload",
+	});
+	expect(accepted.message.attachments).toHaveLength(9);
+	const received = await inbound.promise;
+	expect(received.attachments).toHaveLength(9);
+	expect(decodeBinaryPayload(received.attachments[8]!.payload)).toEqual(
+		largeBytes,
+	);
+	await sender.close();
+	await receiver.close();
 });

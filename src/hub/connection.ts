@@ -14,12 +14,7 @@ import type { EncodedAttachment } from "./types";
 
 function deliveryFailureMessage(error: unknown): string {
 	const message = error instanceof Error ? error.message : String(error);
-	if (Buffer.byteLength(message, "utf8") <= 512)
-		return message || "receiver failed to inject message";
-	return Buffer.from(message, "utf8")
-		.subarray(0, 512)
-		.toString("utf8")
-		.replace(/\uFFFD$/, "");
+	return message || "receiver failed to inject message";
 }
 
 export type A2aConnectionEvents = {
@@ -73,6 +68,7 @@ export class A2aConnection {
 		});
 		this.#socket = new WebSocket(
 			`${baseUrl.replace(/^http/, "ws").replace(/\/+$/, "")}/v1/connect`,
+			{ maxPayload: 0 },
 		);
 		this.#socket.on("open", () =>
 			this.#send({
