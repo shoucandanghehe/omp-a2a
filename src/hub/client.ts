@@ -1,6 +1,7 @@
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { parseConfigDocument } from "../config-document";
 import { a2aRoot } from "../paths";
 import type { A2aProject } from "../types";
 import {
@@ -39,6 +40,33 @@ function stripTrailingSlash(url: string): string {
 	return url.replace(/\/+$/, "");
 }
 
+function validateGlobalHubConfig(document: unknown): string {
+	if (
+		typeof document !== "object" ||
+		document === null ||
+		Array.isArray(document)
+	) {
+		throw new Error("Hub config root must be an object");
+	}
+	const raw = document as Record<string, unknown>;
+	for (const field of Object.keys(raw)) {
+		if (field !== "hubUrl") {
+			throw new Error(`Hub config has unknown field "${field}"`);
+		}
+	}
+	if (!Object.hasOwn(raw, "hubUrl")) {
+		throw new Error('Hub config missing required field "hubUrl"');
+	}
+	if (typeof raw.hubUrl !== "string") {
+		throw new Error('Hub config field "hubUrl" must be a string');
+	}
+	const hubUrl = raw.hubUrl.trim();
+	if (!hubUrl) {
+		throw new Error('Hub config field "hubUrl" must not be blank');
+	}
+	return hubUrl;
+}
+
 /** Resolve Hub URL without starting a process. */
 export function resolveHubUrl(options?: {
 	hubUrl?: string;
@@ -51,32 +79,18 @@ export function resolveHubUrl(options?: {
 	for (const name of ["config.yml", "config.yaml", "config.json"]) {
 		const file = path.join(a2aRoot(home), name);
 		if (!fs.existsSync(file)) continue;
-		if (name.endsWith(".json")) {
-			const raw = JSON.parse(fs.readFileSync(file, "utf8")) as Record<
-				string,
-				unknown
-			>;
-			const value = raw.hubUrl ?? raw.hub_url ?? raw.url;
-			if (typeof value !== "string" || !value.trim())
-				throw new Error(`invalid Hub URL in ${file}`);
-			return stripTrailingSlash(value.trim());
+		try {
+			const text = fs.readFileSync(file, "utf8");
+			const hubUrl = validateGlobalHubConfig(
+				parseConfigDocument(text, file),
+			);
+			return stripTrailingSlash(hubUrl);
+		} catch (error) {
+			const message = error instanceof Error ? error.message : String(error);
+			throw new Error(`invalid Hub config at ${file}: ${message}`, {
+				cause: error,
+			});
 		}
-		for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
-			const match = line.match(/^(?:hubUrl|hub_url|url)\s*:\s*(.+)$/);
-			if (!match) continue;
-			const captured = match[1];
-			if (!captured) continue;
-			let value = captured.trim().replace(/#.*$/, "").trim();
-			if (
-				(value.startsWith('"') && value.endsWith('"')) ||
-				(value.startsWith("'") && value.endsWith("'"))
-			) {
-				value = value.slice(1, -1);
-			}
-			if (!value) throw new Error(`invalid Hub URL in ${file}`);
-			return stripTrailingSlash(value);
-		}
-		throw new Error(`Hub config has no hubUrl: ${file}`);
 	}
 	return DEFAULT_HUB_URL;
 }
