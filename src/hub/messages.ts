@@ -1,4 +1,5 @@
 import { Database } from "bun:sqlite";
+import { existsSync } from "node:fs";
 import * as path from "node:path";
 import { ensureDir } from "../paths";
 import { AGENT_NAME_RE, PROJECT_NAME_RE } from "../types";
@@ -142,10 +143,11 @@ export class MessageStore {
 	#append;
 
 	constructor(databasePath: string) {
+		const databaseExisted = existsSync(databasePath);
 		ensureDir(path.dirname(databasePath));
 		this.#database = new Database(databasePath, { create: true });
 		try {
-			this.#initializeSchema();
+			this.#initializeSchema(databaseExisted);
 		} catch (error) {
 			this.#database.close();
 			throw error;
@@ -311,7 +313,7 @@ export class MessageStore {
 		this.#database.close();
 	}
 
-	#initializeSchema(): void {
+	#initializeSchema(databaseExisted: boolean): void {
 		this.#database.transaction(() => {
 			const schema = this.#database
 				.query<{ type: string; name: string; sql: string | null }, []>(
@@ -328,6 +330,7 @@ export class MessageStore {
 					.query<{ user_version: number }, []>("PRAGMA user_version")
 					.get()?.user_version ?? 0;
 			if (schema.length === 0 && version === 0) {
+				if (databaseExisted) throw new Error(UNSUPPORTED_STORAGE_MESSAGE);
 				this.#database.run(PROJECT_SEQUENCES_SCHEMA);
 				this.#database.run(MESSAGES_SCHEMA);
 				this.#database.run(MESSAGES_PROJECT_SENDER_INDEX_SCHEMA);

@@ -197,6 +197,18 @@ test("storage version mismatch fails closed without changing the database", () =
 	expect(readFileSync(databasePath)).toEqual(before);
 });
 
+test("pre-existing empty storage fails closed", () => {
+	const root = mkdtempSync(join(tmpdir(), "omp-a2a-empty-storage-"));
+	roots.push(root);
+	const databasePath = join(root, "messages.sqlite");
+	new Database(databasePath, { create: true }).close();
+
+	expect(() => new MessageStore(databasePath)).toThrow(
+		UNSUPPORTED_STORAGE_MESSAGE,
+	);
+});
+
+
 test("current storage version rejects an incomplete schema", () => {
 	const root = mkdtempSync(join(tmpdir(), "omp-a2a-invalid-storage-"));
 	roots.push(root);
