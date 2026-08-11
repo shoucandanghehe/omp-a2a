@@ -19,6 +19,19 @@ const MESSAGE_TIMEOUT_MS = 15_000;
 const GOODBYE_TIMEOUT_MS = 1_000;
 const CLOSE_TIMEOUT_MS = 2_000;
 
+export type DeliveryOutcomeScheduler = {
+	now: () => number;
+	schedule: (callback: () => void, delayMs: number) => () => void;
+};
+
+const DEFAULT_DELIVERY_OUTCOME_SCHEDULER: DeliveryOutcomeScheduler = {
+	now: () => performance.now(),
+	schedule(callback, delayMs) {
+		const timer = setTimeout(callback, delayMs);
+		return () => clearTimeout(timer);
+	},
+};
+
 function boundedTimeout(
 	value: number | undefined,
 	maximumMs: number,
@@ -251,6 +264,8 @@ export class A2aConnection {
 		string,
 		{ frame: DeliveryOutcomeFrame; expiresAt: number }
 	>();
+	#cancelDeliveryOutcomeExpiry: (() => void) | null = null;
+	#deliveryOutcomeScheduler: DeliveryOutcomeScheduler;
 	#transportClosed = false;
 	#handshakeAborted = false;
 	#handshakeAbortReason: unknown;
@@ -262,12 +277,14 @@ export class A2aConnection {
 		events: A2aConnectionEvents,
 		goodbyeTimeoutMs: number,
 		closeTimeoutMs: number,
+		deliveryOutcomeScheduler: DeliveryOutcomeScheduler,
 	) {
 		this.#project = project;
 		this.#name = name;
 		this.#events = events;
 		this.#goodbyeTimeoutMs = goodbyeTimeoutMs;
 		this.#closeTimeoutMs = closeTimeoutMs;
+		this.#deliveryOutcomeScheduler = deliveryOutcomeScheduler;
 		this.#ready = new Promise<void>((resolve, reject) => {
 			this.#resolveReady = resolve;
 			this.#rejectReady = reject;
@@ -310,7 +327,7 @@ export class A2aConnection {
 				this.#rejectPending(requestId, failure);
 			this.#transportClosed = true;
 			this.#deliveryInflight.clear();
-			this.#deliveryOutcomes.clear();
+			this.#clearDeliveryOutcomes();
 			this.#resolveGoodbyeWait?.();
 			this.#events.onClose?.({
 				manual: this.#manualClose,
@@ -330,6 +347,7 @@ export class A2aConnection {
 		timeoutMs?: number;
 		goodbyeTimeoutMs?: number;
 		closeTimeoutMs?: number;
+		deliveryOutcomeScheduler?: DeliveryOutcomeScheduler;
 	}): Promise<A2aConnection> {
 		if (options.signal?.aborted) throw options.signal.reason;
 		const handshakeTimeoutMs = boundedTimeout(
@@ -354,6 +372,8 @@ export class A2aConnection {
 			options.events ?? {},
 			goodbyeTimeoutMs,
 			closeTimeoutMs,
+			options.deliveryOutcomeScheduler ??
+				DEFAULT_DELIVERY_OUTCOME_SCHEDULER,
 		);
 		const timeoutMs = handshakeTimeoutMs;
 		let timer: NodeJS.Timeout | undefined;
@@ -601,11 +621,12 @@ export class A2aConnection {
 	#receiveMessage(message: RealtimeMessage): void {
 		const cached = this.#deliveryOutcomes.get(message.messageId);
 		if (cached) {
-			if (cached.expiresAt > performance.now()) {
+			if (cached.expiresAt > this.#deliveryOutcomeScheduler.now()) {
 				this.#sendDeliveryOutcome(cached.frame);
 				return;
 			}
 			this.#deliveryOutcomes.delete(message.messageId);
+			this.#rescheduleDeliveryOutcomeExpiry();
 		}
 		const inflight = this.#deliveryInflight.get(message.messageId);
 		if (inflight) {
@@ -626,18 +647,52 @@ export class A2aConnection {
 				return;
 			}
 			this.#deliveryInflight.delete(message.messageId);
-			const now = performance.now();
-			// Monotonic completion times make Map insertion order the expiry order.
-			for (const [messageId, retained] of this.#deliveryOutcomes) {
-				if (retained.expiresAt > now) break;
-				this.#deliveryOutcomes.delete(messageId);
-			}
+			const now = this.#deliveryOutcomeScheduler.now();
 			this.#deliveryOutcomes.set(message.messageId, {
 				frame,
 				expiresAt: now + DELIVERY_OUTCOME_CACHE_TTL_MS,
 			});
+			this.#scheduleDeliveryOutcomeExpiry();
 			this.#sendDeliveryOutcome(frame);
 		});
+	}
+
+	#scheduleDeliveryOutcomeExpiry(): void {
+		if (
+			this.#transportClosed ||
+			this.#cancelDeliveryOutcomeExpiry ||
+			this.#deliveryOutcomes.size === 0
+		) {
+			return;
+		}
+		const earliest = this.#deliveryOutcomes.values().next().value;
+		if (!earliest) return;
+		const delayMs = Math.max(
+			0,
+			earliest.expiresAt - this.#deliveryOutcomeScheduler.now(),
+		);
+		this.#cancelDeliveryOutcomeExpiry =
+			this.#deliveryOutcomeScheduler.schedule(() => {
+				this.#cancelDeliveryOutcomeExpiry = null;
+				const now = this.#deliveryOutcomeScheduler.now();
+				for (const [messageId, retained] of this.#deliveryOutcomes) {
+					if (retained.expiresAt > now) break;
+					this.#deliveryOutcomes.delete(messageId);
+				}
+				this.#scheduleDeliveryOutcomeExpiry();
+			}, delayMs);
+	}
+
+	#rescheduleDeliveryOutcomeExpiry(): void {
+		this.#cancelDeliveryOutcomeExpiry?.();
+		this.#cancelDeliveryOutcomeExpiry = null;
+		this.#scheduleDeliveryOutcomeExpiry();
+	}
+
+	#clearDeliveryOutcomes(): void {
+		this.#cancelDeliveryOutcomeExpiry?.();
+		this.#cancelDeliveryOutcomeExpiry = null;
+		this.#deliveryOutcomes.clear();
 	}
 
 	async #deliveryOutcome(

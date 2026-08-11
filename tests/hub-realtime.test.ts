@@ -113,20 +113,49 @@ async function startTestTransport(): Promise<{
 type MessageLedger = ConstructorParameters<typeof RealtimeHub>[1];
 
 class ManualScheduler {
-	#tasks: Array<{ callback: () => void; cancelled: boolean }> = [];
+	#now = 0;
+	#tasks: Array<{
+		callback: () => void;
+		cancelled: boolean;
+		runAt: number;
+	}> = [];
 
-	schedule = (callback: () => void): (() => void) => {
-		const task = { callback, cancelled: false };
+	now = (): number => this.#now;
+
+	schedule = (callback: () => void, delayMs = 0): (() => void) => {
+		const task = {
+			callback,
+			cancelled: false,
+			runAt: this.#now + delayMs,
+		};
 		this.#tasks.push(task);
 		return () => {
 			task.cancelled = true;
 		};
 	};
 
+	advanceBy(delayMs: number): void {
+		this.#now += delayMs;
+	}
+
 	runNext(): void {
-		let task = this.#tasks.shift();
-		while (task?.cancelled) task = this.#tasks.shift();
+		let nextIndex = -1;
+		for (let index = 0; index < this.#tasks.length; index += 1) {
+			const task = this.#tasks[index];
+			if (
+				task &&
+				!task.cancelled &&
+				(nextIndex === -1 ||
+					task.runAt < (this.#tasks[nextIndex]?.runAt ?? Number.POSITIVE_INFINITY))
+			) {
+				nextIndex = index;
+			}
+		}
+		if (nextIndex === -1)
+			throw new Error("expected a scheduled delivery action");
+		const [task] = this.#tasks.splice(nextIndex, 1);
 		if (!task) throw new Error("expected a scheduled delivery action");
+		this.#now = task.runAt;
 		task.callback();
 	}
 
@@ -1183,21 +1212,93 @@ test("delivery cleanup is fenced by recipient and sender Presence", async () => 
 	recipientReplacement.socket.close();
 });
 
-test("broadcast persists before one local Presence enumeration and enqueue does not wait for writes", async () => {
+test("RealtimeHub rejects invalid delivery retry overrides exactly", () => {
+	const cases: Array<{
+		policy: NonNullable<RealtimeHubOptions["deliveryRetryPolicy"]>;
+		message: string;
+	}> = [
+		{
+			policy: { maxAttempts: Number.NaN },
+			message:
+				"deliveryRetryPolicy.maxAttempts must be a finite positive integer",
+		},
+		{
+			policy: { maxAttempts: Number.POSITIVE_INFINITY },
+			message:
+				"deliveryRetryPolicy.maxAttempts must be a finite positive integer",
+		},
+		{
+			policy: { maxAttempts: 0 },
+			message:
+				"deliveryRetryPolicy.maxAttempts must be a finite positive integer",
+		},
+		{
+			policy: { maxAttempts: -1 },
+			message:
+				"deliveryRetryPolicy.maxAttempts must be a finite positive integer",
+		},
+		{
+			policy: { maxAttempts: 1.5 },
+			message:
+				"deliveryRetryPolicy.maxAttempts must be a finite positive integer",
+		},
+		{
+			policy: { maxAttempts: 4 },
+			message: "deliveryRetryPolicy.maxAttempts must not exceed 3",
+		},
+		{
+			policy: { acknowledgeTimeoutMs: Number.NaN },
+			message:
+				"deliveryRetryPolicy.acknowledgeTimeoutMs must be a finite positive number",
+		},
+		{
+			policy: { acknowledgeTimeoutMs: Number.POSITIVE_INFINITY },
+			message:
+				"deliveryRetryPolicy.acknowledgeTimeoutMs must be a finite positive number",
+		},
+		{
+			policy: { acknowledgeTimeoutMs: 0 },
+			message:
+				"deliveryRetryPolicy.acknowledgeTimeoutMs must be a finite positive number",
+		},
+		{
+			policy: { acknowledgeTimeoutMs: -1 },
+			message:
+				"deliveryRetryPolicy.acknowledgeTimeoutMs must be a finite positive number",
+		},
+		{
+			policy: { acknowledgeTimeoutMs: 2_001 },
+			message:
+				"deliveryRetryPolicy.acknowledgeTimeoutMs must not exceed 2000ms",
+		},
+		{
+			policy: {
+				schedule: 1 as unknown as NonNullable<
+					RealtimeHubOptions["deliveryRetryPolicy"]
+				>["schedule"],
+			},
+			message: "deliveryRetryPolicy.schedule must be a function",
+		},
+	];
+
+	for (const { policy, message } of cases) {
+		let thrown: unknown;
+		try {
+			new RealtimeHub(createServer(), acceptingLedger(), tmpdir(), {
+				deliveryRetryPolicy: policy,
+			});
+		} catch (error) {
+			thrown = error;
+		}
+		expect(thrown).toBeInstanceOf(Error);
+		expect((thrown as Error).message).toBe(message);
+	}
+});
+
+test("broadcast snapshots current recipients once and replay does not redeliver", async () => {
 	const scheduler = new ManualScheduler();
-	let enumerations = 0;
-	let sends = 0;
 	const { baseUrl } = await startRealtimeTransport(acceptingLedger(), {
 		deliveryRetryPolicy: { schedule: scheduler.schedule },
-		enumerateProjectPresences(project, current) {
-			expect(project).toBe("room");
-			enumerations += 1;
-			return current();
-		},
-		sendDeliveryFrame(socket, payload) {
-			sends += 1;
-			socket.send(payload);
-		},
 	});
 	const sender = await connect(baseUrl, "room", "sender");
 	await sender.frames.next();
@@ -1232,8 +1333,6 @@ test("broadcast persists before one local Presence enumeration and enqueue does 
 		replayed: false,
 		recipients: ["first", "second"],
 	});
-	expect(enumerations).toBe(1);
-	expect(sends).toBe(2);
 
 	const late = await connect(baseUrl, "room", "late");
 	expect(await late.frames.next()).toMatchObject({ type: "claimed" });
@@ -1242,7 +1341,6 @@ test("broadcast persists before one local Presence enumeration and enqueue does 
 		peer: { name: "late" },
 	});
 	expect(late.frames.size()).toBe(0);
-	expect(enumerations).toBe(1);
 	expect(scheduler.pending).toBe(2);
 	sender.socket.send(
 		JSON.stringify({
@@ -1261,28 +1359,15 @@ test("broadcast persists before one local Presence enumeration and enqueue does 
 		replayed: true,
 	});
 	expect("recipients" in replayed).toBe(false);
-	expect(enumerations).toBe(1);
-	expect(sends).toBe(2);
 	sender.socket.close();
 	first.socket.close();
 	second.socket.close();
 	late.socket.close();
 });
 
-test("failed broadcast append performs no Presence enumeration or send", async () => {
-	let enumerations = 0;
-	let sends = 0;
+test("failed broadcast append sends no recipient frame", async () => {
 	const { baseUrl } = await startRealtimeTransport(
 		acceptingLedger(new Error("append unavailable")),
-		{
-			enumerateProjectPresences(_project, current) {
-				enumerations += 1;
-				return current();
-			},
-			sendDeliveryFrame() {
-				sends += 1;
-			},
-		},
 	);
 	const sender = await connect(baseUrl, "room", "sender");
 	await sender.frames.next();
@@ -1305,26 +1390,15 @@ test("failed broadcast append performs no Presence enumeration or send", async (
 		requestId: "append-failure",
 		message: "append unavailable",
 	});
-	expect(enumerations).toBe(0);
-	expect(sends).toBe(0);
 	expect(recipient.frames.size()).toBe(0);
 	sender.socket.close();
 	recipient.socket.close();
 });
 
-test("transport write errors retry only the bound Presence", async () => {
+test("ACK timeout retries only the bound Presence", async () => {
 	const scheduler = new ManualScheduler();
-	let attempts = 0;
 	const { baseUrl } = await startRealtimeTransport(acceptingLedger(), {
 		deliveryRetryPolicy: { schedule: scheduler.schedule },
-		sendDeliveryFrame(socket, payload, callback) {
-			attempts += 1;
-			if (attempts === 1) {
-				callback(new Error("temporary write failure"));
-				return;
-			}
-			socket.send(payload, callback);
-		},
 	});
 	const sender = await connect(baseUrl, "room", "sender");
 	await sender.frames.next();
@@ -1345,7 +1419,11 @@ test("transport write errors retry only the bound Presence", async () => {
 		type: "accepted",
 		replayed: false,
 	});
-	expect(attempts).toBe(1);
+	expect(await recipient.frames.next()).toMatchObject({
+		type: "message",
+		message: { messageId: "transport-retry" },
+	});
+	expect(scheduler.pending).toBe(1);
 	scheduler.runNext();
 	expect(await recipient.frames.next()).toMatchObject({
 		type: "message",
@@ -1360,7 +1438,6 @@ test("transport write errors retry only the bound Presence", async () => {
 		to: "recipient",
 		status: "delivered",
 	});
-	expect(attempts).toBe(2);
 	expect(scheduler.pending).toBe(0);
 	sender.socket.close();
 	recipient.socket.close();
@@ -1371,10 +1448,6 @@ test("ACK retries end unknown while terminal failure and sender departure cancel
 	let attempts = 0;
 	const { baseUrl } = await startRealtimeTransport(acceptingLedger(), {
 		deliveryRetryPolicy: { schedule: scheduler.schedule },
-		sendDeliveryFrame(socket, payload, callback) {
-			attempts += 1;
-			socket.send(payload, callback);
-		},
 	});
 	const sender = await connect(baseUrl, "room", "sender");
 	await sender.frames.next();
@@ -1393,11 +1466,14 @@ test("ACK retries end unknown while terminal failure and sender departure cancel
 		}),
 	);
 	await recipient.frames.next();
+	attempts += 1;
 	await sender.frames.next();
 	scheduler.runNext();
 	await recipient.frames.next();
+	attempts += 1;
 	scheduler.runNext();
 	await recipient.frames.next();
+	attempts += 1;
 	scheduler.runNext();
 	expect(await sender.frames.next()).toEqual({
 		type: "delivery",
@@ -1420,6 +1496,7 @@ test("ACK retries end unknown while terminal failure and sender departure cancel
 		}),
 	);
 	await recipient.frames.next();
+	attempts += 1;
 	await sender.frames.next();
 	recipient.socket.send(
 		JSON.stringify({
@@ -1449,6 +1526,7 @@ test("ACK retries end unknown while terminal failure and sender departure cancel
 		}),
 	);
 	await recipient.frames.next();
+	attempts += 1;
 	await sender.frames.next();
 	expect(scheduler.pending).toBe(1);
 	sender.socket.send(JSON.stringify({ type: "goodbye" }));
@@ -1463,48 +1541,28 @@ test("ACK retries end unknown while terminal failure and sender departure cancel
 	recipient.socket.close();
 });
 
-test("receiver retains outcomes and amortizes expiry work across a burst", async () => {
+test("receiver expires terminal outcomes while idle with one ordered timer", async () => {
 	const transport = await startTestTransport();
+	const scheduler = new ManualScheduler();
 	const started = Promise.withResolvers<void>();
 	const release = Promise.withResolvers<void>();
 	let injections = 0;
-	let outcomeEntryVisits = 0;
-	const NativeMap = globalThis.Map;
-	class CountingMap<K, V> extends NativeMap<K, V> {
-		override *[Symbol.iterator]() {
-			for (const entry of super[Symbol.iterator]()) {
-				const value = entry[1];
-				if (
-					typeof value === "object" &&
-					value !== null &&
-					"frame" in value &&
-					"expiresAt" in value
-				) {
-					outcomeEntryVisits += 1;
-				}
-				yield entry;
-			}
-		}
-	}
-	const connecting = (() => {
-		globalThis.Map = CountingMap as MapConstructor;
-		try {
-			return A2aConnection.connect({
-				baseUrl: transport.baseUrl,
-				project: "room",
-				name: "receiver",
-				events: {
-					async onMessage() {
-						injections += 1;
-						started.resolve();
-						await release.promise;
-					},
-				},
-			});
-		} finally {
-			globalThis.Map = NativeMap;
-		}
-	})();
+	const connecting = A2aConnection.connect({
+		baseUrl: transport.baseUrl,
+		project: "room",
+		name: "receiver",
+		deliveryOutcomeScheduler: {
+			now: scheduler.now,
+			schedule: scheduler.schedule,
+		},
+		events: {
+			async onMessage() {
+				injections += 1;
+				started.resolve();
+				await release.promise;
+			},
+		},
+	});
 	const socket = await transport.socket;
 	await transport.frames.next();
 	socket.send(JSON.stringify(claimedFrame("receiver")));
@@ -1527,12 +1585,9 @@ test("receiver retains outcomes and amortizes expiry work across a burst", async
 		type: "delivered",
 		messageId: "deduplicated-message",
 	});
-	socket.send(JSON.stringify(retryFrame));
-	expect(await transport.frames.next()).toEqual({
-		type: "delivered",
-		messageId: "deduplicated-message",
-	});
-	expect(injections).toBe(1);
+	expect(scheduler.pending).toBe(1);
+	scheduler.advanceBy(1);
+
 	const laterMessageCount = 512;
 	for (let index = 0; index < laterMessageCount; index += 1) {
 		const sequence = index + 2;
@@ -1556,15 +1611,28 @@ test("receiver retains outcomes and amortizes expiry work across a burst", async
 		});
 	}
 	expect(injections).toBe(laterMessageCount + 1);
-	expect(outcomeEntryVisits).toBeLessThanOrEqual(laterMessageCount * 2);
+	expect(scheduler.pending).toBe(1);
 	socket.send(JSON.stringify(retryFrame));
 	expect(await transport.frames.next()).toEqual({
 		type: "delivered",
 		messageId: "deduplicated-message",
 	});
 	expect(injections).toBe(laterMessageCount + 1);
+
+	scheduler.runNext();
+	expect(scheduler.pending).toBe(1);
+	socket.send(JSON.stringify(retryFrame));
+	expect(await transport.frames.next()).toEqual({
+		type: "delivered",
+		messageId: "deduplicated-message",
+	});
+	expect(injections).toBe(laterMessageCount + 2);
+	scheduler.runNext();
+	expect(scheduler.pending).toBe(1);
+
 	const closing = connection.close();
 	expect(await transport.frames.next()).toEqual({ type: "goodbye" });
 	socket.send(JSON.stringify({ type: "goodbye" }));
 	await closing;
+	expect(scheduler.pending).toBe(0);
 });

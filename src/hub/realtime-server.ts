@@ -16,6 +16,7 @@ import {
 	type ClientFrame,
 	DELIVERY_ACKNOWLEDGE_TIMEOUT_MS,
 	DELIVERY_MAX_ATTEMPTS,
+	DELIVERY_OUTCOME_CACHE_TTL_MS,
 	DELIVERY_RETRY_DELAY_MS,
 	isExactGoodbyeFrame,
 	type ServerFrame,
@@ -27,6 +28,18 @@ const HELLO_TIMEOUT_MS = 5_000;
 const MAX_DELIVERY_ERROR_BYTES = 512;
 const GOODBYE_CLOSE_TIMEOUT_MS = 2_000;
 
+type DeliveryScheduler = (
+	callback: () => void,
+	delayMs: number,
+) => () => void;
+
+type DeliveryRetryPolicy = {
+	maxAttempts: number;
+	acknowledgeTimeoutMs: number;
+	retryDelayMs: number;
+	schedule: DeliveryScheduler;
+};
+
 const DEFAULT_DELIVERY_RETRY_POLICY: DeliveryRetryPolicy = {
 	maxAttempts: DELIVERY_MAX_ATTEMPTS,
 	acknowledgeTimeoutMs: DELIVERY_ACKNOWLEDGE_TIMEOUT_MS,
@@ -37,29 +50,69 @@ const DEFAULT_DELIVERY_RETRY_POLICY: DeliveryRetryPolicy = {
 	},
 };
 
+export type RealtimeHubOptions = {
+	deliveryRetryPolicy?: {
+		maxAttempts?: number;
+		acknowledgeTimeoutMs?: number;
+		schedule?: DeliveryScheduler;
+	};
+};
+
+function deliveryRetryPolicy(
+	overrides: RealtimeHubOptions["deliveryRetryPolicy"] = {},
+): DeliveryRetryPolicy {
+	const maxAttempts = overrides.maxAttempts ?? DELIVERY_MAX_ATTEMPTS;
+	if (
+		!Number.isFinite(maxAttempts) ||
+		!Number.isInteger(maxAttempts) ||
+		maxAttempts <= 0
+	) {
+		throw new Error(
+			"deliveryRetryPolicy.maxAttempts must be a finite positive integer",
+		);
+	}
+	if (maxAttempts > DELIVERY_MAX_ATTEMPTS) {
+		throw new Error(
+			`deliveryRetryPolicy.maxAttempts must not exceed ${DELIVERY_MAX_ATTEMPTS}`,
+		);
+	}
+
+	const acknowledgeTimeoutMs =
+		overrides.acknowledgeTimeoutMs ?? DELIVERY_ACKNOWLEDGE_TIMEOUT_MS;
+	if (!Number.isFinite(acknowledgeTimeoutMs) || acknowledgeTimeoutMs <= 0) {
+		throw new Error(
+			"deliveryRetryPolicy.acknowledgeTimeoutMs must be a finite positive number",
+		);
+	}
+	const maximumAcknowledgeTimeoutMs = Math.min(
+		DELIVERY_ACKNOWLEDGE_TIMEOUT_MS,
+		(DELIVERY_OUTCOME_CACHE_TTL_MS -
+			(maxAttempts - 1) * DELIVERY_RETRY_DELAY_MS) /
+			maxAttempts,
+	);
+	if (acknowledgeTimeoutMs > maximumAcknowledgeTimeoutMs) {
+		throw new Error(
+			`deliveryRetryPolicy.acknowledgeTimeoutMs must not exceed ${maximumAcknowledgeTimeoutMs}ms`,
+		);
+	}
+	if (
+		overrides.schedule !== undefined &&
+		typeof overrides.schedule !== "function"
+	) {
+		throw new Error("deliveryRetryPolicy.schedule must be a function");
+	}
+
+	return {
+		...DEFAULT_DELIVERY_RETRY_POLICY,
+		maxAttempts,
+		acknowledgeTimeoutMs,
+		schedule: overrides.schedule ?? DEFAULT_DELIVERY_RETRY_POLICY.schedule,
+	};
+}
+
 class RecipientNotPresentError extends Error {}
 
 type MessageLedger = Pick<MessageStore, "append" | "replay">;
-
-export type DeliveryRetryPolicy = {
-	maxAttempts: number;
-	acknowledgeTimeoutMs: number;
-	retryDelayMs: number;
-	schedule: (callback: () => void, delayMs: number) => () => void;
-};
-
-export type RealtimeHubOptions = {
-	deliveryRetryPolicy?: Partial<DeliveryRetryPolicy>;
-	enumerateProjectPresences?: (
-		project: string,
-		current: () => Presence[],
-	) => Presence[];
-	sendDeliveryFrame?: (
-		socket: WebSocket,
-		payload: string,
-		callback: (error?: Error) => void,
-	) => void;
-};
 
 type PendingDelivery = {
 	key: string;
@@ -88,8 +141,6 @@ export class RealtimeHub {
 	>();
 	#pendingDeliveries = new Map<string, PendingDelivery>();
 	#deliveryRetryPolicy: DeliveryRetryPolicy;
-	#enumerateProjectPresences: (project: string) => Presence[];
-	#sendDeliveryFrame: NonNullable<RealtimeHubOptions["sendDeliveryFrame"]>;
 	#departed = new WeakSet<WebSocket>();
 	#heartbeat: NodeJS.Timeout;
 	#upgradeHandler: (
@@ -108,19 +159,9 @@ export class RealtimeHub {
 		this.#server = server;
 		this.#messages = messages;
 		this.#dataDir = dataDir;
-		this.#deliveryRetryPolicy = {
-			...DEFAULT_DELIVERY_RETRY_POLICY,
-			...options.deliveryRetryPolicy,
-		};
-		this.#enumerateProjectPresences = options.enumerateProjectPresences
-			? (project) =>
-					options.enumerateProjectPresences?.(project, () =>
-						this.#presences.connections(project),
-					) ?? []
-			: (project) => this.#presences.connections(project);
-		this.#sendDeliveryFrame =
-			options.sendDeliveryFrame ??
-			((socket, payload, callback) => socket.send(payload, callback));
+		this.#deliveryRetryPolicy = deliveryRetryPolicy(
+			options.deliveryRetryPolicy,
+		);
 		this.#wss = new WebSocketServer({
 			noServer: true,
 			maxPayload: MAX_FRAME_BYTES,
@@ -394,9 +435,12 @@ export class RealtimeHub {
 					});
 					return;
 				}
-				recipients = this.#enumerateProjectPresences(presence.project).filter(
-					(recipient) => recipient.presenceId !== presence.presenceId,
-				);
+				recipients = this.#presences
+					.connections(presence.project)
+					.filter(
+						(recipient) =>
+							recipient.presenceId !== presence.presenceId,
+					);
 			}
 
 			if (appended.replayed) {
@@ -499,17 +543,15 @@ export class RealtimeHub {
 
 		pending.attempts += 1;
 		const attempt = pending.attempts;
-		this.#scheduleDelivery(pending, this.#deliveryRetryPolicy.acknowledgeTimeoutMs, () =>
-			this.#handleAcknowledgementTimeout(pending, attempt),
+		this.#scheduleDelivery(
+			pending,
+			this.#deliveryRetryPolicy.acknowledgeTimeoutMs,
+			() => this.#handleAcknowledgementTimeout(pending, attempt),
 		);
 		try {
-			this.#sendDeliveryFrame(
-				pending.recipientSocket,
-				pending.payload,
-				(error) => {
-					if (error) this.#handleTransportWriteError(pending, attempt, error);
-				},
-			);
+			pending.recipientSocket.send(pending.payload, (error) => {
+				if (error) this.#handleTransportWriteError(pending, attempt, error);
+			});
 		} catch (error) {
 			this.#handleTransportWriteError(
 				pending,

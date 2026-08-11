@@ -56,7 +56,7 @@ OMP session
 
 A message acceptance request waits at most 15 seconds and accepts caller cancellation. Cancellation before dispatch sends nothing. Abort, timeout, or close after WebSocket dispatch reports that acceptance and Delivery outcomes are unknown, removes the client request, ignores late replies, and never retries.
 
-A same-named later connection is a new Presence and never inherits pending Delivery. Transport write errors and missing ACKs retry the same Message only on the original socket while it still owns the original Presence, for at most three attempts in one Hub process. Receiver outcomes, either Presence leaving, and Hub shutdown cancel retry timers. Restart retains history but never resumes delivery.
+A same-named later connection is a new Presence and never inherits pending Delivery. Transport write errors and missing ACKs retry the same Message only on the original socket while it still owns the original Presence, for at most three attempts in one Hub process; retry overrides may shorten, never extend, that protocol window. Receiver outcomes use one ordered earliest-expiry timer for their 10-second idle-cleaned cache. Receiver outcomes, either Presence leaving, and Hub shutdown cancel retry timers. Restart retains history but never resumes delivery.
 
 ### Persistent message contract
 
@@ -129,7 +129,7 @@ The sender Extension snapshots attachment bytes before sending. Receivers and hi
 
 ## Verification
 
-The local release gate runs Biome, `bun run smoke`, both Bun entry-point builds, and `docker compose config`. It covers Project isolation and deletion, bounded WebSocket handshake/message/close lifecycles, caller cancellation boundaries, Presence name conflicts and notifications, persist-before-enumerate broadcast routing, replayed acceptance, bounded same-Presence retries, receiver deduplication, delivered/failed/disconnected/unknown cleanup, attachment snapshot/materialization/history, persistent history and protocol version `2`/legacy migration, payload limits, Hub restart, extension registration, and command completion.
+The local release gate runs Biome, `bun run smoke`, both Bun entry-point builds, and `docker compose config`. It covers Project isolation and deletion, bounded WebSocket handshake/message/close lifecycles, caller cancellation boundaries, Presence name conflicts and notifications, persist-before-enumerate broadcast routing, replayed acceptance, maximum-validated same-Presence retries, receiver deduplication with ordered idle outcome expiry, delivered/failed/disconnected/unknown cleanup, attachment snapshot/materialization/history, persistent history and protocol version `2`/legacy migration, payload limits, Hub restart, extension registration, and command completion.
 
 `bun run smoke:docker` crosses the public HTTP/WebSocket process boundary of the selected running Hub, verifies persisted history, and removes its temporary Project.
 
