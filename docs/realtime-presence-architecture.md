@@ -29,9 +29,8 @@ Private protocol version `3` reuses the Hub HTTP server:
 
 - WebSocket `/v1/connect` carries handshake, Presence events, Messages with inline attachment content, acknowledgments, and Delivery outcomes.
 - HTTP carries Hub metadata, Project administration, and explicit history queries.
-- filesystem JSON stores Project metadata;
-- in-memory indexes store Presence and pending delivery;
-- SQLite `messages.sqlite` stores append-only Project history with WAL and `synchronous = FULL`.
+- SQLite `messages.sqlite`, owned by the canonical `HubStore`, stores Project metadata, each Project's sequence, and append-only message history with WAL and `synchronous = FULL`.
+- in-memory indexes store Presence and pending delivery.
 
 Text below 32 KiB stays identity encoded; larger text uses gzip plus Base64. Attachment bytes use Base64 and use gzip first when smaller. One Message accepts at most eight attachments, with a 4 MiB decoded-content limit shared by text and attachment content. Decompression is bounded.
 
@@ -59,7 +58,7 @@ Opening a protocol version `2` `messages.sqlite` adds attachment storage and dec
 - `delivered` proves successful attachment materialization and injection into the receiving OMP extension, not model understanding or task completion. Materialization or injection errors produce a terminal `failed` Delivery.
 - Direct routing is not confidential history. Without accounts and authorization, any trusted current Agent can query Project history.
 - Hub and extension must upgrade together because protocol version `3` has no compatibility path for version `2` Message frames.
-- Project metadata deletion and SQLite history deletion remain separate operations; interrupted deletion requires operator inspection before name reuse.
+- Project deletion is rejected while that Project has an active Presence, then removes its metadata, sequence, and message history in one SQLite transaction.
 
 ## Verification
 

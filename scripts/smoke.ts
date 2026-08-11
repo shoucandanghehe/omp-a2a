@@ -8,13 +8,14 @@ const dataDir = fs.mkdtempSync(
 	path.join(os.tmpdir(), "omp-a2a-store-smoke-"),
 );
 const databasePath = hubStoreDatabasePath(dataDir);
-let store: HubStore | null = new HubStore(databasePath);
+let store: HubStore | null = null;
 
 function assert(condition: unknown, message: string): asserts condition {
 	if (!condition) throw new Error(`ASSERT: ${message}`);
 }
 
 try {
+	store = new HubStore(databasePath);
 	console.log("\n== persistent SQLite Projects ==");
 	store.createProject({ name: "billing" });
 	store.createProject({ name: "search" });
