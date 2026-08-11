@@ -359,11 +359,6 @@ test("history rejects invalid sequences, references, and attachments", async () 
 });
 
 const validMetadata = {
-	pid: 1,
-	port: 4173,
-	baseUrl: "http://127.0.0.1:4173",
-	dataDir: "/tmp/hub",
-	startedAt: 1,
 	protocolVersion: 3,
 };
 

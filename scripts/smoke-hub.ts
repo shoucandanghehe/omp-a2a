@@ -4,7 +4,11 @@ import * as path from "node:path";
 import { HubClient } from "../src/hub/client";
 import { A2aConnection } from "../src/hub/connection";
 import { decodeTextPayload } from "../src/hub/payload";
-import type { DeliveryEvent, RealtimeMessage } from "../src/hub/realtime-types";
+import {
+	A2A_PROTOCOL_VERSION,
+	type DeliveryEvent,
+	type RealtimeMessage,
+} from "../src/hub/realtime-types";
 import { type HubServerHandle, startHubServer } from "../src/hub/server";
 
 const firstDataDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-a2a-hub-a-"));
@@ -34,11 +38,31 @@ class AsyncQueue<T> {
 
 async function main() {
 	console.log("\n== independent Hubs ==");
-	const first = await startHubServer({ dataDir: firstDataDir, port: 0 });
-	const second = await startHubServer({ dataDir: secondDataDir, port: 0 });
+	const first = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir: firstDataDir,
+	});
+	const second = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir: secondDataDir,
+	});
 	handles.push(first, second);
-	const client = new HubClient(first.meta.baseUrl);
-	const otherClient = new HubClient(second.meta.baseUrl);
+	const client = new HubClient(first.listenUrl);
+	const otherClient = new HubClient(second.listenUrl);
+	const meta = await client.meta();
+	assert(
+		JSON.stringify(meta) ===
+			JSON.stringify({ protocolVersion: A2A_PROTOCOL_VERSION }),
+		"Hub metadata contains only the protocol version",
+	);
+	const health = await (await fetch(`${first.listenUrl}/healthz`)).json();
+	assert(
+		JSON.stringify(health) ===
+			JSON.stringify({ ok: true, service: "omp-a2a-hub" }),
+		"Hub health response stays minimal",
+	);
 	await client.createProject({ name: "mesh-demo" });
 	assert(
 		(await otherClient.listProjects()).length === 0,
@@ -51,7 +75,7 @@ async function main() {
 	const webMessages = new AsyncQueue<RealtimeMessage>();
 	const testMessages = new AsyncQueue<RealtimeMessage>();
 	const api = await A2aConnection.connect({
-		baseUrl: first.meta.baseUrl,
+		baseUrl: first.listenUrl,
 		project: "mesh-demo",
 		name: "api",
 		events: {
@@ -60,14 +84,14 @@ async function main() {
 		},
 	});
 	const web = await A2aConnection.connect({
-		baseUrl: first.meta.baseUrl,
+		baseUrl: first.listenUrl,
 		project: "mesh-demo",
 		name: "web",
 		events: { onMessage: (message) => webMessages.push(message) },
 	});
 	assert((await joined.next()) === "web", "web join is announced");
 	const test = await A2aConnection.connect({
-		baseUrl: first.meta.baseUrl,
+		baseUrl: first.listenUrl,
 		project: "mesh-demo",
 		name: "test",
 		events: { onMessage: (message) => testMessages.push(message) },
@@ -131,16 +155,20 @@ async function main() {
 	await web.close();
 	await test.close();
 	await first.stop();
-	const restarted = await startHubServer({ dataDir: firstDataDir, port: 0 });
+	const restarted = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir: firstDataDir,
+	});
 	handles.push(restarted);
-	const restartedClient = new HubClient(restarted.meta.baseUrl);
+	const restartedClient = new HubClient(restarted.listenUrl);
 	const history = await restartedClient.history({
 		project: "mesh-demo",
 		limit: 10,
 	});
 	assert(history.messages.length === 2, "history survives Hub restart");
 	const replacement = await A2aConnection.connect({
-		baseUrl: restarted.meta.baseUrl,
+		baseUrl: restarted.listenUrl,
 		project: "mesh-demo",
 		name: "web",
 	});

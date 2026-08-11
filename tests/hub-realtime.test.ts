@@ -279,12 +279,16 @@ afterEach(async () => {
 test("transport close releases Presence and allows name reuse", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-realtime-"));
 	roots.push(dataDir);
-	const hub = await startHubServer({ port: 0, dataDir });
+	const hub = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir,
+	});
 	hubs.push(hub);
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "room" });
 
-	const api = await connect(hub.meta.baseUrl, "room", "api");
+	const api = await connect(hub.listenUrl, "room", "api");
 	const apiClaimed = await api.frames.next();
 	expect(apiClaimed).toMatchObject({
 		type: "claimed",
@@ -293,14 +297,14 @@ test("transport close releases Presence and allows name reuse", async () => {
 		peers: [],
 	});
 
-	const duplicate = await connect(hub.meta.baseUrl, "room", "api");
+	const duplicate = await connect(hub.listenUrl, "room", "api");
 	expect(await duplicate.frames.next()).toMatchObject({
 		type: "error",
 		code: "name_in_use",
 	});
 	duplicate.socket.terminate();
 
-	const web = await connect(hub.meta.baseUrl, "room", "web");
+	const web = await connect(hub.listenUrl, "room", "web");
 	const webClaimed = await web.frames.next();
 	expect(webClaimed).toMatchObject({
 		type: "claimed",
@@ -318,7 +322,7 @@ test("transport close releases Presence and allows name reuse", async () => {
 		peer: { name: "web" },
 	});
 
-	const replacement = await connect(hub.meta.baseUrl, "room", "web");
+	const replacement = await connect(hub.listenUrl, "room", "web");
 	const replacementClaimed = await replacement.frames.next();
 	expect(replacementClaimed).toMatchObject({
 		type: "claimed",
@@ -337,17 +341,21 @@ test("transport close releases Presence and allows name reuse", async () => {
 test("direct messages and broadcasts bind the current concrete Presences", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-realtime-"));
 	roots.push(dataDir);
-	const hub = await startHubServer({ port: 0, dataDir });
+	const hub = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir,
+	});
 	hubs.push(hub);
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "chat" });
 
-	const api = await connect(hub.meta.baseUrl, "chat", "api");
+	const api = await connect(hub.listenUrl, "chat", "api");
 	await api.frames.next();
-	const web = await connect(hub.meta.baseUrl, "chat", "web");
+	const web = await connect(hub.listenUrl, "chat", "web");
 	await web.frames.next();
 	await api.frames.next();
-	const testPeer = await connect(hub.meta.baseUrl, "chat", "test");
+	const testPeer = await connect(hub.listenUrl, "chat", "test");
 	await testPeer.frames.next();
 	await api.frames.next();
 	await web.frames.next();
@@ -478,7 +486,7 @@ test("direct messages and broadcasts bind the current concrete Presences", async
 		message: { messageRef: "chat:1" },
 	});
 	expect("recipients" in replayed).toBe(false);
-	const replacement = await connect(hub.meta.baseUrl, "chat", "web");
+	const replacement = await connect(hub.listenUrl, "chat", "web");
 	const replacementClaimed = await replacement.frames.next();
 	if (replacementClaimed.type !== "claimed")
 		throw new Error("expected replacement claim");
@@ -501,13 +509,17 @@ test("direct messages and broadcasts bind the current concrete Presences", async
 test("message history survives Hub restart while Presence does not", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-realtime-"));
 	roots.push(dataDir);
-	const first = await startHubServer({ port: 0, dataDir });
+	const first = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir,
+	});
 	hubs.push(first);
-	const firstClient = new HubClient(first.meta.baseUrl);
+	const firstClient = new HubClient(first.listenUrl);
 	await firstClient.createProject({ name: "durable-chat" });
-	const api = await connect(first.meta.baseUrl, "durable-chat", "api");
+	const api = await connect(first.listenUrl, "durable-chat", "api");
 	await api.frames.next();
-	const web = await connect(first.meta.baseUrl, "durable-chat", "web");
+	const web = await connect(first.listenUrl, "durable-chat", "web");
 	await web.frames.next();
 	await api.frames.next();
 	const attachmentBytes = Buffer.from("# Training handoff\nseed=20\n", "utf8");
@@ -536,9 +548,13 @@ test("message history survives Hub restart while Presence does not", async () =>
 	await api.frames.next();
 	await first.stop();
 
-	const second = await startHubServer({ port: 0, dataDir });
+	const second = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir,
+	});
 	hubs.push(second);
-	const secondClient = new HubClient(second.meta.baseUrl);
+	const secondClient = new HubClient(second.listenUrl);
 	const history = await secondClient.history({
 		project: "durable-chat",
 		limit: 10,
@@ -555,7 +571,7 @@ test("message history survives Hub restart while Presence does not", async () =>
 		"attachments" in persisted ? persisted.attachments : undefined,
 	).toEqual([attachment]);
 
-	const replacement = await connect(second.meta.baseUrl, "durable-chat", "web");
+	const replacement = await connect(second.listenUrl, "durable-chat", "web");
 	expect(await replacement.frames.next()).toMatchObject({
 		type: "claimed",
 		peers: [],
@@ -599,16 +615,16 @@ test("caller abort leaves no socket or Presence", async () => {
 
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-abort-"));
 	roots.push(dataDir);
-	const hub = await startHubServer({ port: 0, dataDir });
+	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
 	hubs.push(hub);
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "abort-room" });
 	const preAborted = new AbortController();
 	const preAbortReason = new Error("caller cancelled before handshake");
 	preAborted.abort(preAbortReason);
 	await expect(
 		A2aConnection.connect({
-			baseUrl: hub.meta.baseUrl,
+			baseUrl: hub.listenUrl,
 			project: "abort-room",
 			name: "api",
 			signal: preAborted.signal,
@@ -661,9 +677,9 @@ test("a later handshake abort cannot replace the failure that won", async () => 
 test("connection lifecycle timeout overrides reject invalid and over-limit values", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-invalid-timeouts-"));
 	roots.push(dataDir);
-	const hub = await startHubServer({ port: 0, dataDir });
+	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
 	hubs.push(hub);
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "invalid-timeouts" });
 	const cases: Array<{
 		label: string;
@@ -686,7 +702,7 @@ test("connection lifecycle timeout overrides reject invalid and over-limit value
 
 	for (const [index, { label, options }] of cases.entries()) {
 		const outcome = await A2aConnection.connect({
-			baseUrl: hub.meta.baseUrl,
+			baseUrl: hub.listenUrl,
 			project: "invalid-timeouts",
 			name: `invalid-${index}`,
 			...options,
@@ -700,7 +716,7 @@ test("connection lifecycle timeout overrides reject invalid and over-limit value
 	}
 
 	const atLimit = await A2aConnection.connect({
-		baseUrl: hub.meta.baseUrl,
+		baseUrl: hub.listenUrl,
 		project: "invalid-timeouts",
 		name: "at-limit",
 		timeoutMs: 5_000,
@@ -714,11 +730,11 @@ test("connection lifecycle timeout overrides reject invalid and over-limit value
 test("the Hub rejects non-exact goodbye without releasing Presence", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-exact-goodbye-"));
 	roots.push(dataDir);
-	const hub = await startHubServer({ port: 0, dataDir });
+	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
 	hubs.push(hub);
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "exact-goodbye" });
-	const api = await connect(hub.meta.baseUrl, "exact-goodbye", "api");
+	const api = await connect(hub.listenUrl, "exact-goodbye", "api");
 	await api.frames.next();
 
 	api.socket.send(JSON.stringify({ type: "goodbye", unexpected: true }));
@@ -727,7 +743,7 @@ test("the Hub rejects non-exact goodbye without releasing Presence", async () =>
 		code: "invalid_frame",
 	});
 
-	const duplicate = await connect(hub.meta.baseUrl, "exact-goodbye", "api");
+	const duplicate = await connect(hub.listenUrl, "exact-goodbye", "api");
 	expect(await duplicate.frames.next()).toMatchObject({
 		type: "error",
 		code: "name_in_use",
@@ -744,17 +760,17 @@ test("the Hub rejects non-exact goodbye without releasing Presence", async () =>
 test("the Hub closes transport after acknowledging goodbye", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-server-goodbye-"));
 	roots.push(dataDir);
-	const hub = await startHubServer({ port: 0, dataDir });
+	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
 	hubs.push(hub);
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "server-goodbye" });
 	const observer = await connect(
-		hub.meta.baseUrl,
+		hub.listenUrl,
 		"server-goodbye",
 		"observer",
 	);
 	await observer.frames.next();
-	const api = await connect(hub.meta.baseUrl, "server-goodbye", "api");
+	const api = await connect(hub.listenUrl, "server-goodbye", "api");
 	await api.frames.next();
 	await observer.frames.next();
 	const closed = Promise.withResolvers<void>();
@@ -776,17 +792,17 @@ test("the Hub closes transport after acknowledging goodbye", async () => {
 test("the Hub terminates a transport whose close frames cannot reach the peer", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-server-terminate-"));
 	roots.push(dataDir);
-	const hub = await startHubServer({ port: 0, dataDir });
+	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
 	hubs.push(hub);
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "server-terminate" });
 	const observer = await connect(
-		hub.meta.baseUrl,
+		hub.listenUrl,
 		"server-terminate",
 		"observer",
 	);
 	await observer.frames.next();
-	const api = await connect(hub.meta.baseUrl, "server-terminate", "api");
+	const api = await connect(hub.listenUrl, "server-terminate", "api");
 	const closed = Promise.withResolvers<void>();
 	api.socket.once("close", () => closed.resolve());
 	expect(await api.frames.next()).toMatchObject({ type: "claimed" });
@@ -810,7 +826,7 @@ test("the Hub terminates a transport whose close frames cannot reach the peer", 
 	}
 
 	const replacement = await connect(
-		hub.meta.baseUrl,
+		hub.listenUrl,
 		"server-terminate",
 		"api",
 	);
@@ -847,14 +863,14 @@ test("client reports a non-exact goodbye acknowledgement", async () => {
 test("close shares one goodbye barrier and releases the name before resolving", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-goodbye-"));
 	roots.push(dataDir);
-	const hub = await startHubServer({ port: 0, dataDir });
+	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
 	hubs.push(hub);
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "goodbye-room" });
-	const observer = await connect(hub.meta.baseUrl, "goodbye-room", "observer");
+	const observer = await connect(hub.listenUrl, "goodbye-room", "observer");
 	await observer.frames.next();
 	const api = await A2aConnection.connect({
-		baseUrl: hub.meta.baseUrl,
+		baseUrl: hub.listenUrl,
 		project: "goodbye-room",
 		name: "api",
 	});
@@ -873,7 +889,7 @@ test("close shares one goodbye barrier and releases the name before resolving", 
 	});
 
 	const replacement = await A2aConnection.connect({
-		baseUrl: hub.meta.baseUrl,
+		baseUrl: hub.listenUrl,
 		project: "goodbye-room",
 		name: "api",
 	});
@@ -1223,13 +1239,13 @@ test("message timeout overrides reject invalid and over-limit values before disp
 test("delivery cleanup is fenced by recipient and sender Presence", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-delivery-cleanup-"));
 	roots.push(dataDir);
-	const hub = await startHubServer({ port: 0, dataDir });
+	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
 	hubs.push(hub);
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "cleanup" });
-	const sender = await connect(hub.meta.baseUrl, "cleanup", "sender");
+	const sender = await connect(hub.listenUrl, "cleanup", "sender");
 	await sender.frames.next();
-	const recipient = await connect(hub.meta.baseUrl, "cleanup", "recipient");
+	const recipient = await connect(hub.listenUrl, "cleanup", "recipient");
 	await recipient.frames.next();
 	await sender.frames.next();
 
@@ -1256,7 +1272,7 @@ test("delivery cleanup is fenced by recipient and sender Presence", async () => 
 	await sender.frames.next();
 
 	const recipientReplacement = await connect(
-		hub.meta.baseUrl,
+		hub.listenUrl,
 		"cleanup",
 		"recipient",
 	);
@@ -1270,7 +1286,7 @@ test("delivery cleanup is fenced by recipient and sender Presence", async () => 
 	await sender.frames.next();
 
 	const recipientTwo = await connect(
-		hub.meta.baseUrl,
+		hub.listenUrl,
 		"cleanup",
 		"recipient",
 	);
@@ -1296,7 +1312,7 @@ test("delivery cleanup is fenced by recipient and sender Presence", async () => 
 	});
 
 	const senderReplacement = await connect(
-		hub.meta.baseUrl,
+		hub.listenUrl,
 		"cleanup",
 		"sender",
 	);
@@ -1759,19 +1775,19 @@ test("receiver expires terminal outcomes while idle with one ordered timer", asy
 test("same-version clients carry large messages and arbitrary attachment counts", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-realtime-"));
 	roots.push(dataDir);
-	const hub = await startHubServer({ port: 0, dataDir });
+	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
 	hubs.push(hub);
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "trusted-payloads" });
 	const inbound = Promise.withResolvers<RealtimeMessage>();
 	const receiver = await A2aConnection.connect({
-		baseUrl: hub.meta.baseUrl,
+		baseUrl: hub.listenUrl,
 		project: "trusted-payloads",
 		name: "receiver",
 		events: { onMessage: inbound.resolve },
 	});
 	const sender = await A2aConnection.connect({
-		baseUrl: hub.meta.baseUrl,
+		baseUrl: hub.listenUrl,
 		project: "trusted-payloads",
 		name: "sender",
 	});

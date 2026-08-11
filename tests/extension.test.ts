@@ -152,8 +152,12 @@ test("model tools stay push-driven and forward history cancellation", async () =
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-extension-prompt-"));
 	const project = "prompt-contract";
 	const cwd = join(dataDir, "client");
-	const hub = await startHubServer({ port: 0, dataDir });
-	const client = new HubClient(hub.meta.baseUrl);
+	const hub = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir,
+	});
+	const client = new HubClient(hub.listenUrl);
 	const tools = new Map<string, RegisteredTool>();
 	let commandHandler:
 		| ((
@@ -165,17 +169,21 @@ test("model tools stay push-driven and forward history cancellation", async () =
 		| (() => { systemPrompt?: string[] } | undefined)
 		| undefined;
 	let worker: A2aConnection | null = null;
-	const context = { cwd, ui: { notify() {} } };
+	const notifications: string[] = [];
+	const context = {
+		cwd,
+		ui: { notify: (message: string) => notifications.push(message) },
+	};
 
 	try {
 		await client.createProject({ name: project });
 		mkdirSync(join(cwd, ".omp"), { recursive: true });
 		writeFileSync(
 			join(cwd, ".omp", "a2a.yml"),
-			`project: ${project}\nname: api\nhubUrl: ${hub.meta.baseUrl}\nautoConnect: false\n`,
+			`project: ${project}\nname: api\nhubUrl: ${hub.listenUrl}\nautoConnect: false\n`,
 		);
 		worker = await A2aConnection.connect({
-			baseUrl: hub.meta.baseUrl,
+			baseUrl: hub.listenUrl,
 			project,
 			name: "worker",
 		});
@@ -202,6 +210,10 @@ test("model tools stay push-driven and forward history cancellation", async () =
 		} as never);
 
 		if (!commandHandler) throw new Error("a2a command was not registered");
+		await commandHandler("hub", context);
+		expect(notifications.at(-1)).toBe(
+			`Hub ${hub.listenUrl} protocol=${A2A_PROTOCOL_VERSION}`,
+		);
 		await commandHandler(`connect ${project} --as api`, context);
 		if (!beforeAgentStart)
 			throw new Error("A2A identity system prompt was not registered");
@@ -280,8 +292,8 @@ test("idle Presence changes collapse to the roster delta before the next message
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-extension-presence-"));
 	const project = "presence-model-events";
 	const cwd = join(dataDir, "receiver");
-	const hub = await startHubServer({ port: 0, dataDir });
-	const client = new HubClient(hub.meta.baseUrl);
+	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
+	const client = new HubClient(hub.listenUrl);
 	const rosterSettled = Promise.withResolvers<void>();
 	const newcomerJoined = Promise.withResolvers<void>();
 	const inboundInjected = Promise.withResolvers<void>();
@@ -339,10 +351,10 @@ test("idle Presence changes collapse to the roster delta before the next message
 		mkdirSync(join(cwd, ".omp"), { recursive: true });
 		writeFileSync(
 			join(cwd, ".omp", "a2a.yml"),
-			`project: ${project}\nname: receiver\nhubUrl: ${hub.meta.baseUrl}\nautoConnect: false\n`,
+			`project: ${project}\nname: receiver\nhubUrl: ${hub.listenUrl}\nautoConnect: false\n`,
 		);
 		departing = await A2aConnection.connect({
-			baseUrl: hub.meta.baseUrl,
+			baseUrl: hub.listenUrl,
 			project,
 			name: "departing",
 		});
@@ -378,13 +390,13 @@ test("idle Presence changes collapse to the roster delta before the next message
 		await agentEnd({ type: "agent_end", messages: [] });
 
 		worker = await A2aConnection.connect({
-			baseUrl: hub.meta.baseUrl,
+			baseUrl: hub.listenUrl,
 			project,
 			name: "worker",
 			events: { onDelivery: delivery.resolve },
 		});
 		transient = await A2aConnection.connect({
-			baseUrl: hub.meta.baseUrl,
+			baseUrl: hub.listenUrl,
 			project,
 			name: "transient",
 		});
@@ -413,7 +425,7 @@ test("idle Presence changes collapse to the roster delta before the next message
 
 		await agentEnd({ type: "agent_end", messages: [] });
 		newcomer = await A2aConnection.connect({
-			baseUrl: hub.meta.baseUrl,
+			baseUrl: hub.listenUrl,
 			project,
 			name: "newcomer",
 		});
@@ -446,8 +458,12 @@ test("a2a_message snapshots a sender local file into the receiver session and hi
 	const receiverCwd = join(dataDir, "receiver");
 	const senderArtifacts = join(dataDir, "sender-artifacts");
 	const receiverArtifacts = join(dataDir, "receiver-artifacts");
-	const hub = await startHubServer({ port: 0, dataDir });
-	const client = new HubClient(hub.meta.baseUrl);
+	const hub = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir,
+	});
+	const client = new HubClient(hub.listenUrl);
 	const senderTools = new Map<string, RegisteredTool>();
 	const receiverTools = new Map<string, RegisteredTool>();
 	let senderCommand:
@@ -497,7 +513,7 @@ test("a2a_message snapshots a sender local file into the receiver session and hi
 			mkdirSync(join(cwd, ".omp"), { recursive: true });
 			writeFileSync(
 				join(cwd, ".omp", "a2a.yml"),
-				`project: ${project}\nname: ${name}\nhubUrl: ${hub.meta.baseUrl}\nautoConnect: false\n`,
+				`project: ${project}\nname: ${name}\nhubUrl: ${hub.listenUrl}\nautoConnect: false\n`,
 			);
 		}
 		mkdirSync(join(senderArtifacts, "local"), { recursive: true });
@@ -687,8 +703,8 @@ test("a2a_message snapshots a sender local file into the receiver session and hi
 test("a2a_message cannot cross a Project switch after a slow snapshot", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-extension-send-fence-"));
 	const cwd = join(dataDir, "client");
-	const hub = await startHubServer({ port: 0, dataDir });
-	const client = new HubClient(hub.meta.baseUrl);
+	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
+	const client = new HubClient(hub.listenUrl);
 	const snapshotStarted = Promise.withResolvers<void>();
 	const releaseSnapshot = Promise.withResolvers<void>();
 	const tools = new Map<string, RegisteredTool>();
@@ -708,7 +724,7 @@ test("a2a_message cannot cross a Project switch after a slow snapshot", async ()
 		mkdirSync(join(cwd, ".omp"), { recursive: true });
 		writeFileSync(
 			join(cwd, ".omp", "a2a.yml"),
-			`project: send-fence-a\nname: worker\nhubUrl: ${hub.meta.baseUrl}\nautoConnect: false\n`,
+			`project: send-fence-a\nname: worker\nhubUrl: ${hub.listenUrl}\nautoConnect: false\n`,
 		);
 		a2aExtension(
 			{
@@ -777,8 +793,8 @@ test("history materialization disposes successful siblings when one fails", asyn
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-history-batch-"));
 	const cwd = join(dataDir, "client");
 	const artifacts = join(dataDir, "artifacts");
-	const hub = await startHubServer({ port: 0, dataDir });
-	const client = new HubClient(hub.meta.baseUrl);
+	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
+	const client = new HubClient(hub.listenUrl);
 	const tools = new Map<string, RegisteredTool>();
 	const firstMaterialized = Promise.withResolvers<void>();
 	let sender: A2aConnection | undefined;
@@ -799,7 +815,7 @@ test("history materialization disposes successful siblings when one fails", asyn
 	try {
 		await client.createProject({ name: "history-batch" });
 		sender = await A2aConnection.connect({
-			baseUrl: hub.meta.baseUrl,
+			baseUrl: hub.listenUrl,
 			project: "history-batch",
 			name: "sender",
 		});
@@ -831,7 +847,7 @@ test("history materialization disposes successful siblings when one fails", asyn
 		mkdirSync(join(cwd, ".omp"), { recursive: true });
 		writeFileSync(
 			join(cwd, ".omp", "a2a.yml"),
-			`project: history-batch\nname: worker\nhubUrl: ${hub.meta.baseUrl}\nautoConnect: false\n`,
+			`project: history-batch\nname: worker\nhubUrl: ${hub.listenUrl}\nautoConnect: false\n`,
 		);
 		a2aExtension(
 			{
@@ -906,8 +922,8 @@ test("session shutdown aborts slash history and suppresses stale UI", async () =
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-history-shutdown-"));
 	const cwd = join(dataDir, "client");
 	const artifacts = join(dataDir, "artifacts");
-	const hub = await startHubServer({ port: 0, dataDir });
-	const client = new HubClient(hub.meta.baseUrl);
+	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
+	const client = new HubClient(hub.listenUrl);
 	const materialized = Promise.withResolvers<void>();
 	const notifications: string[] = [];
 	let sender: A2aConnection | undefined;
@@ -933,7 +949,7 @@ test("session shutdown aborts slash history and suppresses stale UI", async () =
 	try {
 		await client.createProject({ name: "history-shutdown" });
 		sender = await A2aConnection.connect({
-			baseUrl: hub.meta.baseUrl,
+			baseUrl: hub.listenUrl,
 			project: "history-shutdown",
 			name: "sender",
 		});
@@ -954,7 +970,7 @@ test("session shutdown aborts slash history and suppresses stale UI", async () =
 		mkdirSync(join(cwd, ".omp"), { recursive: true });
 		writeFileSync(
 			join(cwd, ".omp", "a2a.yml"),
-			`project: history-shutdown\nname: worker\nhubUrl: ${hub.meta.baseUrl}\nautoConnect: false\n`,
+			`project: history-shutdown\nname: worker\nhubUrl: ${hub.listenUrl}\nautoConnect: false\n`,
 		);
 		a2aExtension(
 			{
@@ -1029,8 +1045,12 @@ test("session switch cancels an in-flight inbound injection", async () => {
 	const switchedCwd = join(dataDir, "switched");
 	const receiverArtifacts = join(dataDir, "receiver-artifacts");
 	const switchedArtifacts = join(dataDir, "switched-artifacts");
-	const hub = await startHubServer({ port: 0, dataDir });
-	const client = new HubClient(hub.meta.baseUrl);
+	const hub = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir,
+	});
+	const client = new HubClient(hub.listenUrl);
 	const delivery = Promise.withResolvers<DeliveryEvent>();
 	const injected: string[] = [];
 	let sender: A2aConnection | undefined;
@@ -1074,7 +1094,7 @@ test("session switch cancels an in-flight inbound injection", async () => {
 		mkdirSync(join(receiverCwd, ".omp"), { recursive: true });
 		writeFileSync(
 			join(receiverCwd, ".omp", "a2a.yml"),
-			`project: session-switch\nname: receiver\nhubUrl: ${hub.meta.baseUrl}\nautoConnect: false\n`,
+			`project: session-switch\nname: receiver\nhubUrl: ${hub.listenUrl}\nautoConnect: false\n`,
 		);
 		a2aExtension({
 			arktype(definition: unknown) {
@@ -1104,7 +1124,7 @@ test("session switch cancels an in-flight inbound injection", async () => {
 			receiverContext,
 		);
 		sender = await A2aConnection.connect({
-			baseUrl: hub.meta.baseUrl,
+			baseUrl: hub.listenUrl,
 			project: "session-switch",
 			name: "sender",
 			events: { onDelivery: delivery.resolve },
@@ -1142,8 +1162,8 @@ test("manual Project switch cancels old in-flight attachment injection", async (
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-extension-project-switch-"));
 	const receiverCwd = join(dataDir, "receiver");
 	const receiverArtifacts = join(dataDir, "receiver-artifacts");
-	const hub = await startHubServer({ port: 0, dataDir });
-	const client = new HubClient(hub.meta.baseUrl);
+	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
+	const client = new HubClient(hub.listenUrl);
 	const delivery = Promise.withResolvers<DeliveryEvent>();
 	const materializationStarted = Promise.withResolvers<void>();
 	const releaseMaterialization = Promise.withResolvers<void>();
@@ -1174,7 +1194,7 @@ test("manual Project switch cancels old in-flight attachment injection", async (
 		mkdirSync(join(receiverCwd, ".omp"), { recursive: true });
 		writeFileSync(
 			join(receiverCwd, ".omp", "a2a.yml"),
-			`project: project-a\nname: receiver\nhubUrl: ${hub.meta.baseUrl}\nautoConnect: false\n`,
+			`project: project-a\nname: receiver\nhubUrl: ${hub.listenUrl}\nautoConnect: false\n`,
 		);
 		a2aExtension(
 			{
@@ -1216,7 +1236,7 @@ test("manual Project switch cancels old in-flight attachment injection", async (
 		if (!commandHandler) throw new Error("a2a command was not registered");
 		await commandHandler("connect project-a --as receiver", receiverContext);
 		sender = await A2aConnection.connect({
-			baseUrl: hub.meta.baseUrl,
+			baseUrl: hub.listenUrl,
 			project: "project-a",
 			name: "sender",
 			events: { onDelivery: delivery.resolve },
@@ -1258,8 +1278,8 @@ test("manual Project switch cancels old in-flight attachment injection", async (
 test("ordinary command contexts do not cancel same-session inbound injection", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-extension-generation-"));
 	const receiverCwd = join(dataDir, "receiver");
-	const hub = await startHubServer({ port: 0, dataDir });
-	const client = new HubClient(hub.meta.baseUrl);
+	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
+	const client = new HubClient(hub.listenUrl);
 	const materializationStarted = Promise.withResolvers<void>();
 	const releaseMaterialization = Promise.withResolvers<void>();
 	const delivery = Promise.withResolvers<DeliveryEvent>();
@@ -1280,7 +1300,7 @@ test("ordinary command contexts do not cancel same-session inbound injection", a
 		mkdirSync(join(receiverCwd, ".omp"), { recursive: true });
 		writeFileSync(
 			join(receiverCwd, ".omp", "a2a.yml"),
-			`project: generation\nname: receiver\nhubUrl: ${hub.meta.baseUrl}\nautoConnect: false\n`,
+			`project: generation\nname: receiver\nhubUrl: ${hub.listenUrl}\nautoConnect: false\n`,
 		);
 		a2aExtension(
 			{
@@ -1317,7 +1337,7 @@ test("ordinary command contexts do not cancel same-session inbound injection", a
 		if (!commandHandler) throw new Error("a2a command was not registered");
 		await commandHandler("connect generation --as receiver", receiverContext);
 		sender = await A2aConnection.connect({
-			baseUrl: hub.meta.baseUrl,
+			baseUrl: hub.listenUrl,
 			project: "generation",
 			name: "sender",
 			events: { onDelivery: delivery.resolve },
@@ -1358,18 +1378,8 @@ test("session switch invalidates obsolete reconnect work before awaiting teardow
 			response.writeHead(404).end();
 			return;
 		}
-		const port = (server.address() as AddressInfo).port;
 		response.setHeader("content-type", "application/json");
-		response.end(
-			JSON.stringify({
-				pid: process.pid,
-				port,
-				baseUrl: `http://127.0.0.1:${port}`,
-				dataDir,
-				startedAt: Date.now(),
-				protocolVersion: 3,
-			}),
-		);
+		response.end(JSON.stringify({ protocolVersion: 3 }));
 	});
 	const webSockets = new WebSocketServer({ noServer: true });
 	server.on("upgrade", (request, socket, head) => {
@@ -1514,19 +1524,8 @@ test("name conflict restores the accepting Hub as reconnect intent", async () =>
 			response.writeHead(404).end();
 			return;
 		}
-		const port = (server.address() as AddressInfo).port;
-		const hubPath = request.url.startsWith("/hub-a/") ? "/hub-a" : "/hub-b";
 		response.setHeader("content-type", "application/json");
-		response.end(
-			JSON.stringify({
-				pid: process.pid,
-				port,
-				baseUrl: `http://127.0.0.1:${port}${hubPath}`,
-				dataDir,
-				startedAt: Date.now(),
-				protocolVersion: 3,
-			}),
-		);
+		response.end(JSON.stringify({ protocolVersion: 3 }));
 	});
 	const webSockets = new WebSocketServer({ noServer: true });
 	server.on("upgrade", (request, socket, head) => {
@@ -1705,14 +1704,7 @@ test("invalid Session config blocks fallback Hub access until a successful reloa
 	globalThis.fetch = (async () => {
 		fetchCount += 1;
 		return new Response(
-			JSON.stringify({
-				pid: 1,
-				port: 4173,
-				baseUrl: fallbackUrl,
-				dataDir: "/tmp/a2a-test",
-				startedAt: 1,
-				protocolVersion: A2A_PROTOCOL_VERSION,
-			}),
+			JSON.stringify({ protocolVersion: A2A_PROTOCOL_VERSION }),
 			{
 				status: 200,
 				headers: { "content-type": "application/json" },
@@ -1787,8 +1779,8 @@ test("invalid config reload closes fallback Presence and blocks sends without tr
 	const cwd = join(dataDir, "client");
 	const invalidFile = join(cwd, ".omp", "a2a.yml");
 	const project = "config-fail-closed";
-	const hub = await startHubServer({ port: 0, dataDir });
-	const client = new HubClient(hub.meta.baseUrl);
+	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
+	const client = new HubClient(hub.listenUrl);
 	const tools = new Map<string, RegisteredTool>();
 	const notifications: string[] = [];
 	const firstJoined = Promise.withResolvers<void>();
@@ -1817,7 +1809,7 @@ test("invalid config reload closes fallback Presence and blocks sends without tr
 		| ((args: string, context: typeof context) => Promise<void>)
 		| undefined;
 	const previousEnvironmentUrl = process.env.OMP_A2A_HUB_URL;
-	process.env.OMP_A2A_HUB_URL = hub.meta.baseUrl;
+	process.env.OMP_A2A_HUB_URL = hub.listenUrl;
 
 	try {
 		await client.createProject({ name: project });
@@ -1827,7 +1819,7 @@ test("invalid config reload closes fallback Presence and blocks sends without tr
 			`project: ${project}\nname: api\nautoConnect: true\n`,
 		);
 		observer = await A2aConnection.connect({
-			baseUrl: hub.meta.baseUrl,
+			baseUrl: hub.listenUrl,
 			project,
 			name: "observer",
 			events: {
@@ -1893,7 +1885,7 @@ test("invalid config reload closes fallback Presence and blocks sends without tr
 		let replacementError: string | null = null;
 		try {
 			replacement = await A2aConnection.connect({
-				baseUrl: hub.meta.baseUrl,
+				baseUrl: hub.listenUrl,
 				project,
 				name: "api",
 			});

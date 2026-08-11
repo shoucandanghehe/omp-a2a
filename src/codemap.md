@@ -15,7 +15,7 @@ The central seam is `A2aRuntime`: extension callbacks and commands depend on one
 | `operations.ts` | Connected runtime over one WebSocket plus HTTP Project/history operations. | `A2aRuntime`, `MessageView`, `RuntimeStatus` |
 | `config.ts` | Strict repository-local YAML/JSON connection defaults. | `loadLocalConfig` |
 | `config-document.ts` | Read YAML/JSON documents, apply an owner-supplied omptype schema, and report path-qualified errors. | `parseWithSchema` |
-| `paths.ts` | Hub SQLite/runtime storage paths and local config candidates. | path functions |
+| `paths.ts` | Hub SQLite storage, data-lock, and local config candidate paths. | path functions |
 | `types.ts` | Project/config domain shapes and name validation regexes. | `A2aProject`, `A2aLocalConfig` |
 | `hub/` | HTTP/WebSocket clients plus the Hub's canonical Project/message store. | [`hub/codemap.md`](hub/codemap.md) |
 
@@ -81,7 +81,8 @@ Connected model turns receive the current A2A roster name and use only `a2a_peer
 - `disconnect()` is idempotent, supersedes pending connect work, aborts the published message lifecycle, clears the binding, and publishes one teardown barrier until candidate and socket closure complete. Concurrent close callers share one bounded goodbye/close Promise.
 - Replacing or closing a published connection aborts the token used to fence asynchronous inbound and outbound work.
 - `peers()` uses the published WebSocket. `message()` can require its initiating connection token, forwards caller cancellation, and returns a strong new/replayed acceptance union. Pre-dispatch abort sends nothing; abort, timeout, or close after dispatch reports an unknown acceptance outcome without caller retry.
-- `history()` and connected `status()` use the bound `HubClient` and accept caller cancellation; Project create/list/delete and disconnected status use the currently selected client.
+- `history()` and connected `status()` use the bound `HubClient` and accept caller cancellation; Project create/list/delete and disconnected status use the currently selected client. Status reports the selected `HubClient.baseUrl`; metadata supplies only protocol compatibility and never replaces that URL.
+- Project create/list/delete are thin HTTP operations and do not require a Presence.
 
 Attachment snapshot and materialization combine caller, Session, and published-connection signals. Materialization returns explicit disposable/commit ownership so cancellation, a final fence failure, injection failure, or a failed history sibling removes every uncommitted output directory.
 

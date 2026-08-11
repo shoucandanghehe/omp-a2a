@@ -81,13 +81,13 @@ Hub URL precedence is:
 3. global `~/.omp/a2a/config.yml`, `.yaml`, or `.json`;
 4. `http://127.0.0.1:4173`.
 
-The resolved URL is authoritative for HTTP and WebSocket connections; Hub metadata validates protocol compatibility without replacing the route.
+The resolved client URL is authoritative for HTTP and WebSocket connections. Hub metadata is exactly `{protocolVersion}` and only validates compatibility; health is exactly `{ok:true,service:"omp-a2a-hub"}`. Neither response advertises a route. In-process server callers receive a loopback-reachable `listenUrl`.
 
 Repository-local connection defaults require `project` and `name`; `autoConnect` defaults to enabled. Removed `agentId` and `autoJoin` fields fail with an explicit migration error.
 
 If a command reload finds the repository-local configuration invalid, the Extension closes the current Presence, clears reconnect intent, and blocks fallback Hub access until a successful reload or Session switch.
 
-The Hub runs locally with `bun run hub` or in Docker Compose. Each Hub needs a unique URL and data directory. `HubDataLock` rejects concurrent ownership of one directory. The shared SQLite Hub store uses WAL with `synchronous = FULL`; new storage writes the complete current schema and version atomically, while mismatches fail closed.
+The Hub runs locally with `bun run hub` or in Docker Compose. The CLI alone resolves `--host`, `--port`, and `--data-dir` with flag → environment → default precedence, rejecting a selected blank value, before calling the explicit server API. Each Hub needs a unique listener and data directory; `HubDataLock` is the only runtime ownership record. The shared SQLite Hub store uses WAL with `synchronous = FULL`; new storage writes the complete current schema and version atomically, while mismatches fail closed. The Bun `1.3.14` image runs with fixed `0.0.0.0:4173` and `/data/omp-a2a` arguments, while Compose owns host-port publication, restart policy, and memory/CPU/PID limits.
 
 ## User surfaces
 
@@ -115,9 +115,9 @@ The sender Extension snapshots attachment bytes before sending and fences the fi
 | `AGENTS.md` | Repository map, commit-message style, signing, and history-rewrite rules. |
 | `README.md` | Operator and user how-to plus public behavior contract. |
 | `config.example.yml` | Global Hub URL example. |
-| `.env.example` | Docker Compose environment defaults. |
-| `Dockerfile` | Unprivileged standalone Hub image. |
-| `docker-compose.yml` | Hub process, health check, published port, and persistent volume. |
+| `.env.example` | Compose host-port and resource-limit defaults plus local CLI storage example. |
+| `Dockerfile` | Pinned Bun `1.3.14`, unprivileged standalone Hub image on fixed `0.0.0.0:4173`. |
+| `docker-compose.yml` | Hub health, host-port publication, persistent volume, restart policy, and memory/CPU/PID limits. |
 
 ## Directory map
 

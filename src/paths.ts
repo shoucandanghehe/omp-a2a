@@ -16,14 +16,6 @@ export function hubRunDir(dataDir: string = defaultDataDir()): string {
 	return path.join(dataDir, "run");
 }
 
-export function hubMetaPath(dataDir?: string): string {
-	return path.join(hubRunDir(dataDir), "hub.json");
-}
-
-export function hubPidPath(dataDir?: string): string {
-	return path.join(hubRunDir(dataDir), "hub.pid");
-}
-
 export function hubLockPath(dataDir?: string): string {
 	return path.join(hubRunDir(dataDir), "hub-lock.sqlite");
 }

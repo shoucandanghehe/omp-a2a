@@ -5,13 +5,38 @@ import {
 	decodeTextPayload,
 	encodeBinaryPayload,
 } from "../src/hub/payload";
-import type { RealtimeMessage } from "../src/hub/realtime-types";
+import {
+	A2A_PROTOCOL_VERSION,
+	type RealtimeMessage,
+} from "../src/hub/realtime-types";
 
 function assert(condition: unknown, message: string): asserts condition {
 	if (!condition) throw new Error(`ASSERT: ${message}`);
 }
 
 const client = await HubClient.connect();
+const metaResponse = await fetch(`${client.baseUrl}/v1/meta`);
+assert(
+	metaResponse.ok,
+	`Docker Hub metadata returned HTTP ${metaResponse.status}`,
+);
+const meta = await metaResponse.json();
+assert(
+	JSON.stringify(meta) ===
+		JSON.stringify({ protocolVersion: A2A_PROTOCOL_VERSION }),
+	"Docker Hub metadata contains only the protocol version",
+);
+const healthResponse = await fetch(`${client.baseUrl}/healthz`);
+assert(
+	healthResponse.ok,
+	`Docker Hub health returned HTTP ${healthResponse.status}`,
+);
+const health = await healthResponse.json();
+assert(
+	JSON.stringify(health) ===
+		JSON.stringify({ ok: true, service: "omp-a2a-hub" }),
+	"Docker Hub health response stays minimal",
+);
 const project = `docker-${Date.now()}`;
 let api: A2aConnection | null = null;
 let web: A2aConnection | null = null;

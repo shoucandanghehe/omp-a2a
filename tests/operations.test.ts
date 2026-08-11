@@ -7,7 +7,10 @@ import { join } from "node:path";
 import WebSocket, { WebSocketServer } from "ws";
 import { HubClient } from "../src/hub/client";
 import { A2aConnection } from "../src/hub/connection";
-import type { DeliveryEvent } from "../src/hub/realtime-types";
+import {
+	A2A_PROTOCOL_VERSION,
+	type DeliveryEvent,
+} from "../src/hub/realtime-types";
 import { type HubServerHandle, startHubServer } from "../src/hub/server";
 import { A2aRuntime, type MessageView } from "../src/operations";
 
@@ -29,9 +32,13 @@ afterEach(async () => {
 test("one runtime path serves discovery, messaging, delivery, and history", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-runtime-"));
 	roots.push(dataDir);
-	const hub = await startHubServer({ port: 0, dataDir });
+	const hub = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir,
+	});
 	hubs.push(hub);
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "runtime" });
 
 	let resolveMessage!: (message: MessageView) => void;
@@ -56,6 +63,13 @@ test("one runtime path serves discovery, messaging, delivery, and history", asyn
 	const web = new A2aRuntime({
 		getClient: async () => client,
 		events: { onMessage: resolveMessage },
+	});
+	expect(await api.status()).toEqual({
+		hub: {
+			baseUrl: hub.listenUrl,
+			protocolVersion: A2A_PROTOCOL_VERSION,
+		},
+		connection: null,
 	});
 
 	await api.connect("runtime", "api");
@@ -111,9 +125,13 @@ test("one runtime path serves discovery, messaging, delivery, and history", asyn
 test("receiver injection completes in Hub message order", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-runtime-order-"));
 	roots.push(dataDir);
-	const hub = await startHubServer({ port: 0, dataDir });
+	const hub = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir,
+	});
 	hubs.push(hub);
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "runtime-order" });
 
 	const firstStarted = Promise.withResolvers<void>();
@@ -186,9 +204,13 @@ test("receiver injection completes in Hub message order", async () => {
 test("receiver injection failure produces a terminal failed delivery", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-runtime-failure-"));
 	roots.push(dataDir);
-	const hub = await startHubServer({ port: 0, dataDir });
+	const hub = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir,
+	});
 	hubs.push(hub);
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "runtime-failure" });
 	const delivery = Promise.withResolvers<DeliveryEvent>();
 	const api = new A2aRuntime({
@@ -234,9 +256,9 @@ test("receiver injection failure produces a terminal failed delivery", async () 
 test("runtime HTTP operations preserve caller cancellation", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-runtime-cancel-"));
 	roots.push(dataDir);
-	const hub = await startHubServer({ port: 0, dataDir });
+	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
 	hubs.push(hub);
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "runtime-cancel" });
 	const api = new A2aRuntime({ getClient: async () => client });
 	await api.connect("runtime-cancel", "api");
@@ -258,9 +280,9 @@ test("runtime HTTP operations preserve caller cancellation", async () => {
 test("pre-dispatch message abort sends nothing to history", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-runtime-abort-"));
 	roots.push(dataDir);
-	const hub = await startHubServer({ port: 0, dataDir });
+	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
 	hubs.push(hub);
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "runtime-abort" });
 	const api = new A2aRuntime({
 		getClient: async () => client,
@@ -287,11 +309,11 @@ test("published connection keeps its Hub binding until a replacement succeeds", 
 	const firstRoot = mkdtempSync(join(tmpdir(), "omp-a2a-runtime-first-hub-"));
 	const secondRoot = mkdtempSync(join(tmpdir(), "omp-a2a-runtime-second-hub-"));
 	roots.push(firstRoot, secondRoot);
-	const firstHub = await startHubServer({ port: 0, dataDir: firstRoot });
-	const secondHub = await startHubServer({ port: 0, dataDir: secondRoot });
+	const firstHub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir: firstRoot });
+	const secondHub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir: secondRoot });
 	hubs.push(firstHub, secondHub);
-	const firstClient = new HubClient(firstHub.meta.baseUrl);
-	const secondClient = new HubClient(secondHub.meta.baseUrl);
+	const firstClient = new HubClient(firstHub.listenUrl);
+	const secondClient = new HubClient(secondHub.listenUrl);
 	await firstClient.createProject({ name: "hub-binding" });
 	await secondClient.createProject({ name: "hub-binding" });
 
@@ -332,7 +354,7 @@ test("published connection keeps its Hub binding until a replacement succeeds", 
 	);
 	expect(oldSignal.aborted).toBe(false);
 	expect(await runtime.status()).toMatchObject({
-		hub: { baseUrl: firstHub.meta.baseUrl },
+		hub: { baseUrl: firstHub.listenUrl },
 		connection: { project: "hub-binding", name: "worker" },
 	});
 
@@ -341,7 +363,7 @@ test("published connection keeps its Hub binding until a replacement succeeds", 
 	expect(replacement.presenceId).not.toBe("");
 	expect(oldSignal.aborted).toBe(true);
 	expect(await runtime.status()).toMatchObject({
-		hub: { baseUrl: secondHub.meta.baseUrl },
+		hub: { baseUrl: secondHub.listenUrl },
 		connection: { project: "hub-binding", name: "worker" },
 	});
 
@@ -440,9 +462,9 @@ test("superseding a same-name connect waits for the prior candidate teardown", a
 test("reverse disconnect overlap retains the teardown barrier before reconnect", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-runtime-teardown-"));
 	roots.push(dataDir);
-	const hub = await startHubServer({ port: 0, dataDir });
+	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
 	hubs.push(hub);
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "teardown-barrier" });
 
 	let clientRequests = 0;

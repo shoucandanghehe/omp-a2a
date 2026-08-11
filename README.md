@@ -123,14 +123,14 @@ bun run smoke:docker
 docker compose logs -f hub
 ```
 
-The Compose port mapping publishes the Hub on all host interfaces by default. If only local OMP clients need access, bind the published port to loopback by changing the mapping to:
+The container listener is fixed at `0.0.0.0:4173`; `OMP_A2A_HUB_PORT` changes only the published host port. The mapping publishes on all host interfaces by default. If only local OMP clients need access, bind it to loopback:
 
 ```yaml
 ports:
   - "127.0.0.1:${OMP_A2A_HUB_PORT:-4173}:4173"
 ```
 
-Each Compose project receives its own named volume. Use different Compose project names and published ports to run independent Hubs.
+Each Compose project receives its own named volume. Use different Compose project names and published ports to run independent Hubs. The image is pinned to Bun `1.3.14`; Compose defaults to `512m` memory, `1.0` CPU, and `256` PIDs with `restart: unless-stopped`. Override the limits with `OMP_A2A_HUB_MEM_LIMIT`, `OMP_A2A_HUB_CPUS`, and `OMP_A2A_HUB_PIDS_LIMIT`.
 
 Preserve the named data volume:
 
@@ -156,20 +156,20 @@ Options:
 bun run hub -- \
   --host 127.0.0.1 \
   --port 4173 \
-  --public-url http://127.0.0.1:4173 \
   --data-dir /absolute/path/to/hub-data
 ```
 
-Equivalent environment variables:
+Flags take precedence over the equivalent environment variables, which take precedence over the defaults. A selected flag or environment value must not be blank:
 
 ```text
 OMP_A2A_HUB_HOST
 OMP_A2A_HUB_PORT
-OMP_A2A_HUB_PUBLIC_URL
 OMP_A2A_HUB_DATA_DIR
 ```
 
-`OMP_A2A_HUB_PUBLIC_URL` controls the `baseUrl` reported by `/healthz` and `/v1/meta`; it does not override a client's configured Hub URL.
+`startHubServer` itself accepts only explicit listener and storage options; environment resolution belongs exclusively to the CLI.
+
+On startup, the CLI readiness line reports status, service, and protocol version but no URL; clients keep their configured Hub URL as the authoritative route.
 
 The default data directory is `~/.omp/a2a`. Project metadata and message history share `<data-dir>/messages.sqlite`.
 
@@ -183,6 +183,8 @@ First match wins:
 4. `http://127.0.0.1:4173`
 
 The resolved URL is authoritative for HTTP and WebSocket connections. `/v1/meta` validates protocol compatibility but does not replace the configured route.
+
+`GET /v1/meta` returns exactly `{ "protocolVersion": 3 }`. `GET /healthz` returns exactly `{ "ok": true, "service": "omp-a2a-hub" }`; neither response advertises a client route or process/storage details. In-process callers use the server handle's loopback-reachable `listenUrl`.
 
 Per-repository auto-connect example:
 

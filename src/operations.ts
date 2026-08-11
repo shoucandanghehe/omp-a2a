@@ -9,7 +9,7 @@ import type {
 	Peer,
 	RealtimeMessage,
 } from "./hub/realtime-types";
-import type { EncodedAttachment, HubMeta } from "./hub/types";
+import type { EncodedAttachment } from "./hub/types";
 import type { A2aProject } from "./types";
 
 export type MessageAttachment = { name: string; bytes: Buffer };
@@ -23,7 +23,10 @@ export type AcceptedMessageView =
 
 
 export type RuntimeStatus = {
-	hub: HubMeta;
+	hub: {
+		baseUrl: string;
+		protocolVersion: number;
+	};
 	connection: null | {
 		project: string;
 		name: string;
@@ -352,12 +355,11 @@ export class A2aRuntime {
 
 	async status(options?: HubRequestOptions): Promise<RuntimeStatus> {
 		const published = this.#published;
-		const hub = await (published?.client ?? (await this.#getClient())).meta(
-			options,
-		);
+		const client = published?.client ?? (await this.#getClient());
+		const meta = await client.meta(options);
 		const connection = published?.connection ?? null;
 		return {
-			hub,
+			hub: { baseUrl: client.baseUrl, protocolVersion: meta.protocolVersion },
 			connection: connection
 				? {
 						project: connection.project,

@@ -80,14 +80,7 @@ export class HubResponseError extends Error {
 
 type Decoder<T> = (value: unknown) => T;
 
-const HUB_META_KEYS = [
-	"pid",
-	"port",
-	"baseUrl",
-	"dataDir",
-	"startedAt",
-	"protocolVersion",
-] as const;
+const HUB_META_KEYS = ["protocolVersion"] as const;
 const PROJECT_KEYS = [
 	"name",
 	"displayName",
@@ -181,32 +174,8 @@ function safeIntegerField(
 
 function decodeHubMeta(value: unknown): HubMeta {
 	const meta = exactRecord(value, "metadata", HUB_META_KEYS);
-	const pid = safeIntegerField(meta, "pid", "metadata", 1);
-	const port = safeIntegerField(meta, "port", "metadata", 1);
-	if (port > 65_535) throw new Error("metadata.port must be <= 65535");
-	const baseUrl = stringField(meta, "baseUrl", "metadata");
-	let parsedBaseUrl: URL;
-	try {
-		parsedBaseUrl = new URL(baseUrl);
-	} catch {
-		throw new Error("metadata.baseUrl must be a valid URL");
-	}
-	if (parsedBaseUrl.protocol !== "http:" && parsedBaseUrl.protocol !== "https:")
-		throw new Error("metadata.baseUrl must use HTTP or HTTPS");
-	const dataDir = stringField(meta, "dataDir", "metadata");
-	if (!dataDir) throw new Error("metadata.dataDir must not be empty");
 	return {
-		pid,
-		port,
-		baseUrl,
-		dataDir,
-		startedAt: safeIntegerField(meta, "startedAt", "metadata", 0),
-		protocolVersion: safeIntegerField(
-			meta,
-			"protocolVersion",
-			"metadata",
-			0,
-		),
+		protocolVersion: safeIntegerField(meta, "protocolVersion", "metadata", 0),
 	};
 }
 
@@ -479,7 +448,7 @@ export async function probeHub(baseUrl: string): Promise<HubMeta | null> {
 export async function connectHub(options?: {
 	hubUrl?: string;
 	home?: string;
-}): Promise<HubMeta> {
+}): Promise<string> {
 	const baseUrl = resolveHubUrl(options);
 	const meta = await probeHub(baseUrl);
 	if (!meta) {
@@ -492,7 +461,7 @@ export async function connectHub(options?: {
 			`A2A protocol mismatch: extension=${A2A_PROTOCOL_VERSION}, Hub=${meta.protocolVersion}`,
 		);
 	}
-	return { ...meta, baseUrl };
+	return baseUrl;
 }
 
 export class HubClient {
@@ -516,9 +485,9 @@ export class HubClient {
 		home?: string;
 		requestTimeoutMs?: number;
 	}): Promise<HubClient> {
-		const meta = await connectHub(options);
+		const baseUrl = await connectHub(options);
 		return new HubClient(
-			meta.baseUrl,
+			baseUrl,
 			options?.requestTimeoutMs === undefined
 				? undefined
 				: { requestTimeoutMs: options.requestTimeoutMs },

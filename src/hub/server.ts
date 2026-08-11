@@ -1,73 +1,47 @@
-import * as fs from "node:fs";
 import type { Server } from "node:http";
 import * as path from "node:path";
 import express from "express";
-import {
-	defaultDataDir,
-	ensureDir,
-	hubLockPath,
-	hubMetaPath,
-	hubPidPath,
-	hubStoreDatabasePath,
-} from "../paths";
+import { hubLockPath, hubStoreDatabasePath } from "../paths";
 import { HubDataDirInUseError, HubDataLock } from "./data-lock";
 import { RealtimeHub } from "./realtime-server";
-import { HubStore, ProjectConflictError } from "./store";
 import { A2A_PROTOCOL_VERSION } from "./realtime-types";
-import type { HubMeta } from "./types";
+import { HubStore, ProjectConflictError } from "./store";
 
-const DEFAULT_PORT = 4173;
+export type StartHubServerOptions = {
+	host: string;
+	port: number;
+	dataDir: string;
+};
 
 export type HubServerHandle = {
-	meta: HubMeta;
+	listenUrl: string;
 	stop: () => Promise<void>;
 };
 
 export { HubDataDirInUseError };
 
-function writeJsonAtomic(file: string, data: unknown): void {
-	ensureDir(path.dirname(file));
-	const temporary = `${file}.${process.pid}.${crypto.randomUUID()}.tmp`;
-	try {
-		fs.writeFileSync(temporary, `${JSON.stringify(data, null, 2)}\n`, {
-			mode: 0o600,
-		});
-		fs.renameSync(temporary, file);
-	} catch (error) {
-		try {
-			fs.rmSync(temporary, { force: true });
-		} catch {
-			// The write or rename failure happened first.
-		}
-		throw error;
+function requestedPort(value: number): number {
+	if (!Number.isInteger(value) || value < 0 || value > 65_535) {
+		throw new Error(`invalid Hub port: ${value}`);
 	}
+	return value;
 }
 
-function requestedPort(value: number | undefined): number {
-	const configured =
-		value ??
-		(process.env.OMP_A2A_HUB_PORT
-			? Number(process.env.OMP_A2A_HUB_PORT)
-			: DEFAULT_PORT);
-	if (!Number.isInteger(configured) || configured < 0 || configured > 65_535) {
-		throw new Error(`invalid Hub port: ${configured}`);
-	}
-	return configured;
+function listenUrlHost(host: string): string {
+	if (host === "0.0.0.0") return "127.0.0.1";
+	if (host === "::" || host === "0:0:0:0:0:0:0:0") return "[::1]";
+	return host.includes(":") ? `[${host}]` : host;
 }
 
-export async function startHubServer(options?: {
-	port?: number;
-	host?: string;
-	publicUrl?: string;
-	dataDir?: string;
-}): Promise<HubServerHandle> {
-	const port = requestedPort(options?.port);
-	const host =
-		(options?.host ?? process.env.OMP_A2A_HUB_HOST ?? "127.0.0.1").trim() ||
-		"127.0.0.1";
-	const dataDir = path.resolve(
-		options?.dataDir ?? process.env.OMP_A2A_HUB_DATA_DIR ?? defaultDataDir(),
-	);
+export async function startHubServer(
+	options: StartHubServerOptions,
+): Promise<HubServerHandle> {
+	const port = requestedPort(options.port);
+	const host = options.host.trim();
+	if (!host) throw new Error("Hub host must not be empty");
+	const configuredDataDir = options.dataDir.trim();
+	if (!configuredDataDir) throw new Error("Hub data directory must not be empty");
+	const dataDir = path.resolve(configuredDataDir);
 	let dataLock: HubDataLock | null = null;
 	let store: HubStore | null = null;
 	let server: Server | null = null;
@@ -84,12 +58,6 @@ export async function startHubServer(options?: {
 					firstError ??= { value: error };
 				}
 			};
-			await release(() => {
-				if (dataLock) fs.rmSync(hubPidPath(dataDir), { force: true });
-			});
-			await release(() => {
-				if (dataLock) fs.rmSync(hubMetaPath(dataDir), { force: true });
-			});
 			await release(async () => {
 				await realtime?.close();
 			});
@@ -118,12 +86,12 @@ export async function startHubServer(options?: {
 
 		const app = express();
 		app.use(express.json({ limit: Number.POSITIVE_INFINITY }));
-		let meta: HubMeta;
-
 		app.get("/healthz", (_request, response) =>
-			response.json({ ok: true, service: "omp-a2a-hub", ...meta }),
+			response.json({ ok: true, service: "omp-a2a-hub" }),
 		);
-		app.get("/v1/meta", (_request, response) => response.json(meta));
+		app.get("/v1/meta", (_request, response) =>
+			response.json({ protocolVersion: A2A_PROTOCOL_VERSION }),
+		);
 		app.get("/v1/projects", (_request, response) =>
 			response.json({ projects: hubStore.listProjects() }),
 		);
@@ -214,27 +182,9 @@ export async function startHubServer(options?: {
 		if (!address || typeof address === "string") {
 			throw new Error("Hub did not expose a TCP address");
 		}
-		const actualPort = address.port;
-		const baseUrl = (
-			options?.publicUrl ??
-			process.env.OMP_A2A_HUB_PUBLIC_URL ??
-			`http://127.0.0.1:${actualPort}`
-		)
-			.trim()
-			.replace(/\/+$/, "");
-		meta = {
-			pid: process.pid,
-			port: actualPort,
-			baseUrl,
-			dataDir,
-			startedAt: Date.now(),
-			protocolVersion: A2A_PROTOCOL_VERSION,
-		};
+		const listenUrl = `http://${listenUrlHost(host)}:${address.port}`;
 		realtime = new RealtimeHub(listeningServer, hubStore);
-		writeJsonAtomic(hubMetaPath(dataDir), meta);
-		fs.writeFileSync(hubPidPath(dataDir), `${process.pid}\n`, { mode: 0o600 });
-
-		return { meta, stop: cleanup };
+		return { listenUrl, stop: cleanup };
 	} catch (error) {
 		try {
 			await cleanup();
