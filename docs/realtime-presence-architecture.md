@@ -33,7 +33,7 @@ Private protocol version `3` reuses the Hub HTTP server:
 - in-memory indexes store Presence and pending delivery;
 - SQLite `messages.sqlite` stores append-only Project history with WAL and `synchronous = FULL`.
 
-Text below 32 KiB stays identity encoded; larger text uses gzip plus Base64. Attachment bytes use Base64 and use gzip first when smaller. One Message accepts at most eight attachments, with a 4 MiB decoded-content limit shared by text and attachment content. Decompression is bounded.
+Text below 32 KiB stays identity encoded. Larger text uses gzip plus Base64 only when compression is smaller; attachment bytes use Base64 and the same compression rule. Matching Hub and Extension versions are trusted, so Messages, attachments, transport frames, and history responses have no application resource cap or derived byte metadata. Underlying codec and storage errors fail loudly; deployment memory and container limits provide resource isolation.
 
 ### Public interfaces
 
@@ -47,9 +47,7 @@ Repository configuration uses `name` and `autoConnect`. Removed `agentId` and `a
 
 On first start, ordinary rows from the old `inbox.sqlite` message ledger are copied into a new database in deterministic `(project, created_at, msg_id)` order. Pending rows become history only. Member records, cursor state, ACKs, delivery receipts, and offline-delivery semantics are intentionally discarded.
 
-Migration runs transactionally in the new database, validates the imported count and `PRAGMA integrity_check`, and does not mutate the old database.
-
-Opening a protocol version `2` `messages.sqlite` adds attachment storage and decoded-content accounting in place. Existing Messages migrate to an empty attachment list without changing their sequence, reference, text, target, or causal parent.
+Migration runs transactionally in the new database and does not mutate the old database.
 
 ## Consequences
 
@@ -59,11 +57,12 @@ Opening a protocol version `2` `messages.sqlite` adds attachment storage and dec
 - `delivered` proves successful attachment materialization and injection into the receiving OMP extension, not model understanding or task completion. Materialization or injection errors produce a terminal `failed` Delivery.
 - Direct routing is not confidential history. Without accounts and authorization, any trusted current Agent can query Project history.
 - Hub and extension must upgrade together because protocol version `3` has no compatibility path for version `2` Message frames.
+- Matching-version clients are trusted to produce valid internal payloads. Removing application payload/history defenses keeps the path linear, while deployment resource isolation contains failures.
 - Project metadata deletion and SQLite history deletion remain separate operations; interrupted deletion requires operator inspection before name reuse.
 
 ## Verification
 
-The behavior suite and executable smoke scenarios cover duplicate names, immediate Presence removal, direct-target failure, broadcast snapshots, causal replies, non-persistent Presence events, attachment snapshot/materialization/history, failed Delivery, restart persistence, protocol version `2` database migration, legacy Inbox migration, the three-tool model surface, the reduced human command surface, and the Docker HTTP/WebSocket boundary.
+The behavior suite and executable smoke scenarios cover duplicate names, immediate Presence removal, direct-target failure, broadcast snapshots, causal replies, non-persistent Presence events, attachment snapshot/materialization/history, failed Delivery, restart persistence, legacy Inbox migration, uncapped trusted payload/history paths, the three-tool model surface, the reduced human command surface, and the Docker HTTP/WebSocket boundary.
 
 ## Deployment and rollback
 

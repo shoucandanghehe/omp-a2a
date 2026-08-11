@@ -63,7 +63,7 @@ The client sends `message` with `requestId`, opaque `messageId`, typed target, e
 - Direct target resolves the current name and freezes its `presenceId`.
 - Project target snapshots all current Presence except the sender.
 - A missing direct target fails before persistence.
-- Text and attachment wire shapes plus causal references are checked before append; codecs surface malformed internal data directly.
+- Text and attachment wire shapes plus causal references are checked before append; underlying codec failures propagate wherever payloads are decoded.
 - `MessageStore.append` atomically commits one immutable Message—including attachments—and the next Project sequence.
 - The sender receives `accepted` with the canonical message and selected recipient names.
 - Each selected socket receives the canonical `message` frame.
@@ -126,14 +126,13 @@ Reusing `messageId` with the same Project, sender name, target kind/name, text e
 
 When `messages.sqlite` is first created and old `inbox.sqlite` exists, ordinary `message_ledger` rows are imported in deterministic `(project, created_at, msg_id)` order. Delivery-receipt rows are excluded. Old pending messages become history only; no old Presence, recipient cursor, ACK, receipt, or offline-delivery state survives.
 
-
-Migration runs in the new database transaction and validates imported row count plus `PRAGMA integrity_check`. The old database is not modified.
+Migration runs in the new database transaction and does not modify the old database.
 
 ## Payload codec
 
 - Text `< 32 KiB`: `{ encoding: "identity", data }`.
 - Larger text: gzip plus Base64 only when smaller, otherwise identity.
-- Attachment bytes: Base64, optionally gzip-compressed first only when smaller.
+- Attachment bytes: Base64, optionally gzip-compressed only when smaller.
 - Payloads carry no derived byte metadata and codecs perform no bounded decompression or canonical Base64 re-encoding.
 - Express JSON parsing and both WebSocket endpoints are configured without an application payload cap.
 - Matching private-protocol clients are trusted; malformed payloads fail loudly and deployment limits own resource isolation.
@@ -159,9 +158,9 @@ Stop closes realtime clients, the HTTP server, message storage, metadata files, 
 
 ## Test coverage
 
-- `hub-realtime.test.ts`: Presence lifetime, duplicate names, direct/broadcast snapshots, Delivery outcomes, attachment persistence, and restart.
+- `hub-realtime.test.ts`: Presence lifetime, duplicate names, direct/broadcast snapshots, Delivery outcomes, attachment persistence, restart, and large same-version payload/attachment-count paths.
 - `message-store.test.ts`: ordering, attachment-aware idempotency, causal references, cursor/filter/default/explicit-limit behavior, canonical schema, legacy migration, integrity, and deletion.
-- `hub-control.test.ts`: independent Hubs, Project control, active-Presence deletion rejection, and safe name reuse.
+- `hub-control.test.ts`: independent Hubs, uncapped HTTP request bodies, Project control, active-Presence deletion rejection, and safe name reuse.
 - `payload.test.ts`: identity/gzip/Base64 round trips, compression choice, uncapped attachment parsing, and malformed codec failures.
 - `operations.test.ts`: client/runtime integration plus successful and failed Delivery callbacks.
 

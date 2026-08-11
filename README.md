@@ -275,7 +275,7 @@ Inbound messages are pushed automatically and processed serially in Hub-assigned
 ## Payload and persistence
 
 - Text below 32 KiB uses identity encoding; larger text uses gzip + Base64 only when compression is smaller.
-- Attachment bytes use Base64 and use gzip first only when that reduces payload size.
+- Attachment bytes use Base64 and use gzip only when that reduces payload size.
 - Messages, attachments, WebSocket frames, JSON bodies, and history responses have no application-level resource cap.
 - History keeps stable Project-sequence cursors, a default 50-item page, and accepts any explicit positive integer limit without silent truncation.
 - `messageId` is an opaque idempotency key. Reusing it with different text, attachment names, attachment order, attachment content, target, or causal parent fails.

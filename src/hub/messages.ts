@@ -197,7 +197,10 @@ export class MessageStore {
 						sequence,
 						from: { ...draft.from },
 						target: { ...draft.target },
-						payload: { ...draft.payload },
+						payload: {
+							encoding: draft.payload.encoding,
+							data: draft.payload.data,
+						},
 						attachments: attachments.map((attachment) => ({
 							name: attachment.name,
 							payload: { ...attachment.payload },
@@ -363,7 +366,6 @@ export class MessageStore {
 			legacy.close();
 		}
 	}
-
 
 	#resolveReply(project: string, replyTo: string | undefined): number | null {
 		if (!replyTo) return null;

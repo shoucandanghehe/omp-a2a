@@ -224,7 +224,6 @@ test("history keeps its default page and accepts explicit large limits", () => {
 	store.close();
 });
 
-
 test("attachment content participates in messageId idempotency", () => {
 	const root = mkdtempSync(join(tmpdir(), "omp-a2a-attachment-idempotency-"));
 	roots.push(root);
