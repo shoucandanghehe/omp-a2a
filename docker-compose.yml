@@ -8,11 +8,6 @@ services:
     pids_limit: ${OMP_A2A_HUB_PIDS_LIMIT:-256}
     ports:
       - "${OMP_A2A_HUB_PORT:-4173}:4173"
-    environment:
-      OMP_A2A_HUB_PORT: "4173"
-      # Listen on all interfaces inside the container
-      OMP_A2A_HUB_HOST: "0.0.0.0"
-      OMP_A2A_HUB_DATA_DIR: /data/omp-a2a
     volumes:
       # This Compose project owns one independent Project registry and message history.
       - a2a-data:/data/omp-a2a

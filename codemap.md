@@ -82,7 +82,7 @@ The resolved client URL is authoritative for HTTP and WebSocket connections. Hub
 
 Repository-local connection defaults require `project` and `name`; `autoConnect` defaults to enabled. Removed `agentId` and `autoJoin` fields fail with an explicit migration error.
 
-The Hub runs locally with `bun run hub` or in Docker Compose. The CLI alone resolves `--host`, `--port`, and `--data-dir` with flag → environment → default precedence before calling the explicit server API. Each Hub needs a unique listener and data directory; `HubDataLock` is the only runtime ownership record. The Bun `1.3.14` image listens on fixed container port `4173`, while Compose owns host-port publication, restart policy, and memory/CPU/PID limits. SQLite message history uses WAL and `synchronous = FULL`.
+The Hub runs locally with `bun run hub` or in Docker Compose. The CLI alone resolves `--host`, `--port`, and `--data-dir` with flag → environment → default precedence, rejecting a selected blank value, before calling the explicit server API. Each Hub needs a unique listener and data directory; `HubDataLock` is the only runtime ownership record. The Bun `1.3.14` image runs with fixed `0.0.0.0:4173` and `/data/omp-a2a` arguments, while Compose owns host-port publication, restart policy, and memory/CPU/PID limits. SQLite message history uses WAL and `synchronous = FULL`.
 
 ## User surfaces
 

@@ -13,7 +13,10 @@ import a2aExtension from "../src/extension";
 import { HubClient } from "../src/hub/client";
 import { A2aConnection } from "../src/hub/connection";
 import { encodeBinaryPayload } from "../src/hub/payload";
-import type { DeliveryEvent } from "../src/hub/realtime-types";
+import {
+	A2A_PROTOCOL_VERSION,
+	type DeliveryEvent,
+} from "../src/hub/realtime-types";
 import { startHubServer } from "../src/hub/server";
 
 interface CompletionItem {
@@ -203,7 +206,7 @@ test("model tool contract makes replies push-driven instead of history-polled", 
 		if (!commandHandler) throw new Error("a2a command was not registered");
 		await commandHandler("hub", context);
 		expect(notifications.at(-1)).toBe(
-			`Hub ${hub.listenUrl} protocol=${hub.protocolVersion}`,
+			`Hub ${hub.listenUrl} protocol=${A2A_PROTOCOL_VERSION}`,
 		);
 		await commandHandler(`connect ${project} --as api`, context);
 		if (!beforeAgentStart)

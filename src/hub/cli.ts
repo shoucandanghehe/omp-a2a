@@ -1,5 +1,6 @@
 #!/usr/bin/env bun
 import { defaultDataDir } from "../paths";
+import { A2A_PROTOCOL_VERSION } from "./realtime-types";
 import {
 	startHubServer,
 	type StartHubServerOptions,
@@ -41,28 +42,19 @@ export function parseHubCliOptions(
 		}
 	}
 
-	if (portFlag !== undefined && !portFlag.trim()) {
-		throw new Error("empty value for --port");
-	}
-	if (hostFlag !== undefined && !hostFlag.trim()) {
-		throw new Error("empty value for --host");
-	}
-	if (dataDirFlag !== undefined && !dataDirFlag.trim()) {
-		throw new Error("empty value for --data-dir");
-	}
-
-	const portValue =
-		portFlag ?? environment.OMP_A2A_HUB_PORT?.trim() ?? "4173";
-	const port = Number(portValue);
+	const portValue = portFlag ?? environment.OMP_A2A_HUB_PORT ?? "4173";
+	if (!portValue.trim()) throw new Error("empty value for Hub port");
+	const port = Number(portValue.trim());
 	if (!Number.isInteger(port) || port < 0 || port > 65_535) {
 		throw new Error(`invalid Hub port: ${portValue}`);
 	}
-	const host =
-		hostFlag?.trim() || environment.OMP_A2A_HUB_HOST?.trim() || "127.0.0.1";
-	const dataDir =
-		dataDirFlag?.trim() ||
-		environment.OMP_A2A_HUB_DATA_DIR?.trim() ||
-		defaultDataDir();
+	const hostValue = hostFlag ?? environment.OMP_A2A_HUB_HOST ?? "127.0.0.1";
+	if (!hostValue.trim()) throw new Error("empty value for Hub host");
+	const dataDirValue =
+		dataDirFlag ?? environment.OMP_A2A_HUB_DATA_DIR ?? defaultDataDir();
+	if (!dataDirValue.trim()) throw new Error("empty value for Hub data directory");
+	const host = hostValue.trim();
+	const dataDir = dataDirValue.trim();
 	return { host, port, dataDir };
 }
 
@@ -73,8 +65,7 @@ async function run(): Promise<void> {
 		JSON.stringify({
 			ok: true,
 			service: "omp-a2a-hub",
-			listenUrl: handle.listenUrl,
-			protocolVersion: handle.protocolVersion,
+			protocolVersion: A2A_PROTOCOL_VERSION,
 		}),
 	);
 

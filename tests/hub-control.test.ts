@@ -25,6 +25,48 @@ function dataDir(): string {
 	return root;
 }
 
+async function readFirstLine(
+	stream: ReadableStream<Uint8Array>,
+): Promise<string> {
+	const reader = stream.getReader();
+	const decoder = new TextDecoder();
+	let output = "";
+	try {
+		while (true) {
+			const { value, done } = await reader.read();
+			if (done) return output + decoder.decode();
+			output += decoder.decode(value, { stream: true });
+			const newline = output.indexOf("\n");
+			if (newline >= 0) return output.slice(0, newline);
+		}
+	} finally {
+		reader.releaseLock();
+	}
+}
+
+async function withDeadline<T>(
+	operation: Promise<T>,
+	timeoutMs: number,
+): Promise<T> {
+	// This bounds an external process pipe; fake timers cannot advance the child.
+	const deadlineSignal = AbortSignal.timeout(timeoutMs);
+	let rejectDeadline: (reason: Error) => void;
+	const deadline = new Promise<never>((_, reject) => {
+		rejectDeadline = reject;
+	});
+	const onDeadline = () => {
+		rejectDeadline(
+			new Error(`timed out waiting for CLI readiness after ${timeoutMs}ms`),
+		);
+	};
+	deadlineSignal.addEventListener("abort", onDeadline, { once: true });
+	try {
+		return await Promise.race([operation, deadline]);
+	} finally {
+		deadlineSignal.removeEventListener("abort", onDeadline);
+	}
+}
+
 afterEach(async () => {
 	await Promise.all(hubs.splice(0).map((hub) => hub.stop()));
 	for (const root of roots.splice(0))
@@ -46,6 +88,7 @@ test("listener metadata stays minimal and configured client URL remains authorit
 			dataDir: root,
 		});
 		hubs.push(hub);
+		expect(Object.keys(hub).sort()).toEqual(["listenUrl", "stop"]);
 		expect(hub.listenUrl).toMatch(/^http:\/\/127\.0\.0\.1:\d+$/);
 		expect(await (await fetch(`${hub.listenUrl}/v1/meta`)).json()).toEqual({
 			protocolVersion: A2A_PROTOCOL_VERSION,
@@ -116,6 +159,18 @@ test("CLI rejects empty and unknown flags", () => {
 	);
 });
 
+test("CLI rejects present blank environment settings", () => {
+	for (const name of [
+		"OMP_A2A_HUB_PORT",
+		"OMP_A2A_HUB_HOST",
+		"OMP_A2A_HUB_DATA_DIR",
+	]) {
+		expect(() => parseHubCliOptions([], { [name]: " \t " })).toThrow(
+			"empty value",
+		);
+	}
+});
+
 test("package Hub executable runs directly", async () => {
 	const manifest = await Bun.file(
 		join(repositoryRoot, "package.json"),
@@ -127,6 +182,42 @@ test("package Hub executable runs directly", async () => {
 	expect(new TextDecoder().decode(result.stderr)).toContain(
 		"unknown Hub argument",
 	);
+});
+
+test("CLI readiness is minimal and does not advertise a route", async () => {
+	const manifest = await Bun.file(
+		join(repositoryRoot, "package.json"),
+	).json();
+	const executable = join(repositoryRoot, manifest.bin["omp-a2a-hub"] ?? "");
+	const process = Bun.spawn({
+		cmd: [
+			executable,
+			"--host",
+			"127.0.0.1",
+			"--port",
+			"0",
+			"--data-dir",
+			dataDir(),
+		],
+		stdout: "pipe",
+		stderr: "pipe",
+	});
+	try {
+		const readiness = JSON.parse(
+			await withDeadline(readFirstLine(process.stdout), 5_000),
+		);
+		expect(readiness).toEqual({
+			ok: true,
+			service: "omp-a2a-hub",
+			protocolVersion: A2A_PROTOCOL_VERSION,
+		});
+	} finally {
+		try {
+			process.kill("SIGTERM");
+		} finally {
+			await process.exited;
+		}
+	}
 });
 
 test("Compose resolves non-default published port and resource limits", () => {
@@ -147,6 +238,7 @@ test("Compose resolves non-default published port and resource limits", () => {
 	const service = JSON.parse(
 		new TextDecoder().decode(result.stdout),
 	).services.hub;
+	expect(service.environment).toBeUndefined();
 	expect(service.ports).toContainEqual(
 		expect.objectContaining({ target: 4173, published: "5180" }),
 	);

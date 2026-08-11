@@ -27,7 +27,6 @@ export type StartHubServerOptions = {
 
 export type HubServerHandle = {
 	listenUrl: string;
-	protocolVersion: number;
 	stop: () => Promise<void>;
 };
 
@@ -176,7 +175,6 @@ export async function startHubServer(
 	let stopPromise: Promise<void> | undefined;
 	return {
 		listenUrl,
-		protocolVersion: meta.protocolVersion,
 		stop: () => {
 			stopPromise ??= (async () => {
 				try {

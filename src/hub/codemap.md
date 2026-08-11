@@ -145,7 +145,9 @@ Migration runs in the new database transaction and validates imported row count 
 
 `resolveHubUrl` precedence is explicit argument, environment, first existing global config, then loopback default. That resolved URL remains authoritative for HTTP and WebSocket connections; `HubClient` decodes only `protocolVersion` from metadata and never replaces its `baseUrl`. Existing malformed global configuration fails immediately. `probeHub` uses a 1.5-second timeout; ordinary `HubClient` operations currently have no default deadline.
 
-`HubClient` exposes only metadata, Project CRUD, and history. Realtime operations belong to `A2aConnection`. `cli.ts` alone resolves `--host`, `--port`, and `--data-dir` with flag → environment → default precedence; direct `startHubServer` calls supply all three explicitly and never read the environment.
+`HubClient` exposes only metadata, Project CRUD, and history. Realtime operations belong to `A2aConnection`. `cli.ts` alone resolves `--host`, `--port`, and `--data-dir` with flag → environment → default precedence, rejecting a selected blank value; direct `startHubServer` calls supply all three explicitly and never read the environment.
+
+The CLI readiness line reports status, service, and `A2A_PROTOCOL_VERSION` but no listener URL. Callers that need the protocol version import the constant rather than widening `HubServerHandle`.
 
 ## Data-directory lifecycle
 
@@ -155,7 +157,7 @@ Migration runs in the new database transaction and validates imported row count 
 2. acquires `HubDataLock` through an exclusive SQLite transaction;
 3. opens `MessageStore`, optionally migrating legacy Inbox history;
 4. starts Express and attaches `RealtimeHub` to the same HTTP server;
-5. returns the actual in-process `listenUrl`, using loopback for wildcard listeners, the protocol version, and an idempotent `stop`.
+5. returns a handle containing only the loopback-reachable `listenUrl` and an idempotent `stop`.
 
 `HubDataLock` is the only runtime ownership record. No Hub JSON or PID metadata files are written. Stop closes realtime clients, the HTTP server, message storage, and the directory lock. Startup failures unwind already-opened resources.
 

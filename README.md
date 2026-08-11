@@ -150,7 +150,7 @@ bun run hub -- \
   --data-dir /absolute/path/to/hub-data
 ```
 
-Flags take precedence over the equivalent environment variables, which take precedence over the defaults:
+Flags take precedence over the equivalent environment variables, which take precedence over the defaults. A selected flag or environment value must not be blank:
 
 ```text
 OMP_A2A_HUB_HOST
@@ -159,6 +159,8 @@ OMP_A2A_HUB_DATA_DIR
 ```
 
 `startHubServer` itself accepts only explicit listener and storage options; environment resolution belongs exclusively to the CLI.
+
+On startup, the CLI readiness line reports status, service, and protocol version but no URL; clients keep their configured Hub URL as the authoritative route.
 
 The default data directory is `~/.omp/a2a`. Persistent history is `<data-dir>/messages.sqlite`.
 

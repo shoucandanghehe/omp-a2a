@@ -9,10 +9,7 @@ RUN bun install --frozen-lockfile --production
 
 COPY src ./src
 
-ENV NODE_ENV=production \
-	OMP_A2A_HUB_PORT=4173 \
-	OMP_A2A_HUB_HOST=0.0.0.0 \
-	OMP_A2A_HUB_DATA_DIR=/data/omp-a2a
+ENV NODE_ENV=production
 
 # Persist Project metadata and append-only message history.
 RUN mkdir -p /data/omp-a2a && chown -R bun:bun /data /app
@@ -23,4 +20,4 @@ EXPOSE 4173
 HEALTHCHECK --interval=10s --timeout=3s --start-period=5s --retries=6 \
 	CMD bun -e "fetch('http://127.0.0.1:4173/healthz').then(r=>process.exit(r.ok?0:1)).catch(()=>process.exit(1))"
 
-CMD ["bun", "run", "src/hub/cli.ts"]
+CMD ["bun", "run", "src/hub/cli.ts", "--host", "0.0.0.0", "--port", "4173", "--data-dir", "/data/omp-a2a"]

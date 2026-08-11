@@ -15,13 +15,23 @@ function assert(condition: unknown, message: string): asserts condition {
 }
 
 const client = await HubClient.connect();
-const meta = await client.meta();
+const metaResponse = await fetch(`${client.baseUrl}/v1/meta`);
+assert(
+	metaResponse.ok,
+	`Docker Hub metadata returned HTTP ${metaResponse.status}`,
+);
+const meta = await metaResponse.json();
 assert(
 	JSON.stringify(meta) ===
 		JSON.stringify({ protocolVersion: A2A_PROTOCOL_VERSION }),
 	"Docker Hub metadata contains only the protocol version",
 );
-const health = await (await fetch(`${client.baseUrl}/healthz`)).json();
+const healthResponse = await fetch(`${client.baseUrl}/healthz`);
+assert(
+	healthResponse.ok,
+	`Docker Hub health returned HTTP ${healthResponse.status}`,
+);
+const health = await healthResponse.json();
 assert(
 	JSON.stringify(health) ===
 		JSON.stringify({ ok: true, service: "omp-a2a-hub" }),
