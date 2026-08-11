@@ -290,9 +290,7 @@ Inbound messages are pushed automatically and processed serially in Hub-assigned
 - Project deletion atomically removes metadata, Project sequence, and complete history; it needs no deletion marker or reconciliation path.
 - The Hub data directory has an exclusive lock; two Hub processes cannot write the same data.
 
-On first start with an old `inbox.sqlite`, the Hub imports ordinary `message_ledger` rows into `messages.sqlite` in deterministic `(project, created_at, msg_id)` order. Old Presence, cursor, ACK, receipt, and offline-delivery state are not migrated. Pending messages become history only and are never delivered to future connections.
-
-Opening a protocol version `2` `messages.sqlite` adds the attachment columns in place. Existing Messages receive an empty attachment list and retain their original sequence, reference, text, and causality.
+The `messages.sqlite` schema has its own storage version, independent of the wire protocol version. A new database creates the complete current schema and records that version atomically. An existing database must contain exactly the current non-internal tables and index at the current storage version or Hub startup fails with `unsupported pre-release storage; start with an empty data directory`.
 
 ## Verify
 
@@ -306,7 +304,7 @@ bun build src/hub/cli.ts --target=bun --outdir=/tmp/omp-a2a-hub-build
 docker compose config
 ```
 
-These commands check formatting, run the Bun tests plus SQLite Project-store and live Hub/client smokes, build both executable entry points, and validate the Compose model. The behavioral coverage includes WebSocket Presence, name conflicts, Presence notifications, direct and broadcast routing, successful/failed/disconnected Delivery, cross-session attachment snapshot/materialization/history, protocol version `2` and legacy Inbox migration, payload limits, atomic Project deletion, Hub restart semantics, and command completion.
+These commands check formatting, run the Bun tests plus SQLite Project-store and live Hub/client smokes, build both executable entry points, and validate the Compose model. Coverage includes WebSocket Presence, retries and Delivery outcomes, attachment ownership and history, atomic Project deletion, current unified storage creation/reopen and fail-closed schema guards, payload limits, Hub restart semantics, and command completion.
 
 ### Docker boundary
 
@@ -330,7 +328,7 @@ src/
     realtime-server.ts     # Presence, routing, broadcast, delivery
     connection.ts          # extension WebSocket client
     presence.ts            # in-memory Presence registry
-    store.ts               # SQLite Project metadata, sequences, history, and existing message migration
+    store.ts               # versioned SQLite Project metadata, sequences, history, and schema guard
     realtime-types.ts      # versioned protocol types
     payload.ts             # gzip and decoded-size limits
     client.ts              # HTTP Project/history client

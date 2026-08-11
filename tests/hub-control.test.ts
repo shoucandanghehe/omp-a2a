@@ -1,3 +1,4 @@
+import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
 import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
 import { type AddressInfo, createServer } from "node:net";
@@ -5,9 +6,12 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HubClient } from "../src/hub/client";
 import { A2aConnection } from "../src/hub/connection";
+import { MESSAGE_STORAGE_VERSION } from "../src/hub/store";
 import { type HubServerHandle, startHubServer } from "../src/hub/server";
 
 const roots: string[] = [];
+const UNSUPPORTED_STORAGE_MESSAGE =
+	"unsupported pre-release storage; start with an empty data directory";
 const hubs: HubServerHandle[] = [];
 
 function dataDir(): string {
@@ -55,6 +59,19 @@ test("configured Hub URL remains authoritative over advertised metadata", async 
 	});
 	expect(connection.self.name).toBe("remote");
 	await connection.close();
+});
+
+
+test("Hub rejects unsupported message storage before listening", async () => {
+	const root = dataDir();
+	const database = new Database(join(root, "messages.sqlite"), { create: true });
+	database.run("CREATE TABLE messages (id TEXT)");
+	database.run(`PRAGMA user_version = ${MESSAGE_STORAGE_VERSION + 1}`);
+	database.close();
+
+	await expect(startHubServer({ port: 0, dataDir: root })).rejects.toThrow(
+		UNSUPPORTED_STORAGE_MESSAGE,
+	);
 });
 
 describe("Hub Project control plane", () => {

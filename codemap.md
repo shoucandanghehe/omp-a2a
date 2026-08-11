@@ -66,7 +66,7 @@ A same-named later connection is a new Presence and never inherits pending Deliv
 - Direct messages are bound to the resolved `presenceId`; Project broadcasts persist before one local Presence enumeration and never persist their recipient array.
 - History is append-only until Project deletion. Presence, recipient arrays, retry trackers, and delivery events are not persisted.
 - Attachments are ordered immutable values inside a Message. Their names and bytes participate in `messageId` idempotency; they share the Message lifecycle.
-- Legacy `inbox.sqlite` message-ledger rows migrate once into `messages.sqlite`; old membership, cursor, ACK, receipt, and offline-delivery semantics do not migrate.
+- `messages.sqlite` has an independent storage version. Startup accepts only the exact current version and complete set of current non-internal schema objects; unsupported storage fails closed.
 
 ### Payload contract
 
@@ -87,7 +87,7 @@ Repository-local connection defaults require `project` and `name`; `autoConnect`
 
 If a command reload finds the repository-local configuration invalid, the Extension closes the current Presence, clears reconnect intent, and blocks fallback Hub access until a successful reload or Session switch.
 
-The Hub runs locally with `bun run hub` or in Docker Compose. Each Hub needs a unique URL and data directory. `HubDataLock` rejects concurrent ownership of one directory. The shared SQLite Hub store uses WAL and `synchronous = FULL`.
+The Hub runs locally with `bun run hub` or in Docker Compose. Each Hub needs a unique URL and data directory. `HubDataLock` rejects concurrent ownership of one directory. The shared SQLite Hub store uses WAL with `synchronous = FULL`; new storage writes the complete current schema and version atomically, while mismatches fail closed.
 
 ## User surfaces
 
@@ -131,7 +131,7 @@ The sender Extension snapshots attachment bytes before sending and fences the fi
 
 ## Verification
 
-The local release gate runs Biome, `bun run smoke`, both Bun entry-point builds, and `docker compose config`. It covers SQLite Project CRUD/reopen/sorting and atomic deletion, bounded WebSocket handshake/message/close lifecycles, caller cancellation and winning handshake failure preservation, Presence name conflicts and notifications, persist-before-enumerate routing, replayed acceptance, same-Presence retries, receiver deduplication, terminal Delivery cleanup, attachment ownership and history, existing storage migration, payload limits, Hub restart/cleanup, extension lifecycle, and command completion.
+The local release gate runs Biome, `bun run smoke`, both Bun entry-point builds, and `docker compose config`. It covers SQLite Project CRUD/reopen/sorting and atomic deletion, current storage creation/reopen and fail-closed schema guards, bounded WebSocket lifecycles, caller cancellation, Presence routing, replay and retries, receiver deduplication, terminal Delivery cleanup, attachment ownership and history, payload limits, Hub restart/cleanup, extension lifecycle, and command completion.
 
 `bun run smoke:docker` crosses the public HTTP/WebSocket process boundary of the selected running Hub, verifies persisted history, and removes its temporary Project.
 

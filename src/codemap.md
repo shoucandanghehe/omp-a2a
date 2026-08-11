@@ -137,7 +137,7 @@ OMP callbacks / slash / tools
 - `operations.test.ts`: published Hub bindings, shared transition teardown, peer snapshots, HTTP and realtime cancellation, new/replayed acceptance, ordered injection, Delivery outcomes, and disconnected errors.
 - `config.test.ts`: strict configuration parsing and migration failures.
 - `hub-client.test.ts`: strict global configuration parsing, exact fields, authoritative candidate selection, HTTP cancellation, and wire validation.
-- `hub-control.test.ts`: public Project control, active-Presence deletion ordering, startup cleanup, and concurrent stop behavior.
-- `message-store.test.ts`: Project SQLite CRUD/reopen/sorting, transaction rollback, sequence/history behavior, idempotency, and existing message migration coverage.
+- `hub-control.test.ts`: public Project control, active-Presence deletion ordering, storage startup guards, cleanup, and concurrent stop behavior.
+- `message-store.test.ts`: Project SQLite CRUD/reopen/sorting, transaction rollback, sequence/history behavior, idempotency, current schema creation/reopen, and fail-closed schema guards.
 
 See the repository root `codemap.md` for deployment and verification contracts.

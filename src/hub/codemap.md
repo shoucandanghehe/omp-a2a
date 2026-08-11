@@ -6,7 +6,7 @@
 
 - HTTP Project administration and explicit history;
 - WebSocket Presence, realtime messages, and delivery outcomes;
-- canonical SQLite Project metadata, sequence, and message history;
+- versioned SQLite Project metadata, sequence, and append-only message history;
 - payload encoding limits;
 - exclusive data-directory ownership and process lifecycle.
 
@@ -19,7 +19,7 @@
 | `realtime-server.ts` | Upgrade handling, handshake, Presence events, routing, delivery tracking, heartbeat, and shutdown. | `RealtimeHub` |
 | `connection.ts` | Extension-side WebSocket protocol client. | `A2aConnection`, `A2aConnectionEvents` |
 | `presence.ts` | In-memory Project/name/socket indexes. | `PresenceRegistry`, `Presence` |
-| `store.ts` | SQLite Project metadata, Project sequences, Messages, history, atomic deletion, and existing message migrations. | `HubStore` |
+| `store.ts` | Versioned SQLite Project metadata, sequences, Messages, history, atomic deletion, idempotency, and fail-closed schema guard. | `HubStore` |
 | `client.ts` | Hub URL resolution and HTTP meta/Project/history client. | `HubClient`, `connectHub`, `resolveHubUrl` |
 | `realtime-types.ts` | Versioned WebSocket frames, public realtime/history shapes, message identifiers, and canonical references. | protocol types, `A2A_PROTOCOL_VERSION`, message reference helpers |
 | `payload.ts` | Text/binary encoding, attachment validation, and bounded decoded-content accounting. | text/binary codecs, `validateMessageContent` |
@@ -139,13 +139,11 @@ Reusing `messageId` with the same Project, sender name, target kind/name, text e
 
 `replyTo` must resolve to an existing message in the same Project or `UnknownReplyTargetError` is raised.
 
-### Legacy migration
+### Storage schema
 
-When `messages.sqlite` is first created and old `inbox.sqlite` exists, ordinary `message_ledger` rows are imported in deterministic `(project, created_at, msg_id)` order. Delivery-receipt rows are excluded. Old pending messages become history only; no old Presence, recipient cursor, ACK, receipt, or offline-delivery state survives.
+`messages.sqlite` carries `MESSAGE_STORAGE_VERSION`, which is independent of `A2A_PROTOCOL_VERSION`. A new database creates both current tables, the sender-history index, and the storage version in one transaction.
 
-Opening a protocol version `2` `messages.sqlite` adds attachment JSON and total decoded-content columns in place. Existing rows receive `attachments = []` and `content_bytes = uncompressed_bytes`.
-
-Migration runs in the new database transaction and validates imported row count plus `PRAGMA integrity_check`. The old database is not modified.
+Opening an existing database requires the exact current storage version and the complete, exclusive set of current non-internal tables and indexes. Any missing, changed, or unexpected schema object fails startup with `unsupported pre-release storage; start with an empty data directory`; no schema conversion or fallback runs. SQLite-owned autoindexes remain valid.
 
 ## Payload codec
 
@@ -169,7 +167,7 @@ Migration runs in the new database transaction and validates imported row count 
 
 1. resolves and creates the data directory;
 2. acquires `HubDataLock` through an exclusive SQLite transaction;
-3. opens `HubStore`;
+3. opens `HubStore`, creating or validating the complete current versioned schema;
 4. starts Express and attaches `RealtimeHub` to the same HTTP server;
 5. writes `run/hub.json` and `run/hub.pid` atomically;
 6. returns the shared cleanup function as `stop`.
@@ -179,8 +177,8 @@ Startup failure and every concurrent `stop` call reuse one cleanup Promise. Clea
 ## Test coverage
 
 - `hub-realtime.test.ts`: bounded/cancellable handshake and teardown, exact goodbye ordering, Project claims, persist-before-enumerate routing, replay without redelivery, same-Presence retries, receiver deduplication, terminal Delivery cleanup, attachment persistence, and restart.
-- `message-store.test.ts`: Project CRUD/reopen/sorting, atomic delete rollback, ordering, idempotency, causality, filters, existing migrations, integrity, and deletion.
-- `hub-control.test.ts`: independent Hubs, claim/delete ordering, active-Presence rejection with unchanged history, startup cleanup, and concurrent stop.
+- `message-store.test.ts`: Project CRUD/reopen/sorting, atomic delete rollback, ordering, idempotency, causality, filters, current schema creation/reopen, fail-closed guards, integrity, and deletion.
+- `hub-control.test.ts`: independent Hubs, claim/delete ordering, active-Presence rejection with unchanged history, storage startup rejection, cleanup, and concurrent stop.
 - `payload.test.ts`: text/binary compression, attachment count, and decoded-size enforcement.
 - `operations.test.ts`: client/runtime integration, HTTP caller cancellation, pre-dispatch message cancellation, strong new/replayed acceptance, and successful/failed Delivery callbacks.
 - `hub-client.test.ts`: HTTP header/body deadlines, caller cancellation, error preservation, successful-response decoding, probe classification, and history wire validation.

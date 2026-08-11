@@ -9,7 +9,6 @@ import {
 	hubMetaPath,
 	hubPidPath,
 	hubStoreDatabasePath,
-	inboxDatabasePath,
 } from "../paths";
 import { HubDataDirInUseError, HubDataLock } from "./data-lock";
 import { RealtimeHub } from "./realtime-server";
@@ -114,9 +113,7 @@ export async function startHubServer(options?: {
 
 	try {
 		dataLock = new HubDataLock(hubLockPath(dataDir), dataDir);
-		const hubStore = new HubStore(hubStoreDatabasePath(dataDir), {
-			legacyDatabasePath: inboxDatabasePath(dataDir),
-		});
+		const hubStore = new HubStore(hubStoreDatabasePath(dataDir));
 		store = hubStore;
 
 		const app = express();
