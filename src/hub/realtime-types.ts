@@ -2,6 +2,19 @@ import type { EncodedAttachment, EncodedTextPayload } from "./types";
 
 export const A2A_PROTOCOL_VERSION = 3;
 
+export function isExactGoodbyeFrame(
+	value: unknown,
+): value is { type: "goodbye" } {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		!Array.isArray(value) &&
+		Object.keys(value).length === 1 &&
+		"type" in value &&
+		value.type === "goodbye"
+	);
+}
+
 export type Peer = {
 	name: string;
 	presenceId: string;

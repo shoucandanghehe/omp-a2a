@@ -3,6 +3,7 @@ import { encodeTextPayload } from "./payload";
 import {
 	A2A_PROTOCOL_VERSION,
 	type AcceptedMessage,
+	isExactGoodbyeFrame,
 	type ClientFrame,
 	type DeliveryEvent,
 	type MessageRequestTarget,
@@ -16,6 +17,19 @@ const HANDSHAKE_TIMEOUT_MS = 5_000;
 const MESSAGE_TIMEOUT_MS = 15_000;
 const GOODBYE_TIMEOUT_MS = 1_000;
 const CLOSE_TIMEOUT_MS = 2_000;
+
+function boundedTimeout(
+	value: number | undefined,
+	maximumMs: number,
+	name: string,
+): number {
+	if (value === undefined) return maximumMs;
+	if (!Number.isFinite(value) || value <= 0)
+		throw new Error(`${name} must be a finite positive number`);
+	if (value > maximumMs)
+		throw new Error(`${name} must not exceed ${maximumMs}ms`);
+	return value;
+}
 
 function deliveryFailureMessage(error: unknown): string {
 	const message = error instanceof Error ? error.message : String(error);
@@ -63,7 +77,7 @@ export class A2aConnection {
 	#events: A2aConnectionEvents;
 	#ready: Promise<void>;
 	#resolveReady!: () => void;
-	#rejectReady!: (error: Error) => void;
+	#rejectReady!: (reason?: unknown) => void;
 	#closed: Promise<void>;
 	#resolveClosed!: () => void;
 	#closePromise: Promise<void> | null = null;
@@ -72,6 +86,8 @@ export class A2aConnection {
 	#closeTimeoutMs: number;
 	#manualClose = false;
 	#messageQueue = Promise.resolve();
+	#handshakeAborted = false;
+	#handshakeAbortReason: unknown;
 
 	private constructor(
 		baseUrl: string,
@@ -118,9 +134,11 @@ export class A2aConnection {
 			);
 			if (!this.#self)
 				this.#rejectReady(
-					new Error(
-						`A2A connection closed (${code}): ${reason.toString() || "no reason"}`,
-					),
+					this.#handshakeAborted
+						? this.#handshakeAbortReason
+						: new Error(
+								`A2A connection closed (${code}): ${reason.toString() || "no reason"}`,
+							),
 				);
 			for (const requestId of this.#pending.keys())
 				this.#rejectPending(requestId, failure);
@@ -144,17 +162,31 @@ export class A2aConnection {
 		goodbyeTimeoutMs?: number;
 		closeTimeoutMs?: number;
 	}): Promise<A2aConnection> {
-		if (options.signal?.aborted)
-			throw new Error("A2A handshake aborted before connecting");
+		if (options.signal?.aborted) throw options.signal.reason;
+		const handshakeTimeoutMs = boundedTimeout(
+			options.timeoutMs,
+			HANDSHAKE_TIMEOUT_MS,
+			"timeoutMs",
+		);
+		const goodbyeTimeoutMs = boundedTimeout(
+			options.goodbyeTimeoutMs,
+			GOODBYE_TIMEOUT_MS,
+			"goodbyeTimeoutMs",
+		);
+		const closeTimeoutMs = boundedTimeout(
+			options.closeTimeoutMs,
+			CLOSE_TIMEOUT_MS,
+			"closeTimeoutMs",
+		);
 		const connection = new A2aConnection(
 			options.baseUrl,
 			options.project,
 			options.name,
 			options.events ?? {},
-			options.goodbyeTimeoutMs ?? GOODBYE_TIMEOUT_MS,
-			options.closeTimeoutMs ?? CLOSE_TIMEOUT_MS,
+			goodbyeTimeoutMs,
+			closeTimeoutMs,
 		);
-		const timeoutMs = options.timeoutMs ?? HANDSHAKE_TIMEOUT_MS;
+		const timeoutMs = handshakeTimeoutMs;
 		let timer: NodeJS.Timeout | undefined;
 		let onAbort: (() => void) | undefined;
 		const failed = new Promise<never>((_, reject) => {
@@ -163,18 +195,24 @@ export class A2aConnection {
 				timeoutMs,
 			);
 			if (options.signal) {
-				onAbort = () => reject(new Error("A2A handshake aborted"));
+				onAbort = () => {
+					connection.#handshakeAborted = true;
+					connection.#handshakeAbortReason = options.signal?.reason;
+					reject(connection.#handshakeAbortReason);
+				};
 				options.signal.addEventListener("abort", onAbort, { once: true });
 			}
 		});
 		try {
 			await Promise.race([connection.#ready, failed]);
+			if (options.signal?.aborted) throw options.signal.reason;
 			return connection;
 		} catch (error) {
 			connection.#manualClose = true;
 			if (connection.#socket.readyState !== WebSocket.CLOSED)
 				connection.#socket.terminate();
 			await connection.#closed;
+			if (options.signal?.aborted) throw options.signal.reason;
 			throw error;
 		} finally {
 			clearTimeout(timer);
@@ -218,19 +256,23 @@ export class A2aConnection {
 			return Promise.reject(
 				new Error("A2A message request aborted before dispatch"),
 			);
-		const requestId = crypto.randomUUID();
-		const messageId = options.messageId ?? crypto.randomUUID();
-		const frame: ClientFrame = {
-			type: "message",
-			requestId,
-			messageId,
-			target: options.target,
-			payload: encodeTextPayload(options.text),
-			attachments: options.attachments ?? [],
-			replyTo: options.replyTo,
-		};
-		const timeoutMs = request.timeoutMs ?? MESSAGE_TIMEOUT_MS;
 		return new Promise<AcceptedMessage>((resolve, reject) => {
+			const timeoutMs = boundedTimeout(
+				request.timeoutMs,
+				MESSAGE_TIMEOUT_MS,
+				"timeoutMs",
+			);
+			const requestId = crypto.randomUUID();
+			const messageId = options.messageId ?? crypto.randomUUID();
+			const frame: ClientFrame = {
+				type: "message",
+				requestId,
+				messageId,
+				target: options.target,
+				payload: encodeTextPayload(options.text),
+				attachments: options.attachments ?? [],
+				replyTo: options.replyTo,
+			};
 			const timer = setTimeout(() => {
 				this.#rejectPending(
 					requestId,
@@ -327,6 +369,12 @@ export class A2aConnection {
 				this.#resolveReady();
 				return;
 			case "goodbye":
+				if (!isExactGoodbyeFrame(frame)) {
+					this.#events.onError?.(
+						new Error("A2A goodbye frame must contain only type"),
+					);
+					return;
+				}
 				this.#resolveGoodbyeWait?.();
 				return;
 			case "presence_joined":

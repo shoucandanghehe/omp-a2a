@@ -51,7 +51,7 @@ OMP session
 5. `MessageStore` atomically appends one immutable Message—including encoded attachment content—and assigns the next Project sequence.
 6. The Hub pushes the Message to selected sockets. Each receiver materializes attachments, injects the Message into OMP, then reports `delivered` or `failed`.
 7. The sender receives one in-memory `delivered`, `failed`, or `disconnected` outcome per selected Presence.
-8. Graceful disconnect uses a `goodbye` barrier: the Hub releases Presence and Delivery state and broadcasts `presence_left` before its acknowledgement. Transport close and heartbeat timeout use the same idempotent release path.
+8. Graceful disconnect uses an exact `goodbye` barrier: the Hub queues its acknowledgement, releases Presence and Delivery state, broadcasts `presence_left`, then bounds transport close/termination. Presence release and transport teardown are distinct; transport close and heartbeat timeout use the same idempotent release path.
 
 A message acceptance request waits at most 15 seconds and accepts caller cancellation. Cancellation before dispatch sends nothing. Abort, timeout, or close after WebSocket dispatch reports that acceptance and Delivery outcomes are unknown, removes the client request, ignores late replies, and never retries.
 
