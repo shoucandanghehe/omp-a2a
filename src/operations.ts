@@ -1,4 +1,4 @@
-import type { HubClient } from "./hub/client";
+import type { HubClient, HubRequestOptions } from "./hub/client";
 import { A2aConnection, type A2aConnectionEvents } from "./hub/connection";
 import { decodeBinaryPayload, decodeTextPayload } from "./hub/payload";
 import type {
@@ -140,17 +140,23 @@ export class A2aRuntime {
 		};
 	}
 
-	async history(query?: Omit<HistoryQuery, "project">): Promise<MessageView[]> {
+	async history(
+		query?: Omit<HistoryQuery, "project">,
+		options?: HubRequestOptions,
+	): Promise<MessageView[]> {
 		if (!this.#connection) throw new Error("A2A is not connected");
-		const page = await (await this.#getClient()).history({
-			project: this.#connection.project,
-			...query,
-		});
+		const page = await (await this.#getClient()).history(
+			{
+				project: this.#connection.project,
+				...query,
+			},
+			options,
+		);
 		return page.messages.map((message) => this.#view(message));
 	}
 
-	async status(): Promise<RuntimeStatus> {
-		const hub = await (await this.#getClient()).meta();
+	async status(options?: HubRequestOptions): Promise<RuntimeStatus> {
+		const hub = await (await this.#getClient()).meta(options);
 		const connection = this.#connection;
 		return {
 			hub,
@@ -165,21 +171,27 @@ export class A2aRuntime {
 		};
 	}
 
-	async createProject(options: {
-		name: string;
-		displayName?: string;
-		description?: string;
-		createdByCwd?: string;
-	}): Promise<A2aProject> {
-		return await (await this.#getClient()).createProject(options);
+	async createProject(
+		project: {
+			name: string;
+			displayName?: string;
+			description?: string;
+			createdByCwd?: string;
+		},
+		options?: HubRequestOptions,
+	): Promise<A2aProject> {
+		return await (await this.#getClient()).createProject(project, options);
 	}
 
-	async listProjects(): Promise<A2aProject[]> {
-		return await (await this.#getClient()).listProjects();
+	async listProjects(options?: HubRequestOptions): Promise<A2aProject[]> {
+		return await (await this.#getClient()).listProjects(options);
 	}
 
-	async deleteProject(name: string): Promise<boolean> {
-		return await (await this.#getClient()).deleteProject(name);
+	async deleteProject(
+		name: string,
+		options?: HubRequestOptions,
+	): Promise<boolean> {
+		return await (await this.#getClient()).deleteProject(name, options);
 	}
 
 	#view(message: RealtimeMessage): MessageView {

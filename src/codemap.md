@@ -81,9 +81,9 @@ Connected model turns receive the current A2A roster name and use only `a2a_peer
 - `disconnect()` is idempotent and clears the stored connection before awaiting close.
 - `peers()` returns the current client-side Presence map.
 - `message()` requires a live connection, sends through it, and decodes the accepted persistent message for callers.
-- `history()` requires a connected Project but uses HTTP through the current Hub client.
-- `status()` combines Hub metadata with connected Presence state.
-- Project create/list/delete are thin HTTP operations and do not require a Presence.
+- `history()` requires a connected Project but uses caller-cancellable HTTP through the current Hub client.
+- `status()` combines Hub metadata with connected Presence state and accepts HTTP request options.
+- Project create/list/delete are thin HTTP operations, accept HTTP request options, and do not require a Presence.
 
 `MessageView` is the persistent realtime Message shape with decoded text and attachment bytes replacing encoded wire payloads.
 

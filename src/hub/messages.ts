@@ -4,15 +4,17 @@ import * as path from "node:path";
 import { ensureDir } from "../paths";
 import { AGENT_NAME_RE, PROJECT_NAME_RE } from "../types";
 import { parseEncodedAttachments, validateMessageContent } from "./payload";
-import type {
-	HistoryPage,
-	HistoryQuery,
-	MessageTarget,
-	RealtimeMessage,
+import {
+	formatMessageRef,
+	type HistoryPage,
+	type HistoryQuery,
+	MESSAGE_ID_RE,
+	type MessageTarget,
+	parseMessageRef,
+	type RealtimeMessage,
 } from "./realtime-types";
 import type { EncodedAttachment, EncodedTextPayload } from "./types";
 
-const MESSAGE_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
 export const MAX_HISTORY_BYTES = 4 * 1024 * 1024;
 
 export class MessageIdConflictError extends Error {}
@@ -60,35 +62,6 @@ type LegacyMessageRow = {
 	created_at: number;
 	reply_to: string | null;
 };
-
-type ParsedMessageRef = { project: string; sequence: number };
-
-export function formatMessageRef(project: string, sequence: number): string {
-	if (
-		!PROJECT_NAME_RE.test(project) ||
-		!Number.isSafeInteger(sequence) ||
-		sequence <= 0
-	) {
-		throw new Error("invalid message reference components");
-	}
-	return `${project}:${sequence}`;
-}
-
-export function parseMessageRef(reference: string): ParsedMessageRef {
-	const separator = reference.lastIndexOf(":");
-	const project = reference.slice(0, separator);
-	const sequenceText = reference.slice(separator + 1);
-	const sequence = Number(sequenceText);
-	if (
-		separator <= 0 ||
-		!PROJECT_NAME_RE.test(project) ||
-		!/^[1-9]\d*$/.test(sequenceText) ||
-		!Number.isSafeInteger(sequence)
-	) {
-		throw new Error(`invalid message reference: ${reference}`);
-	}
-	return { project, sequence };
-}
 
 export class MessageStore {
 	#database: Database;
