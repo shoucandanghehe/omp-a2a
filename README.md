@@ -55,21 +55,27 @@ billing:42
 
 Supported targets:
 
-- **Direct:** resolve one currently present name. Missing recipient fails immediately.
-- **Project:** broadcast to the Presence snapshot taken when the Hub accepts the message. The sender is excluded and later joiners do not receive it.
+- **Direct:** resolve one currently present name before persistence. Missing recipient fails immediately.
+- **Project:** persist the Message first, then enumerate the Project's current Presences once into a local array, excluding the sender, and enqueue to those concrete sockets. Later joiners do not receive it.
 - **Reply:** `replyTo` points to an existing message in the same Project.
 
-A direct target is bound to the resolved `presenceId`. If it disconnects, the message is never transferred to a future same-named connection.
+A direct target is bound to the resolved `presenceId`. If it disconnects, the Message is never transferred to a future same-named connection. A Project broadcast does not persist its recipient array: there is no recipient table, outbox, offline queue, or durable delivery state.
 
 An optional Message attachment is an immutable file-content value, not a durable object or a reference back to the sender. The sender Extension snapshots a current-session `local://` regular file before sending. The Hub persists those bytes with the Message, and each receiving Extension materializes its own session-local copy. Attachments share the Message lifecycle and disappear only when the Project is deleted.
 
 The client handshake has a 5-second deadline and supports caller cancellation. The outcome that settles first remains authoritative through socket teardown: the caller's exact abort reason is returned only when cancellation wins, while a later abort cannot replace a timeout, protocol, or transport failure. A message acceptance request has a 15-second deadline and supports caller cancellation. Cancellation before dispatch sends no frame. Once the WebSocket send succeeds, cancellation, timeout, or connection loss reports that acceptance and Delivery outcomes are unknown; the client does not retry, and late acceptance frames are ignored.
 
+Repeating an accepted request with the same `messageId` and content returns the canonical Message with `replayed: true`. It does not enumerate Presence again or redeliver. The Extension reports this as previously accepted rather than showing an empty recipient list.
+
 ### Delivery
 
-Receiving extensions process Messages serially in Hub-assigned Project sequence, materialize all attachments, and inject each OMP message through `steer` delivery. An idle session starts a turn; a busy session queues the Message into the active turn. The sender receives `delivered`, `failed`, or `disconnected` for each target. A failed materialization or injection reports `failed`; Delivery still proves neither model understanding nor task completion.
+Receiving extensions process Messages serially in Hub-assigned Project sequence, materialize all attachments, and inject each OMP message through `steer` delivery. Retries of one `messageId` are coalesced with the original in-flight injection or a 10-second terminal outcome cache, so they resend the same `delivered` or `delivery_failed` result without injecting twice. One earliest-expiry timer removes cached outcomes in completion order even while the connection is idle, and socket close clears both the cache and timer. `delivery_failed` is terminal and is not classified by matching error text.
 
-Delivery state is realtime and in-memory. Each pending recipient entry remains until that exact Presence reports `delivered` or `failed`, the recipient leaves (reported once as `disconnected`), the sender leaves, or the Hub shuts down. There is no Delivery ACK deadline while both Presences remain connected. ACK never deletes message history.
+The sender receives `delivered`, `failed`, `disconnected`, or `unknown` for each selected Presence. `failed` means the receiver explicitly reported that materialization or injection failed. `disconnected` means the selected Presence left. `unknown` means the finite retry budget ended without a conclusive receiver result—for example, after repeated ACK timeouts or transport writes whose dispatch outcome could not be established. Delivery still proves neither model understanding nor task completion.
+
+Delivery state is realtime and in-memory. The Hub binds one pending entry to `(messageId, recipientPresenceId)`, the original sender socket, and the original recipient socket. A transport write error or missing ACK retries the same frame only on that same socket while it still owns that same Presence, for at most three attempts in one Hub process. Constructor overrides may only shorten the finite positive integer attempt count or the finite positive two-second ACK window; they cannot extend the protocol retry window beyond the receiver's 10-second outcome retention. A receiver result, either Presence leaving, or Hub shutdown cancels its timer and produces at most one terminal event. A same-named reconnect never inherits the entry.
+
+ACK never deletes message history. A Hub restart retains accepted history but discards in-memory delivery state; it does not enumerate new recipients or resume delivery.
 
 ### History
 
@@ -281,7 +287,7 @@ Inbound messages are pushed automatically and processed serially in Hub-assigned
 - Attachment bytes use Base64 and use gzip first when that reduces payload size.
 - One Message accepts at most eight attachments.
 - Decoded text plus attachment content is limited to 4 MiB per Message and per history page.
-- `messageId` is an opaque idempotency key. Reusing it with different text, attachment names, attachment order, attachment content, target, or causal parent fails.
+- `messageId` is an opaque idempotency key. Reusing it with different text, attachment names, attachment order, attachment content, target, or causal parent fails. Reusing it with identical content returns the prior acceptance without redelivery.
 - History uses SQLite WAL with `synchronous = FULL`.
 - The Hub data directory has an exclusive lock; two Hub processes cannot write the same data.
 

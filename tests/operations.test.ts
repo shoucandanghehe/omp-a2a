@@ -59,6 +59,7 @@ test("one runtime path serves discovery, messaging, delivery, and history", asyn
 		messageId: "runtime-message",
 	});
 	expect(accepted).toMatchObject({
+		replayed: false,
 		message: { messageRef: "runtime:1" },
 		recipients: ["web"],
 	});
@@ -79,6 +80,15 @@ test("one runtime path serves discovery, messaging, delivery, and history", asyn
 	]);
 
 	await web.disconnect();
+	const replayed = await api.message({
+		target: { type: "agent", name: "web" },
+		text: "check login",
+		messageId: "runtime-message",
+	});
+	expect(replayed).toEqual({
+		replayed: true,
+		message: accepted.message,
+	});
 	await expect(
 		api.message({
 			target: { type: "agent", name: "web" },
@@ -192,6 +202,7 @@ test("receiver injection failure produces a terminal failed delivery", async () 
 		text: "persist despite failed injection",
 		messageId: "failed-delivery",
 	});
+	expect(accepted.replayed).toBe(false);
 	expect(accepted.message.messageRef).toBe("runtime-failure:1");
 	expect(await delivery.promise).toEqual({
 		messageId: "failed-delivery",

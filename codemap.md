@@ -47,23 +47,24 @@ OMP session
 1. `A2aConnection` opens `/v1/connect`, sends a versioned `hello`, and waits at most 5 seconds (or until caller cancellation) for the claim. The first handshake outcome remains authoritative while the failed socket is torn down.
 2. `RealtimeHub` verifies the Project and atomically claims the name in `PresenceRegistry`.
 3. The client receives its `presenceId` and the current peer snapshot; current peers receive `presence_joined`.
-4. A message request resolves either one current Presence or the current Project Presence snapshot.
-5. `MessageStore` atomically appends one immutable Message—including encoded attachment content—and assigns the next Project sequence.
-6. The Hub pushes the Message to selected sockets. Each receiver materializes attachments, injects the Message into OMP, then reports `delivered` or `failed`.
-7. The sender receives one in-memory `delivered`, `failed`, or `disconnected` outcome per selected Presence.
-8. Graceful disconnect uses an exact `goodbye` barrier: the Hub queues its acknowledgement, releases Presence and Delivery state, broadcasts `presence_left`, then bounds transport close/termination. Presence release and transport teardown are distinct; transport close and heartbeat timeout use the same idempotent release path.
+4. A direct request checks idempotency, resolves one current Presence, then persists. A Project broadcast persists first and, only for a new acceptance, enumerates current Project Presence once into a local array.
+5. `MessageStore` atomically appends one immutable Message—including encoded attachment content—and assigns the next Project sequence; an identical existing `messageId` returns `replayed`.
+6. The Hub synchronously enqueues the Message to the selected concrete sockets and keeps one bounded in-memory retry record per `(messageId, recipientPresenceId)`.
+7. Each receiver coalesces duplicate frames, materializes attachments, injects the Message once into OMP, then reports or re-reports `delivered` or `delivery_failed`.
+8. The sender receives one terminal in-memory `delivered`, `failed`, `disconnected`, or `unknown` outcome per selected Presence.
+9. Graceful disconnect uses an exact `goodbye` barrier: the Hub queues its acknowledgement, releases Presence and Delivery state, broadcasts `presence_left`, then bounds transport close/termination. Presence release and transport teardown are distinct; transport close and heartbeat timeout use the same idempotent release path.
 
 A message acceptance request waits at most 15 seconds and accepts caller cancellation. Cancellation before dispatch sends nothing. Abort, timeout, or close after WebSocket dispatch reports that acceptance and Delivery outcomes are unknown, removes the client request, ignores late replies, and never retries.
 
-A same-named later connection is a new Presence and never inherits pending Delivery. Pending Delivery has no ACK deadline while both Presences remain connected; it ends on receiver result, either Presence leaving, or Hub shutdown. History is never replayed automatically.
+A same-named later connection is a new Presence and never inherits pending Delivery. Transport write errors and missing ACKs retry the same Message only on the original socket while it still owns the original Presence, for at most three attempts in one Hub process; retry overrides may shorten, never extend, that protocol window. Receiver outcomes use one ordered earliest-expiry timer for their 10-second idle-cleaned cache. Receiver outcomes, either Presence leaving, and Hub shutdown cancel retry timers. Restart retains history but never resumes delivery.
 
 ### Persistent message contract
 
 - Message references are `<project>:<sequence>` and sequence is monotonic per Project.
-- `messageId` is the persistent idempotency key; conflicting reuse fails.
+- `messageId` is the persistent idempotency key; conflicting reuse fails and identical reuse returns the canonical Message as `replayed` without Presence enumeration or redelivery.
 - `replyTo` must resolve inside the same Project.
-- Direct messages are bound to the resolved `presenceId`; Project broadcasts freeze their recipient snapshot at acceptance.
-- History is append-only until Project deletion. Presence and delivery events are not persisted.
+- Direct messages are bound to the resolved `presenceId`; Project broadcasts persist before one local Presence enumeration and never persist their recipient array.
+- History is append-only until Project deletion. Presence, recipient arrays, retry trackers, and delivery events are not persisted.
 - Attachments are ordered immutable values inside a Message. Their names and bytes participate in `messageId` idempotency; they share the Message lifecycle.
 - Legacy `inbox.sqlite` message-ledger rows migrate once into `messages.sqlite`; old membership, cursor, ACK, receipt, and offline-delivery semantics do not migrate.
 
@@ -130,7 +131,7 @@ The sender Extension snapshots attachment bytes before sending. Receivers and hi
 
 ## Verification
 
-The local release gate runs Biome, `bun run smoke`, both Bun entry-point builds, and `docker compose config`. It covers Project isolation and deletion, bounded WebSocket handshake/message/close lifecycles, caller cancellation boundaries and winning handshake failure preservation, nonresponsive client/Hub close termination through a transparent TCP boundary, Presence name conflicts and notifications, direct and broadcast routing, successful/failed/disconnected Delivery cleanup, attachment snapshot/materialization/history, persistent history and protocol version `2`/legacy migration, payload limits, Hub restart, extension registration, and command completion.
+The local release gate runs Biome, `bun run smoke`, both Bun entry-point builds, and `docker compose config`. It covers Project isolation and deletion, bounded WebSocket handshake/message/close lifecycles, caller cancellation boundaries and winning handshake failure preservation, nonresponsive client/Hub close termination through a transparent TCP boundary, Presence name conflicts and notifications, persist-before-enumerate broadcast routing, replayed acceptance, maximum-validated same-Presence retries, receiver deduplication with ordered idle outcome expiry, delivered/failed/disconnected/unknown cleanup, attachment snapshot/materialization/history, persistent history and protocol version `2`/legacy migration, payload limits, Hub restart, extension registration, and command completion.
 
 `bun run smoke:docker` crosses the public HTTP/WebSocket process boundary of the selected running Hub, verifies persisted history, and removes its temporary Project.
 

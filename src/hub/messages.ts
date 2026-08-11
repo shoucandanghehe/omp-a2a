@@ -31,6 +31,10 @@ export type MessageDraft = {
 	replyTo?: string;
 };
 
+export type MessageAppendResult =
+	| { replayed: false; message: RealtimeMessage }
+	| { replayed: true; message: RealtimeMessage };
+
 type MessageRow = {
 	project: string;
 	project_sequence: number;
@@ -128,9 +132,7 @@ export class MessageStore {
 			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 		`);
 		this.#append = this.#database.transaction(
-			(
-				draft: MessageDraft,
-			): { inserted: boolean; message: RealtimeMessage } => {
+			(draft: MessageDraft): MessageAppendResult => {
 				const { attachments, contentBytes } = this.#validateDraft(draft);
 				const replyToSequence = this.#resolveReply(
 					draft.project,
@@ -143,7 +145,7 @@ export class MessageStore {
 							`messageId already used with different content: ${draft.messageId}`,
 						);
 					}
-					return { inserted: false, message: this.#toMessage(existing) };
+					return { replayed: true, message: this.#toMessage(existing) };
 				}
 				const sequence = this.#allocateSequence.get(
 					draft.project,
@@ -172,7 +174,7 @@ export class MessageStore {
 					replyToSequence,
 				);
 				return {
-					inserted: true,
+					replayed: false,
 					message: {
 						messageId: draft.messageId,
 						messageRef: formatMessageRef(draft.project, sequence),
@@ -199,7 +201,22 @@ export class MessageStore {
 		}
 	}
 
-	append(draft: MessageDraft): { inserted: boolean; message: RealtimeMessage } {
+	replay(
+		draft: MessageDraft,
+	): Extract<MessageAppendResult, { replayed: true }> | null {
+		const existing = this.#findById.get(draft.messageId);
+		if (!existing) return null;
+		const { attachments } = this.#validateDraft(draft);
+		const replyToSequence = this.#resolveReply(draft.project, draft.replyTo);
+		if (!this.#matches(existing, draft, attachments, replyToSequence)) {
+			throw new MessageIdConflictError(
+				`messageId already used with different content: ${draft.messageId}`,
+			);
+		}
+		return { replayed: true, message: this.#toMessage(existing) };
+	}
+
+	append(draft: MessageDraft): MessageAppendResult {
 		return this.#append(draft);
 	}
 

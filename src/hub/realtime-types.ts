@@ -2,6 +2,10 @@ import { PROJECT_NAME_RE } from "../types";
 import type { EncodedAttachment, EncodedTextPayload } from "./types";
 
 export const A2A_PROTOCOL_VERSION = 3;
+export const DELIVERY_MAX_ATTEMPTS = 3;
+export const DELIVERY_ACKNOWLEDGE_TIMEOUT_MS = 2_000;
+export const DELIVERY_RETRY_DELAY_MS = 100;
+export const DELIVERY_OUTCOME_CACHE_TTL_MS = 10_000;
 
 export const MESSAGE_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
 
@@ -60,17 +64,23 @@ export type MessageRequestTarget =
 	| { type: "agent"; name: string }
 	| { type: "project" };
 
-export type AcceptedMessage = {
-	message: RealtimeMessage;
-	recipients: string[];
-};
+export type AcceptedMessage =
+	| {
+			replayed: false;
+			message: RealtimeMessage;
+			recipients: string[];
+	  }
+	| {
+			replayed: true;
+			message: RealtimeMessage;
+	  };
 
 export type DeliveryEvent = {
 	messageId: string;
 	to: string;
 } & (
 	| { status: "delivered" | "disconnected" }
-	| { status: "failed"; error: string }
+	| { status: "failed" | "unknown"; error: string }
 );
 
 export type RealtimeMessage = {
@@ -127,12 +137,10 @@ export type ServerFrame =
 			peer: Peer;
 			reason: "connection_closed" | "heartbeat_timeout" | "hub_shutdown";
 	  }
-	| {
+	| ({
 			type: "accepted";
 			requestId: string;
-			message: RealtimeMessage;
-			recipients: string[];
-	  }
+	  } & AcceptedMessage)
 	| { type: "message"; message: RealtimeMessage }
 	| ({ type: "delivery" } & DeliveryEvent)
 	| { type: "goodbye" }

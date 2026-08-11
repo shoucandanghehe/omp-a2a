@@ -6,6 +6,7 @@ import {
 	isExactGoodbyeFrame,
 	type ClientFrame,
 	type DeliveryEvent,
+	DELIVERY_OUTCOME_CACHE_TTL_MS,
 	type MessageRequestTarget,
 	type Peer,
 	type RealtimeMessage,
@@ -17,6 +18,19 @@ const HANDSHAKE_TIMEOUT_MS = 5_000;
 const MESSAGE_TIMEOUT_MS = 15_000;
 const GOODBYE_TIMEOUT_MS = 1_000;
 const CLOSE_TIMEOUT_MS = 2_000;
+
+export type DeliveryOutcomeScheduler = {
+	now: () => number;
+	schedule: (callback: () => void, delayMs: number) => () => void;
+};
+
+const DEFAULT_DELIVERY_OUTCOME_SCHEDULER: DeliveryOutcomeScheduler = {
+	now: () => performance.now(),
+	schedule(callback, delayMs) {
+		const timer = setTimeout(callback, delayMs);
+		return () => clearTimeout(timer);
+	},
+};
 
 function boundedTimeout(
 	value: number | undefined,
@@ -46,6 +60,160 @@ function unknownMessageOutcome(reason: string): Error {
 		`A2A message acceptance and Delivery outcomes are unknown because ${reason}`,
 	);
 }
+type JsonObject = Record<string, unknown>;
+
+function isJsonObject(value: unknown): value is JsonObject {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactKeys(value: JsonObject, expected: readonly string[]): boolean {
+	const keys = Object.keys(value);
+	return (
+		keys.length === expected.length &&
+		keys.every((key) => expected.includes(key))
+	);
+}
+
+function isPeer(value: unknown): value is Peer {
+	return (
+		isJsonObject(value) &&
+		hasExactKeys(value, ["name", "presenceId"]) &&
+		typeof value.name === "string" &&
+		typeof value.presenceId === "string"
+	);
+}
+
+function isMessageTarget(value: unknown): value is RealtimeMessage["target"] {
+	if (!isJsonObject(value) || typeof value.type !== "string") return false;
+	if (value.type === "project") return hasExactKeys(value, ["type"]);
+	if (value.type !== "agent") return false;
+	const expectedKeys =
+		"presenceId" in value
+			? ["type", "name", "presenceId"]
+			: ["type", "name"];
+	return (
+		hasExactKeys(value, expectedKeys) &&
+		typeof value.name === "string" &&
+		(!("presenceId" in value) || typeof value.presenceId === "string")
+	);
+}
+
+function isEncodedTextPayload(
+	value: unknown,
+): value is RealtimeMessage["payload"] {
+	return (
+		isJsonObject(value) &&
+		hasExactKeys(value, ["encoding", "data", "uncompressedBytes"]) &&
+		(value.encoding === "identity" || value.encoding === "gzip+base64") &&
+		typeof value.data === "string" &&
+		typeof value.uncompressedBytes === "number" &&
+		Number.isSafeInteger(value.uncompressedBytes) &&
+		value.uncompressedBytes >= 0
+	);
+}
+
+function isEncodedAttachment(
+	value: unknown,
+): value is RealtimeMessage["attachments"][number] {
+	if (
+		!isJsonObject(value) ||
+		!hasExactKeys(value, ["name", "payload"]) ||
+		typeof value.name !== "string" ||
+		!isJsonObject(value.payload)
+	) {
+		return false;
+	}
+	return (
+		hasExactKeys(value.payload, ["encoding", "data", "uncompressedBytes"]) &&
+		(value.payload.encoding === "base64" ||
+			value.payload.encoding === "gzip+base64") &&
+		typeof value.payload.data === "string" &&
+		typeof value.payload.uncompressedBytes === "number" &&
+		Number.isSafeInteger(value.payload.uncompressedBytes) &&
+		value.payload.uncompressedBytes >= 0
+	);
+}
+
+function isRealtimeMessage(value: unknown): value is RealtimeMessage {
+	if (!isJsonObject(value)) return false;
+	const expectedKeys =
+		"replyTo" in value
+			? [
+					"messageId",
+					"messageRef",
+					"project",
+					"sequence",
+					"from",
+					"target",
+					"payload",
+					"attachments",
+					"createdAt",
+					"replyTo",
+				]
+			: [
+					"messageId",
+					"messageRef",
+					"project",
+					"sequence",
+					"from",
+					"target",
+					"payload",
+					"attachments",
+					"createdAt",
+				];
+	return (
+		hasExactKeys(value, expectedKeys) &&
+		typeof value.messageId === "string" &&
+		typeof value.messageRef === "string" &&
+		typeof value.project === "string" &&
+		typeof value.sequence === "number" &&
+		Number.isSafeInteger(value.sequence) &&
+		value.sequence > 0 &&
+		isPeer(value.from) &&
+		isMessageTarget(value.target) &&
+		isEncodedTextPayload(value.payload) &&
+		Array.isArray(value.attachments) &&
+		value.attachments.every(isEncodedAttachment) &&
+		typeof value.createdAt === "number" &&
+		Number.isFinite(value.createdAt) &&
+		(!("replyTo" in value) || typeof value.replyTo === "string")
+	);
+}
+
+function decodeAcceptedFrame(frame: unknown): AcceptedMessage {
+	if (
+		!isJsonObject(frame) ||
+		frame.type !== "accepted" ||
+		typeof frame.requestId !== "string" ||
+		typeof frame.replayed !== "boolean" ||
+		!isRealtimeMessage(frame.message)
+	) {
+		throw new Error("Invalid accepted frame from A2A Hub");
+	}
+	if (frame.replayed) {
+		if (!hasExactKeys(frame, ["type", "requestId", "replayed", "message"]))
+			throw new Error("Invalid accepted replay frame from A2A Hub");
+		return { replayed: true, message: frame.message };
+	}
+	if (
+		!hasExactKeys(frame, [
+			"type",
+			"requestId",
+			"replayed",
+			"message",
+			"recipients",
+		]) ||
+		!Array.isArray(frame.recipients) ||
+		!frame.recipients.every((recipient) => typeof recipient === "string")
+	) {
+		throw new Error("Invalid new accepted frame from A2A Hub");
+	}
+	return {
+		replayed: false,
+		message: frame.message,
+		recipients: frame.recipients,
+	};
+}
 
 export type A2aConnectionEvents = {
 	onPresenceJoined?: (peer: Peer) => void;
@@ -67,6 +235,11 @@ type PendingRequest = {
 	onAbort?: () => void;
 };
 
+type DeliveryOutcomeFrame = Extract<
+	ClientFrame,
+	{ type: "delivered" | "delivery_failed" }
+>;
+
 export class A2aConnection {
 	#socket: WebSocket;
 	#project: string;
@@ -86,6 +259,14 @@ export class A2aConnection {
 	#closeTimeoutMs: number;
 	#manualClose = false;
 	#messageQueue = Promise.resolve();
+	#deliveryInflight = new Map<string, Promise<DeliveryOutcomeFrame>>();
+	#deliveryOutcomes = new Map<
+		string,
+		{ frame: DeliveryOutcomeFrame; expiresAt: number }
+	>();
+	#cancelDeliveryOutcomeExpiry: (() => void) | null = null;
+	#deliveryOutcomeScheduler: DeliveryOutcomeScheduler;
+	#transportClosed = false;
 	#handshakeAborted = false;
 	#handshakeAbortReason: unknown;
 	#closeFinalized = false;
@@ -97,12 +278,14 @@ export class A2aConnection {
 		events: A2aConnectionEvents,
 		goodbyeTimeoutMs: number,
 		closeTimeoutMs: number,
+		deliveryOutcomeScheduler: DeliveryOutcomeScheduler,
 	) {
 		this.#project = project;
 		this.#name = name;
 		this.#events = events;
 		this.#goodbyeTimeoutMs = goodbyeTimeoutMs;
 		this.#closeTimeoutMs = closeTimeoutMs;
+		this.#deliveryOutcomeScheduler = deliveryOutcomeScheduler;
 		this.#ready = new Promise<void>((resolve, reject) => {
 			this.#resolveReady = resolve;
 			this.#rejectReady = reject;
@@ -143,6 +326,7 @@ export class A2aConnection {
 		timeoutMs?: number;
 		goodbyeTimeoutMs?: number;
 		closeTimeoutMs?: number;
+		deliveryOutcomeScheduler?: DeliveryOutcomeScheduler;
 	}): Promise<A2aConnection> {
 		if (options.signal?.aborted) throw options.signal.reason;
 		const handshakeTimeoutMs = boundedTimeout(
@@ -167,6 +351,8 @@ export class A2aConnection {
 			options.events ?? {},
 			goodbyeTimeoutMs,
 			closeTimeoutMs,
+			options.deliveryOutcomeScheduler ??
+				DEFAULT_DELIVERY_OUTCOME_SCHEDULER,
 		);
 		const timeoutMs = handshakeTimeoutMs;
 		let timer: NodeJS.Timeout | undefined;
@@ -364,6 +550,9 @@ export class A2aConnection {
 			);
 		for (const requestId of this.#pending.keys())
 			this.#rejectPending(requestId, failure);
+		this.#transportClosed = true;
+		this.#deliveryInflight.clear();
+		this.#clearDeliveryOutcomes();
 		this.#resolveGoodbyeWait?.();
 		try {
 			this.#events.onClose?.({
@@ -403,13 +592,11 @@ export class A2aConnection {
 				this.#events.onPresenceLeft?.({ ...frame.peer }, frame.reason);
 				return;
 			case "message":
-				this.#messageQueue = this.#messageQueue.then(() =>
-					this.#deliverMessage(frame.message),
-				);
+				this.#receiveMessage(frame.message);
 				return;
 			case "delivery":
 				this.#events.onDelivery?.(
-					frame.status === "failed"
+					frame.status === "failed" || frame.status === "unknown"
 						? {
 								messageId: frame.messageId,
 								to: frame.to,
@@ -426,10 +613,13 @@ export class A2aConnection {
 			case "accepted": {
 				const pending = this.#takePending(frame.requestId);
 				if (!pending) return;
-				pending.resolve({
-					message: frame.message,
-					recipients: frame.recipients,
-				});
+				try {
+					pending.resolve(decodeAcceptedFrame(frame));
+				} catch (error) {
+					pending.reject(
+						error instanceof Error ? error : new Error(String(error)),
+					);
+				}
 				return;
 			}
 			case "error": {
@@ -445,27 +635,118 @@ export class A2aConnection {
 		}
 	}
 
-	async #deliverMessage(message: RealtimeMessage): Promise<void> {
+	#receiveMessage(message: RealtimeMessage): void {
+		const cached = this.#deliveryOutcomes.get(message.messageId);
+		if (cached) {
+			if (cached.expiresAt > this.#deliveryOutcomeScheduler.now()) {
+				this.#sendDeliveryOutcome(cached.frame);
+				return;
+			}
+			this.#deliveryOutcomes.delete(message.messageId);
+			this.#rescheduleDeliveryOutcomeExpiry();
+		}
+		const inflight = this.#deliveryInflight.get(message.messageId);
+		if (inflight) {
+			void inflight.then((outcome) => this.#sendDeliveryOutcome(outcome));
+			return;
+		}
+
+		const outcome = this.#messageQueue.then(() =>
+			this.#deliveryOutcome(message),
+		);
+		this.#messageQueue = outcome.then(() => undefined);
+		this.#deliveryInflight.set(message.messageId, outcome);
+		void outcome.then((frame) => {
+			if (
+				this.#transportClosed ||
+				this.#deliveryInflight.get(message.messageId) !== outcome
+			) {
+				return;
+			}
+			this.#deliveryInflight.delete(message.messageId);
+			const now = this.#deliveryOutcomeScheduler.now();
+			this.#deliveryOutcomes.set(message.messageId, {
+				frame,
+				expiresAt: now + DELIVERY_OUTCOME_CACHE_TTL_MS,
+			});
+			this.#scheduleDeliveryOutcomeExpiry();
+			this.#sendDeliveryOutcome(frame);
+		});
+	}
+
+	#scheduleDeliveryOutcomeExpiry(): void {
+		if (
+			this.#transportClosed ||
+			this.#cancelDeliveryOutcomeExpiry ||
+			this.#deliveryOutcomes.size === 0
+		) {
+			return;
+		}
+		const earliest = this.#deliveryOutcomes.values().next().value;
+		if (!earliest) return;
+		const delayMs = Math.max(
+			0,
+			earliest.expiresAt - this.#deliveryOutcomeScheduler.now(),
+		);
+		this.#cancelDeliveryOutcomeExpiry =
+			this.#deliveryOutcomeScheduler.schedule(() => {
+				this.#cancelDeliveryOutcomeExpiry = null;
+				const now = this.#deliveryOutcomeScheduler.now();
+				for (const [messageId, retained] of this.#deliveryOutcomes) {
+					if (retained.expiresAt > now) break;
+					this.#deliveryOutcomes.delete(messageId);
+				}
+				this.#scheduleDeliveryOutcomeExpiry();
+			}, delayMs);
+	}
+
+	#rescheduleDeliveryOutcomeExpiry(): void {
+		this.#cancelDeliveryOutcomeExpiry?.();
+		this.#cancelDeliveryOutcomeExpiry = null;
+		this.#scheduleDeliveryOutcomeExpiry();
+	}
+
+	#clearDeliveryOutcomes(): void {
+		this.#cancelDeliveryOutcomeExpiry?.();
+		this.#cancelDeliveryOutcomeExpiry = null;
+		this.#deliveryOutcomes.clear();
+	}
+
+	async #deliveryOutcome(
+		message: RealtimeMessage,
+	): Promise<DeliveryOutcomeFrame> {
+		if (this.#transportClosed) {
+			return {
+				type: "delivery_failed",
+				messageId: message.messageId,
+				error: "receiver connection closed before message injection",
+			};
+		}
 		try {
 			await this.#events.onMessage?.(message);
-			this.#send({
+			return {
 				type: "delivered",
 				messageId: message.messageId,
-			});
+			};
 		} catch (error) {
 			const failure = error instanceof Error ? error : new Error(String(error));
-			try {
-				this.#send({
-					type: "delivery_failed",
-					messageId: message.messageId,
-					error: deliveryFailureMessage(failure),
-				});
-			} catch (sendError) {
-				this.#events.onError?.(
-					sendError instanceof Error ? sendError : new Error(String(sendError)),
-				);
-			}
 			this.#events.onError?.(failure);
+			return {
+				type: "delivery_failed",
+				messageId: message.messageId,
+				error: deliveryFailureMessage(failure),
+			};
+		}
+	}
+
+	#sendDeliveryOutcome(frame: DeliveryOutcomeFrame): void {
+		if (this.#transportClosed) return;
+		try {
+			this.#send(frame);
+		} catch (error) {
+			this.#events.onError?.(
+				error instanceof Error ? error : new Error(String(error)),
+			);
 		}
 	}
 
