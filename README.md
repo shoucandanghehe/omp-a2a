@@ -186,6 +186,8 @@ autoConnect: true
 
 The removed fields `agentId` and `autoJoin` fail with an explicit migration error. Rename them to `name` and `autoConnect`.
 
+If a repository configuration becomes invalid during a command reload, the Extension immediately closes its current Presence, cancels reconnect, and blocks fallback Hub access. `/a2a disconnect` remains available without reparsing the invalid file. Fix the file and reload or switch the Session to recover.
+
 ## Human commands
 
 Humans manage Projects, their own connection, and read-only views:

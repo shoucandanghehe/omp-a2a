@@ -1,6 +1,8 @@
+import { type as omptype } from "@oh-my-pi/omptype";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { parseWithSchema } from "../config-document";
 import { a2aRoot } from "../paths";
 import type { A2aProject } from "../types";
 import {
@@ -39,6 +41,16 @@ function stripTrailingSlash(url: string): string {
 	return url.replace(/\/+$/, "");
 }
 
+const globalHubConfigSchema = omptype({
+	hubUrl: omptype("string")
+		.pipe((value) => value.trim())
+		.narrow(
+			(value, context) =>
+				value.length > 0 || context.mustBe("a non-blank string"),
+		),
+	"+": "reject",
+});
+
 /** Resolve Hub URL without starting a process. */
 export function resolveHubUrl(options?: {
 	hubUrl?: string;
@@ -51,32 +63,10 @@ export function resolveHubUrl(options?: {
 	for (const name of ["config.yml", "config.yaml", "config.json"]) {
 		const file = path.join(a2aRoot(home), name);
 		if (!fs.existsSync(file)) continue;
-		if (name.endsWith(".json")) {
-			const raw = JSON.parse(fs.readFileSync(file, "utf8")) as Record<
-				string,
-				unknown
-			>;
-			const value = raw.hubUrl ?? raw.hub_url ?? raw.url;
-			if (typeof value !== "string" || !value.trim())
-				throw new Error(`invalid Hub URL in ${file}`);
-			return stripTrailingSlash(value.trim());
-		}
-		for (const line of fs.readFileSync(file, "utf8").split(/\r?\n/)) {
-			const match = line.match(/^(?:hubUrl|hub_url|url)\s*:\s*(.+)$/);
-			if (!match) continue;
-			const captured = match[1];
-			if (!captured) continue;
-			let value = captured.trim().replace(/#.*$/, "").trim();
-			if (
-				(value.startsWith('"') && value.endsWith('"')) ||
-				(value.startsWith("'") && value.endsWith("'"))
-			) {
-				value = value.slice(1, -1);
-			}
-			if (!value) throw new Error(`invalid Hub URL in ${file}`);
-			return stripTrailingSlash(value);
-		}
-		throw new Error(`Hub config has no hubUrl: ${file}`);
+		const config = parseWithSchema(file, globalHubConfigSchema, {
+			label: "Hub config",
+		});
+		return stripTrailingSlash(config.hubUrl);
 	}
 	return DEFAULT_HUB_URL;
 }

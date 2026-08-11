@@ -13,7 +13,10 @@ import a2aExtension from "../src/extension";
 import { HubClient } from "../src/hub/client";
 import { A2aConnection } from "../src/hub/connection";
 import { encodeBinaryPayload } from "../src/hub/payload";
-import type { DeliveryEvent } from "../src/hub/realtime-types";
+import {
+	A2A_PROTOCOL_VERSION,
+	type DeliveryEvent,
+} from "../src/hub/realtime-types";
 import { startHubServer } from "../src/hub/server";
 
 interface CompletionItem {
@@ -540,6 +543,298 @@ test("session switch cancels an in-flight inbound injection", async () => {
 		await sender?.close();
 		if (commandHandler) await commandHandler("disconnect", switchedContext);
 		await hub.stop();
+		rmSync(dataDir, { recursive: true, force: true });
+	}
+});
+
+test("invalid Session config blocks fallback Hub access until a successful reload", async () => {
+	const root = mkdtempSync(join(tmpdir(), "omp-a2a-extension-config-"));
+	const validCwd = join(root, "valid");
+	const invalidCwd = join(root, "invalid");
+	const invalidFile = join(invalidCwd, ".omp", "a2a.yml");
+	mkdirSync(join(validCwd, ".omp"), { recursive: true });
+	mkdirSync(join(invalidCwd, ".omp"), { recursive: true });
+	writeFileSync(
+		join(validCwd, ".omp", "a2a.yml"),
+		"project: billing\nname: api\nautoConnect: false\n",
+	);
+	writeFileSync(invalidFile, "project: [\nname: api\n");
+
+	const fallbackUrl = "http://fallback.invalid:4173";
+	const previousEnvironmentUrl = process.env.OMP_A2A_HUB_URL;
+	const originalFetch = globalThis.fetch;
+	let fetchCount = 0;
+	const notifications: string[] = [];
+	const validContext = {
+		cwd: validCwd,
+		ui: {
+			notify(message: string) {
+				notifications.push(message);
+			},
+		},
+	};
+	const invalidContext = {
+		cwd: invalidCwd,
+		ui: {
+			notify(message: string) {
+				notifications.push(message);
+			},
+		},
+	};
+	let sessionStart:
+		| ((event: unknown, context: typeof validContext) => Promise<void>)
+		| undefined;
+	let sessionSwitch:
+		| ((event: unknown, context: typeof invalidContext) => Promise<void>)
+		| undefined;
+	let commandHandler:
+		| ((
+				args: string,
+				context: typeof validContext | typeof invalidContext,
+		  ) => Promise<void>)
+		| undefined;
+
+	process.env.OMP_A2A_HUB_URL = fallbackUrl;
+	globalThis.fetch = (async () => {
+		fetchCount += 1;
+		return new Response(
+			JSON.stringify({
+				pid: 1,
+				port: 4173,
+				baseUrl: fallbackUrl,
+				dataDir: "/tmp/a2a-test",
+				startedAt: 1,
+				protocolVersion: A2A_PROTOCOL_VERSION,
+			}),
+			{
+				status: 200,
+				headers: { "content-type": "application/json" },
+			},
+		);
+	}) as typeof fetch;
+
+	try {
+		a2aExtension({
+			arktype(definition: unknown) {
+				return definition;
+			},
+			setLabel() {},
+			on(event: string, handler: unknown) {
+				if (event === "session_start")
+					sessionStart = handler as typeof sessionStart;
+				if (event === "session_switch")
+					sessionSwitch = handler as typeof sessionSwitch;
+			},
+			logger: { warn() {} },
+			sendMessage() {},
+			registerCommand(
+				_name: string,
+				command: { handler: typeof commandHandler },
+			) {
+				commandHandler = command.handler;
+			},
+			registerTool() {},
+		} as never);
+
+		if (!sessionStart || !sessionSwitch || !commandHandler) {
+			throw new Error("A2A Session handlers were not registered");
+		}
+		await sessionStart({}, validContext);
+		await commandHandler("hub", validContext);
+		expect(fetchCount).toBe(2);
+
+		await sessionSwitch({}, invalidContext);
+		expect(notifications.at(-1)).toContain(
+			`A2A config error: invalid a2a config at ${invalidFile}`,
+		);
+		const countBeforeBlockedCommands = fetchCount;
+		await commandHandler("hub", invalidContext);
+		await commandHandler("project list", invalidContext);
+		expect(fetchCount).toBe(countBeforeBlockedCommands);
+		expect(
+			notifications
+				.slice(-2)
+				.every((message) => message.includes(invalidFile)),
+		).toBe(true);
+
+		writeFileSync(
+			invalidFile,
+			"project: billing\nname: api\nautoConnect: false\n",
+		);
+		await commandHandler("hub", invalidContext);
+		expect(fetchCount).toBe(countBeforeBlockedCommands + 2);
+		expect(notifications.at(-1)).toContain(`Hub ${fallbackUrl}`);
+	} finally {
+		globalThis.fetch = originalFetch;
+		if (previousEnvironmentUrl === undefined) {
+			delete process.env.OMP_A2A_HUB_URL;
+		} else {
+			process.env.OMP_A2A_HUB_URL = previousEnvironmentUrl;
+		}
+		rmSync(root, { recursive: true, force: true });
+	}
+});
+
+test("invalid config reload closes fallback Presence and blocks sends without trapping disconnect", async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-extension-reload-"));
+	const cwd = join(dataDir, "client");
+	const invalidFile = join(cwd, ".omp", "a2a.yml");
+	const project = "config-fail-closed";
+	const hub = await startHubServer({ port: 0, dataDir });
+	const client = new HubClient(hub.meta.baseUrl);
+	const tools = new Map<string, RegisteredTool>();
+	const notifications: string[] = [];
+	const firstJoined = Promise.withResolvers<void>();
+	const originalPresenceLeft = Promise.withResolvers<void>();
+	const recovered = Promise.withResolvers<void>();
+	let originalPresenceId: string | undefined;
+	let awaitingRecovery = false;
+	let observer: A2aConnection | null = null;
+	let replacement: A2aConnection | null = null;
+	const context = {
+		cwd,
+		ui: {
+			notify(message: string) {
+				notifications.push(message);
+			},
+		},
+	};
+	let sessionStart:
+		| ((event: unknown, context: typeof context) => Promise<void>)
+		| undefined;
+	let sessionSwitch:
+		| ((event: unknown, context: typeof context) => Promise<void>)
+		| undefined;
+	let sessionShutdown: (() => Promise<void>) | undefined;
+	let commandHandler:
+		| ((args: string, context: typeof context) => Promise<void>)
+		| undefined;
+	const previousEnvironmentUrl = process.env.OMP_A2A_HUB_URL;
+	process.env.OMP_A2A_HUB_URL = hub.meta.baseUrl;
+
+	try {
+		await client.createProject({ name: project });
+		mkdirSync(join(cwd, ".omp"), { recursive: true });
+		writeFileSync(
+			invalidFile,
+			`project: ${project}\nname: api\nautoConnect: true\n`,
+		);
+		observer = await A2aConnection.connect({
+			baseUrl: hub.meta.baseUrl,
+			project,
+			name: "observer",
+			events: {
+				onPresenceJoined(peer) {
+					if (peer.name !== "api") return;
+					if (!originalPresenceId) {
+						firstJoined.resolve();
+						return;
+					}
+					if (awaitingRecovery) recovered.resolve();
+				},
+				onPresenceLeft(peer) {
+					if (peer.presenceId === originalPresenceId)
+						originalPresenceLeft.resolve();
+				},
+			},
+		});
+
+		a2aExtension({
+			arktype(definition: unknown) {
+				return definition;
+			},
+			setLabel() {},
+			on(event: string, handler: unknown) {
+				if (event === "session_start")
+					sessionStart = handler as typeof sessionStart;
+				if (event === "session_switch")
+					sessionSwitch = handler as typeof sessionSwitch;
+				if (event === "session_shutdown")
+					sessionShutdown = handler as typeof sessionShutdown;
+			},
+			logger: { warn() {} },
+			sendMessage() {},
+			registerCommand(
+				_name: string,
+				command: { handler: typeof commandHandler },
+			) {
+				commandHandler = command.handler;
+			},
+			registerTool(tool: RegisteredTool) {
+				tools.set(tool.name, tool);
+			},
+		} as never);
+
+		if (!sessionStart || !sessionSwitch || !sessionShutdown || !commandHandler) {
+			throw new Error("A2A Session handlers were not registered");
+		}
+		const messageTool = tools.get("a2a_message");
+		if (!messageTool) throw new Error("a2a_message was not registered");
+
+		await sessionStart({}, context);
+		await firstJoined.promise;
+		originalPresenceId = observer.peers().find(
+			(peer) => peer.name === "api",
+		)?.presenceId;
+		if (!originalPresenceId)
+			throw new Error("observer did not see the Extension Presence");
+
+		writeFileSync(invalidFile, "project: [\nname: api\n");
+		await commandHandler("hub", context);
+		expect(notifications.at(-1)).toContain(invalidFile);
+
+		let replacementError: string | null = null;
+		try {
+			replacement = await A2aConnection.connect({
+				baseUrl: hub.meta.baseUrl,
+				project,
+				name: "api",
+			});
+			await originalPresenceLeft.promise;
+		} catch (error) {
+			replacementError =
+				error instanceof Error ? error.message : String(error);
+		}
+
+		const blockedSend = await messageTool.execute("blocked-send", {
+			target: { type: "agent", name: "observer" },
+			text: "must not cross an invalid config boundary",
+		} as never);
+		const notificationCount = notifications.length;
+		await commandHandler("disconnect", context);
+		const disconnectNotifications = notifications.slice(notificationCount);
+
+		await replacement?.close();
+		replacement = null;
+		writeFileSync(
+			invalidFile,
+			`project: ${project}\nname: api\nautoConnect: true\n`,
+		);
+		awaitingRecovery = true;
+		await sessionSwitch({}, context);
+		await recovered.promise;
+
+		expect({
+			replacementError,
+			sendIsError: blockedSend.isError === true,
+			sendMessage: blockedSend.content[0]?.text,
+			disconnectNotifications,
+		}).toEqual({
+			replacementError: null,
+			sendIsError: true,
+			sendMessage: "A2A is not connected",
+			disconnectNotifications: ["A2A is not connected"],
+		});
+	} finally {
+		await sessionShutdown?.();
+		await replacement?.close();
+		await observer?.close();
+		await hub.stop();
+		if (previousEnvironmentUrl === undefined) {
+			delete process.env.OMP_A2A_HUB_URL;
+		} else {
+			process.env.OMP_A2A_HUB_URL = previousEnvironmentUrl;
+		}
 		rmSync(dataDir, { recursive: true, force: true });
 	}
 });

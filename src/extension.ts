@@ -8,7 +8,11 @@ import {
 	snapshotLocalAttachments,
 } from "./local-attachments";
 import { A2aRuntime, type MessageView } from "./operations";
-import { AGENT_NAME_RE, PROJECT_NAME_RE } from "./types";
+import {
+	AGENT_NAME_RE,
+	type A2aLocalConfig,
+	PROJECT_NAME_RE,
+} from "./types";
 
 const ASYNC_REPLY_GUIDANCE =
 	"Replies arrive automatically. After sending, continue independent work; if blocked, end the current turn. Never wait, sleep, or poll a2a_history for a reply.";
@@ -234,18 +238,55 @@ export default function a2aExtension(pi: ExtensionAPI) {
 
 	let client: HubClient | null = null;
 	let configuredHubUrl: string | undefined;
+	let configError: Error | null = null;
+	let configLoaded = false;
 	let activeContext: ExtensionContext | null = null;
 	let desiredConnection: { project: string; name: string } | null = null;
 	let reconnectTimer: NodeJS.Timeout | undefined;
 	let reconnectDelayMs = 500;
+	let configRevision = 0;
 
-	const refreshHubUrl = (cwd: string) => {
-		configuredHubUrl = loadLocalConfig(cwd)?.hubUrl;
+	const refreshLocalConfig = async (cwd: string) => {
+		try {
+			const config = loadLocalConfig(cwd);
+			configuredHubUrl = config?.hubUrl;
+			configError = null;
+			configLoaded = true;
+			configRevision += 1;
+			return config;
+		} catch (error) {
+			configuredHubUrl = undefined;
+			client = null;
+			const failure =
+				error instanceof Error ? error : new Error(String(error));
+			configError = failure;
+			configLoaded = true;
+			configRevision += 1;
+			desiredConnection = null;
+			clearTimeout(reconnectTimer);
+			reconnectTimer = undefined;
+			await runtime.disconnect();
+			throw failure;
+		}
 	};
 	const ensureClient = async (): Promise<HubClient> => {
+		if (configError) throw configError;
+		if (!configLoaded) {
+			throw new Error("A2A config is not loaded for the active Session");
+		}
+		const revision = configRevision;
 		const target = resolveHubUrl({ hubUrl: configuredHubUrl });
 		if (client?.baseUrl !== target) client = null;
-		client ??= await HubClient.connect({ hubUrl: configuredHubUrl });
+		if (!client) {
+			const connected = await HubClient.connect({
+				hubUrl: configuredHubUrl,
+			});
+			if (revision !== configRevision) {
+				if (configError) throw configError;
+				return await ensureClient();
+			}
+			client = connected;
+		}
 		return client;
 	};
 
@@ -327,15 +368,28 @@ export default function a2aExtension(pi: ExtensionAPI) {
 
 	const activateSession = async (context: ExtensionContext) => {
 		activeContext = null;
+		client = null;
+		configuredHubUrl = undefined;
+		configError = null;
+		configLoaded = false;
+		desiredConnection = null;
+		configRevision += 1;
 		if (reconnectTimer) {
 			clearTimeout(reconnectTimer);
 			reconnectTimer = undefined;
 		}
 		await runtime.disconnect();
 		activeContext = context;
-		refreshHubUrl(context.cwd);
-		desiredConnection = null;
-		const config = loadLocalConfig(context.cwd);
+		let config: A2aLocalConfig | null;
+		try {
+			config = await refreshLocalConfig(context.cwd);
+		} catch (error) {
+			context.ui.notify(
+				`A2A config error: ${error instanceof Error ? error.message : String(error)}`,
+				"error",
+			);
+			return;
+		}
 		if (!config || config.autoConnect === false) return;
 		desiredConnection = { project: config.project, name: config.name };
 		await connectDesired();
@@ -362,6 +416,11 @@ export default function a2aExtension(pi: ExtensionAPI) {
 	pi.on("session_shutdown", async () => {
 		activeContext = null;
 		desiredConnection = null;
+		client = null;
+		configuredHubUrl = undefined;
+		configError = null;
+		configLoaded = false;
+		configRevision += 1;
 		clearTimeout(reconnectTimer);
 		reconnectTimer = undefined;
 		await runtime.disconnect();
@@ -372,10 +431,22 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		getArgumentCompletions: completeA2aArguments,
 		handler: async (raw, context) => {
 			activeContext = context;
-			refreshHubUrl(context.cwd);
 			const { positional, flags } = parseArgs(raw);
 			const command = positional[0] ?? "help";
 			try {
+				if (command === "disconnect") {
+					desiredConnection = null;
+					clearTimeout(reconnectTimer);
+					reconnectTimer = undefined;
+					context.ui.notify(
+						(await runtime.disconnect())
+							? "Disconnected"
+							: "A2A is not connected",
+						"info",
+					);
+					return;
+				}
+				await refreshLocalConfig(context.cwd);
 				if (command === "help" || command === "--help" || command === "-h") {
 					context.ui.notify(usage(), "info");
 					return;
@@ -442,18 +513,6 @@ export default function a2aExtension(pi: ExtensionAPI) {
 					}
 					desiredConnection = { project, name };
 					await connectDesired();
-					return;
-				}
-				if (command === "disconnect") {
-					desiredConnection = null;
-					clearTimeout(reconnectTimer);
-					reconnectTimer = undefined;
-					context.ui.notify(
-						(await runtime.disconnect())
-							? "Disconnected"
-							: "A2A is not connected",
-						"info",
-					);
 					return;
 				}
 				if (command === "status") {

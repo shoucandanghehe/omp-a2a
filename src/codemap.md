@@ -14,6 +14,7 @@ The central seam is `A2aRuntime`: extension callbacks and commands depend on one
 | `local-attachments.ts` | Snapshot sender-session `local://` files and materialize received/history attachment bytes into the calling session. | `snapshotLocalAttachments`, `materializeLocalAttachments` |
 | `operations.ts` | Connected runtime over one WebSocket plus HTTP Project/history operations. | `A2aRuntime`, `MessageView`, `RuntimeStatus` |
 | `config.ts` | Strict repository-local YAML/JSON connection defaults. | `loadLocalConfig` |
+| `config-document.ts` | Read YAML/JSON documents, apply an owner-supplied omptype schema, and report path-qualified errors. | `parseWithSchema` |
 | `paths.ts` | Hub storage paths and local config candidates. | path functions |
 | `registry.ts` | Filesystem-backed persistent Project metadata. | `createProject`, `getProject`, `listProjects`, `deleteProject` |
 | `types.ts` | Project/config domain shapes and name validation regexes. | `A2aProject`, `A2aLocalConfig` |
@@ -23,17 +24,21 @@ The central seam is `A2aRuntime`: extension callbacks and commands depend on one
 
 `a2aExtension(pi)` owns one session-local `A2aRuntime` and the following state:
 
-- cached `HubClient`, invalidated when the resolved Hub URL changes;
+- cached `HubClient`, invalidated when the resolved Hub URL changes or a Session activates;
+- active local Hub URL selection plus a persistent invalid-config error distinct from absent configuration;
 - active OMP `ExtensionContext` for message injection and notifications;
 - desired `{ project, name }` used by reconnect;
 - one bounded exponential reconnect timer, from 500 ms to 10 seconds.
 
 On `session_start` and `session_switch`, the extension:
 
-1. clears the active context so in-flight inbound callbacks cannot inject into the new session;
+1. clears the active context, cached Hub selection/client, and desired connection so no state crosses into the new Session;
 2. cancels pending reconnect and disconnects the old Presence;
-3. activates the new context and resolves its repository-local configuration;
-4. clears prior desired connection state and auto-connects only when configuration exists and `autoConnect !== false`.
+3. activates the new context and loads its repository-local configuration;
+4. reports invalid configuration to the UI and preserves that error so Hub and Project operations cannot fall back to environment, global, default, or a prior client;
+5. auto-connects only when configuration is valid, present, and `autoConnect !== false`.
+
+Commands reload the current Session configuration. A successful reload clears the invalid state; an absent configuration or a valid configuration without `hubUrl` retains environment → global → default Hub URL resolution. An invalid reload atomically publishes fail-closed config state, cancels reconnect intent, and closes the current Presence before reporting the path-qualified error. The local `disconnect` command remains available without reparsing invalid configuration.
 
 On `session_shutdown`, it clears the active context and desired state, cancels reconnect, and closes the socket. Unexpected socket close schedules reconnect. A `name_in_use` response is terminal for that desired connection rather than repeatedly displacing or retrying the owner.
 
@@ -89,15 +94,17 @@ Connected model turns receive the current A2A roster name and use only `a2a_peer
 
 ## Configuration contract
 
+`config-document.ts` delegates YAML syntax to Bun `YAML.parse` and JSON syntax to `JSON.parse`, applies an owner-supplied `@oh-my-pi/omptype` schema, and turns `OmpErrors` into path-qualified configuration errors. It assigns no schema itself.
+
 `loadLocalConfig(cwd)` selects the first existing file in this order:
 
 1. `.omp/a2a.yml`
 2. `.omp/a2a.yaml`
 3. `.omp/a2a.json`
 
-The selected file is authoritative: read, parse, validation, and unsupported-YAML failures propagate. Required fields are `project` and `name`; optional fields are `hubUrl` and boolean `autoConnect`. Removed `agentId`/`autoJoin` spellings fail with a migration error rather than being accepted as aliases.
+The selected file is authoritative: read, syntax, and schema failures include its path and never fall through to a later candidate. The local omptype schema requires `project` and `name`, permits optional `hubUrl`, defaults `autoConnect` to enabled, trims strings, rejects blanks, narrows Project/name values through their regexes, and uses `"+": "reject"` for every undeclared field. Removed `agentId`/`agent_id` and `autoJoin`/`auto_join` error paths are rendered as explicit migration errors rather than aliases.
 
-The YAML parser supports a one-level mapping and string lists. It preserves quoted `#` and comma content and rejects unsupported nested syntax.
+Global client configuration uses the same authoritative candidate order under `~/.omp/a2a/`. Its owner schema trims and requires one nonblank string `hubUrl` and uses `"+": "reject"`; the former `hub_url`/`url` aliases therefore fail as undeclared fields.
 
 ## Project metadata
 
@@ -137,9 +144,10 @@ OMP callbacks / slash / tools
 
 ## Tests touching this directory
 
-- `extension.test.ts`: registered surfaces, help contract, ArkType schemas, multi-level completion, and cross-session attachment snapshot/materialization/history.
+- `extension.test.ts`: registered surfaces, invalid Session configuration isolation and live-Presence fail-closed reloads, completion, and cross-session attachment snapshot/materialization/history.
 - `operations.test.ts`: runtime connect, snapshots, message and successful/failed Delivery callbacks, and disconnected errors.
 - `config.test.ts`: strict configuration parsing and migration failures.
+- `hub-client.test.ts`: strict global configuration parsing, exact fields, and authoritative candidate selection.
 - `hub-control.test.ts`: public Project control behavior reached through `HubClient`.
 
 See the repository root `codemap.md` for deployment and verification contracts.
