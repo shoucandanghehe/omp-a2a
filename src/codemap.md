@@ -140,6 +140,6 @@ OMP callbacks / slash / tools
 - `extension.test.ts`: registered surfaces, help contract, ArkType schemas, multi-level completion, and cross-session attachment snapshot/materialization/history.
 - `operations.test.ts`: runtime connect, snapshots, message and successful/failed Delivery callbacks, and disconnected errors.
 - `config.test.ts`: strict configuration parsing and migration failures.
-- `hub-control.test.ts`: public Project control behavior reached through `HubClient`.
+- `hub-control.test.ts`: public Project control behavior, storage startup guards, and ignored pre-0.1 Inbox files reached through Hub interfaces.
 
 See the repository root `codemap.md` for deployment and verification contracts.

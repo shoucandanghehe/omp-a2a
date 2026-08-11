@@ -97,7 +97,7 @@ Cross the deployed process/network boundary rather than proving another in-proce
 | Delivery outcomes | yes | no | yes | no |
 | Persistent history/restart | yes | no | yes | history only |
 | Attachment wire/history bytes | yes | no | no | yes |
-| Legacy message migration | yes | no | no | no |
+| Current storage schema guard | yes | no | no | no |
 | Payload boundaries | yes | no | representative payload | representative payload |
 | Actual container/network process | no | no | no | yes |
 

@@ -1,16 +1,19 @@
 import { Database } from "bun:sqlite";
 import { afterEach, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	MAX_HISTORY_BYTES,
+	MESSAGE_STORAGE_VERSION,
 	MessageIdConflictError,
 	MessageStore,
 } from "../src/hub/messages";
 import { encodeBinaryPayload, encodeTextPayload } from "../src/hub/payload";
 
 const roots: string[] = [];
+const UNSUPPORTED_STORAGE_MESSAGE =
+	"unsupported pre-release storage; start with an empty data directory";
 
 afterEach(() => {
 	for (const root of roots.splice(0))
@@ -81,72 +84,37 @@ test("messages form one immutable sequence per Project", () => {
 	store.close();
 });
 
-test("legacy message ledger migrates once into Project history", () => {
+test("current storage schema is versioned and reopens", () => {
 	const root = mkdtempSync(join(tmpdir(), "omp-a2a-messages-"));
 	roots.push(root);
-	const legacyPath = join(root, "inbox.sqlite");
-	const legacy = new Database(legacyPath, { create: true });
-	legacy.run(`
-		CREATE TABLE message_ledger (
-			msg_id TEXT PRIMARY KEY,
-			project TEXT NOT NULL,
-			sender TEXT NOT NULL,
-			recipient TEXT NOT NULL,
-			encoding TEXT NOT NULL,
-			data TEXT NOT NULL,
-			uncompressed_bytes INTEGER NOT NULL,
-			created_at INTEGER NOT NULL,
-			reply_to TEXT,
-			server_sequence INTEGER NOT NULL
-		)
-	`);
-	const insert = legacy.query(
-		"INSERT INTO message_ledger(msg_id, project, sender, recipient, encoding, data, uncompressed_bytes, created_at, reply_to, server_sequence) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-	);
-	insert.run(
-		"second-id",
-		"legacy",
-		"web",
-		"api",
-		"identity",
-		"second",
-		6,
-		200,
-		"first-id",
-		1,
-	);
-	insert.run(
-		"first-id",
-		"legacy",
-		"api",
-		"web",
-		"identity",
-		"first",
-		5,
-		100,
-		null,
-		1,
-	);
-	legacy.close();
-
-	const store = new MessageStore(join(root, "messages.sqlite"), {
-		legacyDatabasePath: legacyPath,
+	const databasePath = join(root, "messages.sqlite");
+	const store = new MessageStore(databasePath);
+	store.append({
+		messageId: "current-schema",
+		project: "current",
+		from: { name: "api", presenceId: "presence-api" },
+		target: { type: "project" },
+		payload: encodeTextPayload("persist the current schema"),
+		attachments: [],
+		createdAt: 100,
 	});
-	expect(
-		store.history({ project: "legacy", limit: 10 }).messages,
-	).toMatchObject([
-		{ messageId: "first-id", messageRef: "legacy:1", replyTo: undefined },
-		{ messageId: "second-id", messageRef: "legacy:2", replyTo: "legacy:1" },
-	]);
-	expect(store.integrityCheck()).toBe("ok");
 	store.close();
 
-	const reopened = new MessageStore(join(root, "messages.sqlite"), {
-		legacyDatabasePath: legacyPath,
-	});
+	const database = new Database(databasePath);
 	expect(
-		reopened.history({ project: "legacy", limit: 10 }).messages,
-	).toHaveLength(2);
+		database.query<{ user_version: number }, []>("PRAGMA user_version").get()
+			?.user_version,
+	).toBe(MESSAGE_STORAGE_VERSION);
+	database.close();
+
+	const reopened = new MessageStore(databasePath);
+	expect(reopened.history({ project: "current" }).messages).toMatchObject([
+		{
+			messageId: "current-schema",
+			messageRef: "current:1",
+			attachments: [],
+		},
+	]);
 	reopened.close();
 });
 
@@ -213,62 +181,34 @@ test("history response has an explicit decoded-byte bound", () => {
 	store.close();
 });
 
-test("protocol v2 message databases migrate with empty attachments", () => {
-	const root = mkdtempSync(join(tmpdir(), "omp-a2a-messages-v2-"));
+test("storage version mismatch fails closed without changing the database", () => {
+	const root = mkdtempSync(join(tmpdir(), "omp-a2a-unsupported-storage-"));
 	roots.push(root);
 	const databasePath = join(root, "messages.sqlite");
-	const previous = new Database(databasePath, { create: true });
-	previous.run(`
-		CREATE TABLE messages (
-			project TEXT NOT NULL,
-			project_sequence INTEGER NOT NULL,
-			msg_id TEXT NOT NULL UNIQUE,
-			sender_name TEXT NOT NULL,
-			sender_presence_id TEXT,
-			target_kind TEXT NOT NULL,
-			target_name TEXT,
-			target_presence_id TEXT,
-			encoding TEXT NOT NULL,
-			data TEXT NOT NULL,
-			uncompressed_bytes INTEGER NOT NULL,
-			created_at INTEGER NOT NULL,
-			reply_to_sequence INTEGER,
-			PRIMARY KEY(project, project_sequence)
-		)
-	`);
-	previous
-		.query(
-			"INSERT INTO messages VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-		)
-		.run(
-			"migration",
-			1,
-			"v2-message",
-			"api",
-			"presence-api",
-			"project",
-			null,
-			null,
-			"identity",
-			"persisted before attachments",
-			28,
-			100,
-			null,
-		);
-	previous.close();
+	const unsupported = new Database(databasePath, { create: true });
+	unsupported.run("CREATE TABLE messages (id TEXT)");
+	unsupported.run(`PRAGMA user_version = ${MESSAGE_STORAGE_VERSION + 1}`);
+	unsupported.close();
+	const before = readFileSync(databasePath);
 
-	const store = new MessageStore(databasePath);
-	expect(store.history({ project: "migration" }).messages).toMatchObject([
-		{
-			messageId: "v2-message",
-			attachments: [],
-		},
-	]);
-	store.close();
-	const reopened = new MessageStore(databasePath);
-	expect(reopened.integrityCheck()).toBe("ok");
-	expect(reopened.history({ project: "migration" }).messages).toHaveLength(1);
-	reopened.close();
+	expect(() => new MessageStore(databasePath)).toThrow(
+		UNSUPPORTED_STORAGE_MESSAGE,
+	);
+	expect(readFileSync(databasePath)).toEqual(before);
+});
+
+test("current storage version rejects an incomplete schema", () => {
+	const root = mkdtempSync(join(tmpdir(), "omp-a2a-invalid-storage-"));
+	roots.push(root);
+	const databasePath = join(root, "messages.sqlite");
+	const invalid = new Database(databasePath, { create: true });
+	invalid.run("CREATE TABLE messages (id TEXT)");
+	invalid.run(`PRAGMA user_version = ${MESSAGE_STORAGE_VERSION}`);
+	invalid.close();
+
+	expect(() => new MessageStore(databasePath)).toThrow(
+		UNSUPPORTED_STORAGE_MESSAGE,
+	);
 });
 
 test("attachment content participates in messageId idempotency", () => {

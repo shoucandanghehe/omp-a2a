@@ -1,5 +1,4 @@
 import { Database } from "bun:sqlite";
-import * as fs from "node:fs";
 import * as path from "node:path";
 import { ensureDir } from "../paths";
 import { AGENT_NAME_RE, PROJECT_NAME_RE } from "../types";
@@ -13,6 +12,9 @@ import type {
 import type { EncodedAttachment, EncodedTextPayload } from "./types";
 
 const MESSAGE_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
+export const MESSAGE_STORAGE_VERSION = 1;
+const UNSUPPORTED_STORAGE_MESSAGE =
+	"unsupported pre-release storage; start with an empty data directory";
 export const MAX_HISTORY_BYTES = 4 * 1024 * 1024;
 
 export class MessageIdConflictError extends Error {}
@@ -34,7 +36,7 @@ type MessageRow = {
 	project_sequence: number;
 	msg_id: string;
 	sender_name: string;
-	sender_presence_id: string | null;
+	sender_presence_id: string;
 	target_kind: string;
 	target_name: string | null;
 	target_presence_id: string | null;
@@ -49,17 +51,58 @@ type MessageRow = {
 
 type SequenceRow = { next_sequence: number };
 
-type LegacyMessageRow = {
-	msg_id: string;
-	project: string;
-	sender: string;
-	recipient: string;
-	encoding: string;
-	data: string;
-	uncompressed_bytes: number;
-	created_at: number;
-	reply_to: string | null;
-};
+const PROJECT_SEQUENCES_SCHEMA = `
+	CREATE TABLE project_sequences (
+		project TEXT PRIMARY KEY NOT NULL,
+		next_sequence INTEGER NOT NULL
+	)
+`;
+
+const MESSAGES_SCHEMA = `
+	CREATE TABLE messages (
+		project TEXT NOT NULL,
+		project_sequence INTEGER NOT NULL,
+		msg_id TEXT NOT NULL UNIQUE,
+		sender_name TEXT NOT NULL,
+		sender_presence_id TEXT NOT NULL,
+		target_kind TEXT NOT NULL,
+		target_name TEXT,
+		target_presence_id TEXT,
+		encoding TEXT NOT NULL,
+		data TEXT NOT NULL,
+		uncompressed_bytes INTEGER NOT NULL,
+		attachments TEXT NOT NULL,
+		content_bytes INTEGER NOT NULL,
+		created_at INTEGER NOT NULL,
+		reply_to_sequence INTEGER,
+		PRIMARY KEY(project, project_sequence)
+	)
+`;
+
+const MESSAGES_PROJECT_SENDER_INDEX_SCHEMA =
+	"CREATE INDEX messages_project_sender ON messages(project, sender_name, project_sequence)";
+
+function normalizeSchema(sql: string): string {
+	return sql.replace(/\s+/g, " ").trim();
+}
+
+const CURRENT_SCHEMA = [
+	{
+		type: "index",
+		name: "messages_project_sender",
+		sql: normalizeSchema(MESSAGES_PROJECT_SENDER_INDEX_SCHEMA),
+	},
+	{
+		type: "table",
+		name: "messages",
+		sql: normalizeSchema(MESSAGES_SCHEMA),
+	},
+	{
+		type: "table",
+		name: "project_sequences",
+		sql: normalizeSchema(PROJECT_SEQUENCES_SCHEMA),
+	},
+];
 
 type ParsedMessageRef = { project: string; sequence: number };
 
@@ -98,41 +141,17 @@ export class MessageStore {
 	#insert;
 	#append;
 
-	constructor(databasePath: string, options?: { legacyDatabasePath?: string }) {
+	constructor(databasePath: string) {
 		ensureDir(path.dirname(databasePath));
 		this.#database = new Database(databasePath, { create: true });
+		try {
+			this.#initializeSchema();
+		} catch (error) {
+			this.#database.close();
+			throw error;
+		}
 		this.#database.run("PRAGMA journal_mode = WAL");
 		this.#database.run("PRAGMA synchronous = FULL");
-		this.#database.run(`
-			CREATE TABLE IF NOT EXISTS project_sequences (
-				project TEXT PRIMARY KEY,
-				next_sequence INTEGER NOT NULL
-			)
-		`);
-		this.#database.run(`
-			CREATE TABLE IF NOT EXISTS messages (
-				project TEXT NOT NULL,
-				project_sequence INTEGER NOT NULL,
-				msg_id TEXT NOT NULL UNIQUE,
-				sender_name TEXT NOT NULL,
-				sender_presence_id TEXT,
-				target_kind TEXT NOT NULL,
-				target_name TEXT,
-				target_presence_id TEXT,
-				encoding TEXT NOT NULL,
-				data TEXT NOT NULL,
-				uncompressed_bytes INTEGER NOT NULL,
-				attachments TEXT NOT NULL DEFAULT '[]',
-				content_bytes INTEGER NOT NULL,
-				created_at INTEGER NOT NULL,
-				reply_to_sequence INTEGER,
-				PRIMARY KEY(project, project_sequence)
-			)
-		`);
-		this.#migrateSchema();
-		this.#database.run(
-			"CREATE INDEX IF NOT EXISTS messages_project_sender ON messages(project, sender_name, project_sequence)",
-		);
 		this.#allocateSequence = this.#database.query<SequenceRow, [string]>(`
 			INSERT INTO project_sequences(project, next_sequence)
 			VALUES (?, 1)
@@ -218,12 +237,6 @@ export class MessageStore {
 				};
 			},
 		);
-		if (
-			options?.legacyDatabasePath &&
-			fs.existsSync(options.legacyDatabasePath)
-		) {
-			this.#migrateLegacy(options.legacyDatabasePath);
-		}
 	}
 
 	append(draft: MessageDraft): { inserted: boolean; message: RealtimeMessage } {
@@ -294,110 +307,58 @@ export class MessageStore {
 		})();
 	}
 
-	integrityCheck(): string {
-		return (
-			this.#database
-				.query<{ integrity_check: string }, []>("PRAGMA integrity_check")
-				.get()?.integrity_check ?? "unknown"
-		);
-	}
-
 	close(): void {
 		this.#database.close();
 	}
 
-	#migrateLegacy(legacyDatabasePath: string): void {
-		const existingCount =
-			this.#database
-				.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM messages")
-				.get()?.count ?? 0;
-		if (existingCount > 0) return;
-		const legacy = new Database(legacyDatabasePath);
-		try {
-			const hasLedger =
-				legacy
-					.query<{ name: string }, []>(
-						"SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'message_ledger'",
-					)
-					.get() != null;
-			if (!hasLedger) return;
-			const rows = legacy
-				.query<LegacyMessageRow, []>(
-					"SELECT msg_id, project, sender, recipient, encoding, data, uncompressed_bytes, created_at, reply_to FROM message_ledger ORDER BY project, created_at, msg_id",
+	#initializeSchema(): void {
+		this.#database.transaction(() => {
+			const tables = this.#database
+				.query<{ name: string }, []>(
+					"SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
 				)
-				.all();
-			const updateReply = this.#database.query(
-				"UPDATE messages SET reply_to_sequence = ? WHERE project = ? AND project_sequence = ?",
-			);
-			this.#database.transaction(() => {
-				const migrated = new Map<
-					string,
-					{ project: string; sequence: number }
-				>();
-				for (const row of rows) {
-					const sequence = this.#allocateSequence.get(
-						row.project,
-					)?.next_sequence;
-					if (!sequence)
-						throw new Error(
-							`failed to allocate migrated sequence for ${row.project}`,
-						);
-					this.#insert.run(
-						row.project,
-						sequence,
-						row.msg_id,
-						row.sender,
-						null,
-						"agent",
-						row.recipient,
-						null,
-						row.encoding,
-						row.data,
-						row.uncompressed_bytes,
-						"[]",
-						row.uncompressed_bytes,
-						row.created_at,
-						null,
-					);
-					migrated.set(row.msg_id, { project: row.project, sequence });
-				}
-				for (const row of rows) {
-					if (!row.reply_to) continue;
-					const message = migrated.get(row.msg_id);
-					const parent = migrated.get(row.reply_to);
-					if (!message || !parent || parent.project !== message.project) {
-						throw new Error(
-							`cannot migrate reply ${row.msg_id}: missing parent ${row.reply_to}`,
-						);
-					}
-					updateReply.run(parent.sequence, message.project, message.sequence);
-				}
-			})();
-		} finally {
-			legacy.close();
-		}
+				.all()
+				.map((row) => row.name);
+			const version =
+				this.#database
+					.query<{ user_version: number }, []>("PRAGMA user_version")
+					.get()?.user_version ?? 0;
+			if (tables.length === 0 && version === 0) {
+				this.#database.run(PROJECT_SEQUENCES_SCHEMA);
+				this.#database.run(MESSAGES_SCHEMA);
+				this.#database.run(MESSAGES_PROJECT_SENDER_INDEX_SCHEMA);
+				this.#database.run(
+					`PRAGMA user_version = ${MESSAGE_STORAGE_VERSION}`,
+				);
+				return;
+			}
+			if (
+				version !== MESSAGE_STORAGE_VERSION ||
+				!this.#hasCurrentSchema(tables)
+			) {
+				throw new Error(UNSUPPORTED_STORAGE_MESSAGE);
+			}
+		})();
 	}
 
-	#migrateSchema(): void {
-		const columns = new Set(
-			this.#database
-				.query<{ name: string }, []>("PRAGMA table_info(messages)")
-				.all()
-				.map((column) => column.name),
-		);
-		if (!columns.has("attachments")) {
-			this.#database.run(
-				"ALTER TABLE messages ADD COLUMN attachments TEXT NOT NULL DEFAULT '[]'",
-			);
+	#hasCurrentSchema(tables: string[]): boolean {
+		if (
+			JSON.stringify(tables) !==
+			JSON.stringify(["messages", "project_sequences"])
+		) {
+			return false;
 		}
-		if (!columns.has("content_bytes")) {
-			this.#database.run(
-				"ALTER TABLE messages ADD COLUMN content_bytes INTEGER",
-			);
-		}
-		this.#database.run(
-			"UPDATE messages SET content_bytes = uncompressed_bytes WHERE content_bytes IS NULL",
-		);
+		const schema = this.#database
+			.query<{ type: string; name: string; sql: string | null }, []>(
+				"SELECT type, name, sql FROM sqlite_schema WHERE name IN ('messages', 'project_sequences', 'messages_project_sender') ORDER BY type, name",
+			)
+			.all()
+			.map(({ type, name, sql }) => ({
+				type,
+				name,
+				sql: normalizeSchema(sql ?? ""),
+			}));
+		return JSON.stringify(schema) === JSON.stringify(CURRENT_SCHEMA);
 	}
 
 	#resolveReply(project: string, replyTo: string | undefined): number | null {
@@ -486,7 +447,7 @@ export class MessageStore {
 			sequence: row.project_sequence,
 			from: {
 				name: row.sender_name,
-				presenceId: row.sender_presence_id ?? "legacy",
+				presenceId: row.sender_presence_id,
 			},
 			target,
 			payload,

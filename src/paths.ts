@@ -40,9 +40,6 @@ export function hubLockPath(dataDir?: string): string {
 	return path.join(hubRunDir(dataDir), "hub-lock.sqlite");
 }
 
-export function inboxDatabasePath(dataDir: string = defaultDataDir()): string {
-	return path.join(dataDir, "inbox.sqlite");
-}
 
 export function messageDatabasePath(
 	dataDir: string = defaultDataDir(),

@@ -280,9 +280,9 @@ Inbound messages are pushed automatically and processed serially in Hub-assigned
 - History uses SQLite WAL with `synchronous = FULL`.
 - The Hub data directory has an exclusive lock; two Hub processes cannot write the same data.
 
-On first start with an old `inbox.sqlite`, the Hub imports ordinary `message_ledger` rows into `messages.sqlite` in deterministic `(project, created_at, msg_id)` order. Old Presence, cursor, ACK, receipt, and offline-delivery state are not migrated. Pending messages become history only and are never delivered to future connections.
+The `messages.sqlite` schema has its own storage version, independent of the wire protocol version. A new database creates the complete current schema and records that version atomically. An existing database must have the exact current storage version and schema or Hub startup fails with `unsupported pre-release storage; start with an empty data directory`.
 
-Opening a protocol version `2` `messages.sqlite` adds the attachment columns in place. Existing Messages receive an empty attachment list and retain their original sequence, reference, text, and causality.
+Pre-0.1 storage is unsupported. The Hub never imports or upgrades it: an old `inbox.sqlite` is ignored and left unchanged, and an old `messages.sqlite` must be replaced by starting with an empty data directory.
 
 ## Verify
 
@@ -296,7 +296,7 @@ bun build src/hub/cli.ts --target=bun --outdir=/tmp/omp-a2a-hub-build
 docker compose config
 ```
 
-These commands check formatting, run the Bun tests plus Project Registry and live Hub/client smokes, build both executable entry points, and validate the Compose model. The behavioral coverage includes WebSocket Presence, name conflicts, Presence notifications, direct and broadcast routing, successful/failed/disconnected Delivery, cross-session attachment snapshot/materialization/history, protocol version `2` and legacy Inbox migration, payload limits, Project deletion, Hub restart semantics, and command completion.
+These commands check formatting, run the Bun tests plus Project Registry and live Hub/client smokes, build both executable entry points, and validate the Compose model. The behavioral coverage includes WebSocket Presence, name conflicts, Presence notifications, direct and broadcast routing, successful/failed/disconnected Delivery, cross-session attachment snapshot/materialization/history, current storage creation/reopen and fail-closed schema guards, payload limits, Project deletion, Hub restart semantics, and command completion.
 
 ### Docker boundary
 
@@ -321,7 +321,7 @@ src/
     realtime-server.ts     # Presence, routing, broadcast, delivery
     connection.ts          # extension WebSocket client
     presence.ts            # in-memory Presence registry
-    messages.ts            # append-only Project history + legacy migration
+    messages.ts            # versioned append-only Project history
     realtime-types.ts      # versioned protocol types
     payload.ts             # gzip and decoded-size limits
     client.ts              # HTTP Project/history client

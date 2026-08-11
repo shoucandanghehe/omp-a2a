@@ -8,7 +8,6 @@ import {
 	hubLockPath,
 	hubMetaPath,
 	hubPidPath,
-	inboxDatabasePath,
 	messageDatabasePath,
 } from "../paths";
 import {
@@ -70,9 +69,7 @@ export async function startHubServer(options?: {
 	const dataLock = new HubDataLock(hubLockPath(dataDir), dataDir);
 	let messages: MessageStore;
 	try {
-		messages = new MessageStore(messageDatabasePath(dataDir), {
-			legacyDatabasePath: inboxDatabasePath(dataDir),
-		});
+		messages = new MessageStore(messageDatabasePath(dataDir));
 	} catch (error) {
 		dataLock.close();
 		throw error;
