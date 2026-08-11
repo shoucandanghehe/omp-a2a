@@ -1,7 +1,8 @@
+import { type as omptype } from "@oh-my-pi/omptype";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
-import { parseConfigDocument } from "../config-document";
+import { parseWithSchema } from "../config-document";
 import { a2aRoot } from "../paths";
 import type { A2aProject } from "../types";
 import {
@@ -40,32 +41,15 @@ function stripTrailingSlash(url: string): string {
 	return url.replace(/\/+$/, "");
 }
 
-function validateGlobalHubConfig(document: unknown): string {
-	if (
-		typeof document !== "object" ||
-		document === null ||
-		Array.isArray(document)
-	) {
-		throw new Error("Hub config root must be an object");
-	}
-	const raw = document as Record<string, unknown>;
-	for (const field of Object.keys(raw)) {
-		if (field !== "hubUrl") {
-			throw new Error(`Hub config has unknown field "${field}"`);
-		}
-	}
-	if (!Object.hasOwn(raw, "hubUrl")) {
-		throw new Error('Hub config missing required field "hubUrl"');
-	}
-	if (typeof raw.hubUrl !== "string") {
-		throw new Error('Hub config field "hubUrl" must be a string');
-	}
-	const hubUrl = raw.hubUrl.trim();
-	if (!hubUrl) {
-		throw new Error('Hub config field "hubUrl" must not be blank');
-	}
-	return hubUrl;
-}
+const globalHubConfigSchema = omptype({
+	hubUrl: omptype("string")
+		.pipe((value) => value.trim())
+		.narrow(
+			(value, context) =>
+				value.length > 0 || context.mustBe("a non-blank string"),
+		),
+	"+": "reject",
+});
 
 /** Resolve Hub URL without starting a process. */
 export function resolveHubUrl(options?: {
@@ -79,18 +63,10 @@ export function resolveHubUrl(options?: {
 	for (const name of ["config.yml", "config.yaml", "config.json"]) {
 		const file = path.join(a2aRoot(home), name);
 		if (!fs.existsSync(file)) continue;
-		try {
-			const text = fs.readFileSync(file, "utf8");
-			const hubUrl = validateGlobalHubConfig(
-				parseConfigDocument(text, file),
-			);
-			return stripTrailingSlash(hubUrl);
-		} catch (error) {
-			const message = error instanceof Error ? error.message : String(error);
-			throw new Error(`invalid Hub config at ${file}: ${message}`, {
-				cause: error,
-			});
-		}
+		const config = parseWithSchema(file, globalHubConfigSchema, {
+			label: "Hub config",
+		});
+		return stripTrailingSlash(config.hubUrl);
 	}
 	return DEFAULT_HUB_URL;
 }

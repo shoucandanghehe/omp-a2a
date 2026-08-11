@@ -14,7 +14,7 @@ The central seam is `A2aRuntime`: extension callbacks and commands depend on one
 | `local-attachments.ts` | Snapshot sender-session `local://` files and materialize received/history attachment bytes into the calling session. | `snapshotLocalAttachments`, `materializeLocalAttachments` |
 | `operations.ts` | Connected runtime over one WebSocket plus HTTP Project/history operations. | `A2aRuntime`, `MessageView`, `RuntimeStatus` |
 | `config.ts` | Strict repository-local YAML/JSON connection defaults. | `loadLocalConfig` |
-| `config-document.ts` | YAML/JSON document syntax parsing without schema ownership. | `parseConfigDocument` |
+| `config-document.ts` | Read YAML/JSON documents, apply an owner-supplied omptype schema, and report path-qualified errors. | `parseWithSchema` |
 | `paths.ts` | Hub storage paths and local config candidates. | path functions |
 | `registry.ts` | Filesystem-backed persistent Project metadata. | `createProject`, `getProject`, `listProjects`, `deleteProject` |
 | `types.ts` | Project/config domain shapes and name validation regexes. | `A2aProject`, `A2aLocalConfig` |
@@ -94,7 +94,7 @@ Connected model turns receive the current A2A roster name and use only `a2a_peer
 
 ## Configuration contract
 
-`config-document.ts` delegates YAML syntax to Bun `YAML.parse` and JSON syntax to `JSON.parse`; it assigns no schema. The local and global owners validate their own exact schemas.
+`config-document.ts` delegates YAML syntax to Bun `YAML.parse` and JSON syntax to `JSON.parse`, applies an owner-supplied `@oh-my-pi/omptype` schema, and turns `OmpErrors` into path-qualified configuration errors. It assigns no schema itself.
 
 `loadLocalConfig(cwd)` selects the first existing file in this order:
 
@@ -102,9 +102,9 @@ Connected model turns receive the current A2A roster name and use only `a2a_peer
 2. `.omp/a2a.yaml`
 3. `.omp/a2a.json`
 
-The selected file is authoritative: read, syntax, and schema failures include its path and never fall through to a later candidate. The root must be an object containing only required string fields `project` and `name`, optional nonblank string `hubUrl`, and optional boolean `autoConnect`, which defaults to enabled. Values must satisfy the Project/name regexes. Unknown fields fail; removed `agentId`/`agent_id` and `autoJoin`/`auto_join` fields produce explicit migration errors rather than aliases.
+The selected file is authoritative: read, syntax, and schema failures include its path and never fall through to a later candidate. The local omptype schema requires `project` and `name`, permits optional `hubUrl`, defaults `autoConnect` to enabled, trims strings, rejects blanks, narrows Project/name values through their regexes, and uses `"+": "reject"` for every undeclared field. Removed `agentId`/`agent_id` and `autoJoin`/`auto_join` error paths are rendered as explicit migration errors rather than aliases.
 
-Global client configuration uses the same authoritative candidate order under `~/.omp/a2a/` and permits only one required, nonblank string field: `hubUrl`. Unknown fields and the former `hub_url`/`url` aliases fail.
+Global client configuration uses the same authoritative candidate order under `~/.omp/a2a/`. Its owner schema trims and requires one nonblank string `hubUrl` and uses `"+": "reject"`; the former `hub_url`/`url` aliases therefore fail as undeclared fields.
 
 ## Project metadata
 

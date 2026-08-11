@@ -36,7 +36,7 @@ test("global YAML preserves a quoted Hub URL", () => {
 	writeConfig(
 		home,
 		"config.yml",
-		'hubUrl: "http://hub:4173/path#fragment"\n',
+		'hubUrl: " http://hub:4173/path#fragment "\n',
 	);
 	expect(resolveHubUrl({ home })).toBe("http://hub:4173/path#fragment");
 });
@@ -45,7 +45,7 @@ test("global config rejects non-object roots and unknown aliases", () => {
 	const home = createHome();
 	const file = writeConfig(home, "config.json", "[]");
 	expect(() => resolveHubUrl({ home })).toThrow(
-		`invalid Hub config at ${file}: Hub config root must be an object`,
+		`invalid Hub config at ${file}`,
 	);
 
 	for (const field of ["hub_url", "url"]) {
@@ -55,7 +55,7 @@ test("global config rejects non-object roots and unknown aliases", () => {
 			JSON.stringify({ [field]: "http://hub:4173" }),
 		);
 		expect(() => resolveHubUrl({ home })).toThrow(
-			`unknown field "${field}"`,
+			`${field} must be removed`,
 		);
 	}
 });
@@ -83,7 +83,7 @@ test("first existing global config remains authoritative when invalid", () => {
 		JSON.stringify({ hubUrl: "http://fallback:4173" }),
 	);
 	expect(() => resolveHubUrl({ home })).toThrow(
-		`invalid Hub config at ${first}: Hub config has unknown field "unexpected"`,
+		`invalid Hub config at ${first}: unexpected must be removed`,
 	);
 });
 
@@ -91,16 +91,16 @@ test("global config names missing, blank, and mistyped hubUrl", () => {
 	const home = createHome();
 	writeConfig(home, "config.yml", "{}\n");
 	expect(() => resolveHubUrl({ home })).toThrow(
-		'missing required field "hubUrl"',
+		"hubUrl must be a string",
 	);
 
 	writeConfig(home, "config.yml", "hubUrl: \" \"\n");
 	expect(() => resolveHubUrl({ home })).toThrow(
-		'field "hubUrl" must not be blank',
+		"hubUrl must be a non-blank string",
 	);
 
 	writeConfig(home, "config.yml", "hubUrl: 4173\n");
 	expect(() => resolveHubUrl({ home })).toThrow(
-		'field "hubUrl" must be a string',
+		"hubUrl must be a string",
 	);
 });

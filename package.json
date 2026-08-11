@@ -21,6 +21,7 @@
 		"bun": ">=1.1.0"
 	},
 	"dependencies": {
+		"@oh-my-pi/omptype": "^17.2.11",
 		"express": "^5.2.1",
 		"ws": "^8.21.3"
 	},

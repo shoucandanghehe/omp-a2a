@@ -49,7 +49,7 @@ test("local YAML preserves quoted URL punctuation", () => {
 	writeConfig(
 		root,
 		"a2a.yml",
-		'project: billing\nname: api\nhubUrl: "http://hub:4173/path#fragment"\n',
+		'project: " billing "\nname: " api "\nhubUrl: " http://hub:4173/path#fragment "\n',
 	);
 	expect(loadLocalConfig(root)).toEqual({
 		project: "billing",
@@ -69,7 +69,7 @@ test("local config rejects a non-object document root", () => {
 	const root = createRoot();
 	const file = writeConfig(root, "a2a.json", "[]");
 	expect(() => loadLocalConfig(root)).toThrow(
-		`invalid a2a config at ${file}: a2a config root must be an object`,
+		`invalid a2a config at ${file}`,
 	);
 });
 
@@ -89,7 +89,7 @@ test("local config rejects unknown fields instead of accepting aliases", () => {
 				[field]: value,
 			}),
 		);
-		expect(() => loadLocalConfig(root)).toThrow(`unknown field "${field}"`);
+		expect(() => loadLocalConfig(root)).toThrow(`${field} must be removed`);
 	}
 });
 
@@ -104,7 +104,7 @@ test("misspelled autoConnect cannot silently enable connection", () => {
 			autoConect: false,
 		}),
 	);
-	expect(() => loadLocalConfig(root)).toThrow('unknown field "autoConect"');
+	expect(() => loadLocalConfig(root)).toThrow("autoConect must be removed");
 });
 
 test("first existing local config remains authoritative when invalid", () => {
@@ -120,7 +120,7 @@ test("first existing local config remains authoritative when invalid", () => {
 		JSON.stringify({ project: "fallback", name: "fallback" }),
 	);
 	expect(() => loadLocalConfig(root)).toThrow(
-		`invalid a2a config at ${first}: a2a config has unknown field "unexpected"`,
+		`invalid a2a config at ${first}: unexpected must be removed`,
 	);
 });
 
@@ -141,7 +141,7 @@ test("removed persistent-member fields retain migration errors", () => {
 test("local config names invalid required and optional fields", () => {
 	const root = createRoot();
 	writeConfig(root, "a2a.json", JSON.stringify({ name: "api" }));
-	expect(() => loadLocalConfig(root)).toThrow("missing required field: project");
+	expect(() => loadLocalConfig(root)).toThrow("project must be a string");
 
 	writeConfig(
 		root,
@@ -149,7 +149,7 @@ test("local config names invalid required and optional fields", () => {
 		JSON.stringify({ project: " ", name: "api", hubUrl: "" }),
 	);
 	expect(() => loadLocalConfig(root)).toThrow(
-		'field "project" must not be blank',
+		"project must be a non-blank string",
 	);
 
 	writeConfig(
@@ -157,7 +157,7 @@ test("local config names invalid required and optional fields", () => {
 		"a2a.json",
 		JSON.stringify({ project: "billing", name: 7 }),
 	);
-	expect(() => loadLocalConfig(root)).toThrow('field "name" must be a string');
+	expect(() => loadLocalConfig(root)).toThrow("name must be a string");
 
 	writeConfig(
 		root,
@@ -165,7 +165,7 @@ test("local config names invalid required and optional fields", () => {
 		JSON.stringify({ project: "billing project", name: "api" }),
 	);
 	expect(() => loadLocalConfig(root)).toThrow(
-		'field "project" has invalid value',
+		"project must be a valid Project name",
 	);
 
 	writeConfig(
@@ -173,7 +173,9 @@ test("local config names invalid required and optional fields", () => {
 		"a2a.json",
 		JSON.stringify({ project: "billing", name: "api worker" }),
 	);
-	expect(() => loadLocalConfig(root)).toThrow('field "name" has invalid value');
+	expect(() => loadLocalConfig(root)).toThrow(
+		"name must be a valid Agent name",
+	);
 
 	writeConfig(
 		root,
@@ -181,7 +183,7 @@ test("local config names invalid required and optional fields", () => {
 		JSON.stringify({ project: "billing", name: "api", hubUrl: " " }),
 	);
 	expect(() => loadLocalConfig(root)).toThrow(
-		'field "hubUrl" must not be blank',
+		"hubUrl must be a non-blank string",
 	);
 
 	writeConfig(
@@ -194,6 +196,6 @@ test("local config names invalid required and optional fields", () => {
 		}),
 	);
 	expect(() => loadLocalConfig(root)).toThrow(
-		'field "autoConnect" must be a boolean',
+		"autoConnect must be boolean",
 	);
 });
