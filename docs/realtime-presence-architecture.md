@@ -57,13 +57,14 @@ Opening a protocol version `2` `messages.sqlite` adds attachment storage and dec
 - Missing direct recipients fail immediately instead of creating latent work.
 - Hub restart clears Presence and delivery state but preserves message history.
 - `delivered` proves successful attachment materialization and injection into the receiving OMP extension, not model understanding or task completion. Materialization or injection errors produce a terminal `failed` Delivery.
+- Receiver terminal outcomes live for 10 seconds behind one ordered earliest-expiry timer, so retries cannot reinject during the Hub's bounded retry window and idle connections do not retain expired outcomes. Socket close cancels the timer and clears the cache.
 - Direct routing is not confidential history. Without accounts and authorization, any trusted current Agent can query Project history.
 - Hub and extension must upgrade together because protocol version `3` has no compatibility path for version `2` Message frames.
 - Project metadata deletion and SQLite history deletion remain separate operations; interrupted deletion requires operator inspection before name reuse.
 
 ## Verification
 
-The behavior suite and executable smoke scenarios cover duplicate names, immediate Presence removal, direct-target failure, broadcast snapshots, causal replies, non-persistent Presence events, bounded close termination against TCP-proxied nonresponsive peers, handshake failure precedence during teardown, attachment snapshot/materialization/history, failed Delivery, restart persistence, protocol version `2` database migration, legacy Inbox migration, the three-tool model surface, the reduced human command surface, and the Docker HTTP/WebSocket boundary.
+The behavior suite and executable smoke scenarios cover duplicate names, immediate Presence removal, direct-target failure, broadcast snapshots, causal replies, non-persistent Presence events, bounded close termination against TCP-proxied nonresponsive peers, handshake failure precedence during teardown, bounded same-Presence retry configuration, in-flight and retained-outcome deduplication, ordered idle cache expiry, attachment snapshot/materialization/history, failed Delivery, restart persistence, protocol version `2` database migration, legacy Inbox migration, the three-tool model surface, the reduced human command surface, and the Docker HTTP/WebSocket boundary.
 
 ## Deployment and rollback
 

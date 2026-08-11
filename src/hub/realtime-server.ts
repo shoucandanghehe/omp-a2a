@@ -4,6 +4,8 @@ import { WebSocket, WebSocketServer } from "ws";
 import { getProject } from "../registry";
 import {
 	MessageIdConflictError,
+	type MessageAppendResult,
+	type MessageDraft,
 	type MessageStore,
 	UnknownReplyTargetError,
 } from "./messages";
@@ -12,8 +14,11 @@ import { NameInUseError, type Presence, PresenceRegistry } from "./presence";
 import {
 	A2A_PROTOCOL_VERSION,
 	type ClientFrame,
+	DELIVERY_ACKNOWLEDGE_TIMEOUT_MS,
+	DELIVERY_MAX_ATTEMPTS,
+	DELIVERY_OUTCOME_CACHE_TTL_MS,
+	DELIVERY_RETRY_DELAY_MS,
 	isExactGoodbyeFrame,
-	type MessageTarget,
 	type ServerFrame,
 } from "./realtime-types";
 
@@ -23,19 +28,110 @@ const HELLO_TIMEOUT_MS = 5_000;
 const MAX_DELIVERY_ERROR_BYTES = 512;
 const GOODBYE_CLOSE_TIMEOUT_MS = 2_000;
 
+type DeliveryScheduler = (
+	callback: () => void,
+	delayMs: number,
+) => () => void;
+
+type DeliveryRetryPolicy = {
+	maxAttempts: number;
+	acknowledgeTimeoutMs: number;
+	retryDelayMs: number;
+	schedule: DeliveryScheduler;
+};
+
+const DEFAULT_DELIVERY_RETRY_POLICY: DeliveryRetryPolicy = {
+	maxAttempts: DELIVERY_MAX_ATTEMPTS,
+	acknowledgeTimeoutMs: DELIVERY_ACKNOWLEDGE_TIMEOUT_MS,
+	retryDelayMs: DELIVERY_RETRY_DELAY_MS,
+	schedule(callback, delayMs) {
+		const timer = setTimeout(callback, delayMs);
+		return () => clearTimeout(timer);
+	},
+};
+
+export type RealtimeHubOptions = {
+	deliveryRetryPolicy?: {
+		maxAttempts?: number;
+		acknowledgeTimeoutMs?: number;
+		schedule?: DeliveryScheduler;
+	};
+};
+
+function deliveryRetryPolicy(
+	overrides: RealtimeHubOptions["deliveryRetryPolicy"] = {},
+): DeliveryRetryPolicy {
+	const maxAttempts = overrides.maxAttempts ?? DELIVERY_MAX_ATTEMPTS;
+	if (
+		!Number.isFinite(maxAttempts) ||
+		!Number.isInteger(maxAttempts) ||
+		maxAttempts <= 0
+	) {
+		throw new Error(
+			"deliveryRetryPolicy.maxAttempts must be a finite positive integer",
+		);
+	}
+	if (maxAttempts > DELIVERY_MAX_ATTEMPTS) {
+		throw new Error(
+			`deliveryRetryPolicy.maxAttempts must not exceed ${DELIVERY_MAX_ATTEMPTS}`,
+		);
+	}
+
+	const acknowledgeTimeoutMs =
+		overrides.acknowledgeTimeoutMs ?? DELIVERY_ACKNOWLEDGE_TIMEOUT_MS;
+	if (!Number.isFinite(acknowledgeTimeoutMs) || acknowledgeTimeoutMs <= 0) {
+		throw new Error(
+			"deliveryRetryPolicy.acknowledgeTimeoutMs must be a finite positive number",
+		);
+	}
+	const maximumAcknowledgeTimeoutMs = Math.min(
+		DELIVERY_ACKNOWLEDGE_TIMEOUT_MS,
+		(DELIVERY_OUTCOME_CACHE_TTL_MS -
+			(maxAttempts - 1) * DELIVERY_RETRY_DELAY_MS) /
+			maxAttempts,
+	);
+	if (acknowledgeTimeoutMs > maximumAcknowledgeTimeoutMs) {
+		throw new Error(
+			`deliveryRetryPolicy.acknowledgeTimeoutMs must not exceed ${maximumAcknowledgeTimeoutMs}ms`,
+		);
+	}
+	if (
+		overrides.schedule !== undefined &&
+		typeof overrides.schedule !== "function"
+	) {
+		throw new Error("deliveryRetryPolicy.schedule must be a function");
+	}
+
+	return {
+		...DEFAULT_DELIVERY_RETRY_POLICY,
+		maxAttempts,
+		acknowledgeTimeoutMs,
+		schedule: overrides.schedule ?? DEFAULT_DELIVERY_RETRY_POLICY.schedule,
+	};
+}
+
 class RecipientNotPresentError extends Error {}
 
+type MessageLedger = Pick<MessageStore, "append" | "replay">;
+
 type PendingDelivery = {
+	key: string;
 	messageId: string;
 	senderPresenceId: string;
+	senderSocket: WebSocket;
 	recipientPresenceId: string;
 	recipientName: string;
+	recipientSocket: WebSocket;
+	payload: string;
+	attempts: number;
+	cancelTimer?: () => void;
+	terminal: boolean;
 };
 
 export class RealtimeHub {
 	#server: Server;
 	#wss: WebSocketServer;
-	#messages: MessageStore;
+	#messages: MessageLedger;
 	#dataDir: string;
 	#presences = new PresenceRegistry();
 	#alive = new Map<WebSocket, boolean>();
@@ -44,6 +140,7 @@ export class RealtimeHub {
 		"connection_closed" | "heartbeat_timeout" | "hub_shutdown"
 	>();
 	#pendingDeliveries = new Map<string, PendingDelivery>();
+	#deliveryRetryPolicy: DeliveryRetryPolicy;
 	#departed = new WeakSet<WebSocket>();
 	#heartbeat: NodeJS.Timeout;
 	#upgradeHandler: (
@@ -53,10 +150,18 @@ export class RealtimeHub {
 	) => void;
 	#closing = false;
 
-	constructor(server: Server, messages: MessageStore, dataDir: string) {
+	constructor(
+		server: Server,
+		messages: MessageLedger,
+		dataDir: string,
+		options: RealtimeHubOptions = {},
+	) {
 		this.#server = server;
 		this.#messages = messages;
 		this.#dataDir = dataDir;
+		this.#deliveryRetryPolicy = deliveryRetryPolicy(
+			options.deliveryRetryPolicy,
+		);
 		this.#wss = new WebSocketServer({
 			noServer: true,
 			maxPayload: MAX_FRAME_BYTES,
@@ -91,8 +196,9 @@ export class RealtimeHub {
 		for (const presence of this.#presences.close()) {
 			this.#closeReasons.set(presence.socket, "hub_shutdown");
 		}
+		for (const pending of this.#pendingDeliveries.values())
+			this.#finishDelivery(pending);
 		for (const socket of this.#wss.clients) socket.terminate();
-		this.#pendingDeliveries.clear();
 		this.#wss.close();
 	}
 
@@ -265,64 +371,112 @@ export class RealtimeHub {
 				throw new Error("invalid message target");
 			if (frame.replyTo !== undefined && typeof frame.replyTo !== "string")
 				throw new Error("invalid replyTo");
-			// MessageStore owns content validation and persistence atomically.
-			let target: MessageTarget;
-			let recipients: Presence[];
-			if (frame.target.type === "agent") {
-				if (typeof frame.target.name !== "string")
-					throw new Error("recipient name is required");
-				const recipient = this.#presences.get(
-					presence.project,
-					frame.target.name,
-				);
-				if (!recipient)
-					throw new RecipientNotPresentError(
-						`recipient is not present: ${frame.target.name}`,
-					);
-				if (recipient.presenceId === presence.presenceId)
-					throw new Error("cannot send to yourself");
-				target = {
-					type: "agent",
-					name: recipient.name,
-					presenceId: recipient.presenceId,
-				};
-				recipients = [recipient];
-			} else {
-				target = { type: "project" };
-				recipients = this.#presences
-					.connections(presence.project)
-					.filter((recipient) => recipient.presenceId !== presence.presenceId);
+			if (
+				frame.target.type === "agent" &&
+				typeof frame.target.name !== "string"
+			) {
+				throw new Error("recipient name is required");
 			}
-			const appended = this.#messages.append({
+
+			const draft: MessageDraft = {
 				messageId: frame.messageId,
 				project: presence.project,
 				from: { name: presence.name, presenceId: presence.presenceId },
-				target,
+				target:
+					frame.target.type === "agent"
+						? { type: "agent", name: frame.target.name }
+						: { type: "project" },
 				payload: frame.payload,
 				attachments: frame.attachments,
 				createdAt: Date.now(),
 				replyTo: frame.replyTo,
-			});
-			if (appended.inserted) {
-				for (const recipient of recipients) {
-					this.#pendingDeliveries.set(
-						`${appended.message.messageId}:${recipient.presenceId}`,
-						{
-							messageId: appended.message.messageId,
-							senderPresenceId: presence.presenceId,
-							recipientPresenceId: recipient.presenceId,
-							recipientName: recipient.name,
-						},
+			};
+			let recipients: Presence[];
+			let appended: MessageAppendResult;
+			if (draft.target.type === "agent") {
+				const replayed = this.#messages.replay(draft);
+				if (replayed) {
+					this.#send(presence.socket, {
+						type: "accepted",
+						requestId,
+						replayed: true,
+						message: replayed.message,
+					});
+					return;
+				}
+				const recipient = this.#presences.get(
+					presence.project,
+					draft.target.name,
+				);
+				if (!recipient) {
+					throw new RecipientNotPresentError(
+						`recipient is not present: ${draft.target.name}`,
 					);
-					this.#send(recipient.socket, {
-						type: "message",
+				}
+				if (recipient.presenceId === presence.presenceId)
+					throw new Error("cannot send to yourself");
+				appended = this.#messages.append({
+					...draft,
+					target: {
+						type: "agent",
+						name: recipient.name,
+						presenceId: recipient.presenceId,
+					},
+				});
+				recipients = [recipient];
+			} else {
+				appended = this.#messages.append(draft);
+				if (appended.replayed) {
+					this.#send(presence.socket, {
+						type: "accepted",
+						requestId,
+						replayed: true,
 						message: appended.message,
 					});
+					return;
 				}
+				recipients = this.#presences
+					.connections(presence.project)
+					.filter(
+						(recipient) =>
+							recipient.presenceId !== presence.presenceId,
+					);
+			}
+
+			if (appended.replayed) {
+				this.#send(presence.socket, {
+					type: "accepted",
+					requestId,
+					replayed: true,
+					message: appended.message,
+				});
+				return;
+			}
+			const payload = JSON.stringify({
+				type: "message",
+				message: appended.message,
+			} satisfies ServerFrame);
+			for (const recipient of recipients) {
+				const key = `${appended.message.messageId}:${recipient.presenceId}`;
+				const pending: PendingDelivery = {
+					key,
+					messageId: appended.message.messageId,
+					senderPresenceId: presence.presenceId,
+					senderSocket: presence.socket,
+					recipientPresenceId: recipient.presenceId,
+					recipientName: recipient.name,
+					recipientSocket: recipient.socket,
+					payload,
+					attempts: 0,
+					terminal: false,
+				};
+				this.#pendingDeliveries.set(key, pending);
+				this.#attemptDelivery(pending);
 			}
 			this.#send(presence.socket, {
 				type: "accepted",
 				requestId,
+				replayed: false,
 				message: appended.message,
 				recipients: recipients.map((recipient) => recipient.name),
 			});
@@ -353,30 +507,171 @@ export class RealtimeHub {
 		error?: string,
 	): void {
 		if (typeof messageId !== "string") throw new Error("messageId is required");
-		const key = `${messageId}:${presence.presenceId}`;
-		const pending = this.#pendingDeliveries.get(key);
-		if (!pending) return;
-		this.#pendingDeliveries.delete(key);
-		const sender = this.#presences
-			.connections(presence.project)
-			.find((candidate) => candidate.presenceId === pending.senderPresenceId);
-		if (!sender) return;
-		if (status === "failed") {
-			this.#send(sender.socket, {
-				type: "delivery",
-				messageId: pending.messageId,
-				to: pending.recipientName,
-				status,
-				error: error ?? "receiver failed to inject message",
+		const pending = this.#pendingDeliveries.get(
+			`${messageId}:${presence.presenceId}`,
+		);
+		if (!pending || pending.recipientSocket !== presence.socket) return;
+		this.#finishDelivery(
+			pending,
+			status === "failed"
+				? {
+						status,
+						error: error ?? "receiver failed to inject message",
+					}
+				: { status },
+		);
+	}
+
+	#attemptDelivery(pending: PendingDelivery): void {
+		if (
+			pending.terminal ||
+			this.#pendingDeliveries.get(pending.key) !== pending
+		) {
+			return;
+		}
+		if (!this.#recipientIsCurrent(pending)) {
+			this.#finishDelivery(pending, { status: "disconnected" });
+			return;
+		}
+		if (pending.attempts >= this.#deliveryRetryPolicy.maxAttempts) {
+			this.#finishDelivery(pending, {
+				status: "unknown",
+				error: `recipient did not acknowledge delivery after ${pending.attempts} attempts`,
 			});
 			return;
 		}
-		this.#send(sender.socket, {
-			type: "delivery",
-			messageId: pending.messageId,
-			to: pending.recipientName,
-			status,
-		});
+
+		pending.attempts += 1;
+		const attempt = pending.attempts;
+		this.#scheduleDelivery(
+			pending,
+			this.#deliveryRetryPolicy.acknowledgeTimeoutMs,
+			() => this.#handleAcknowledgementTimeout(pending, attempt),
+		);
+		try {
+			pending.recipientSocket.send(pending.payload, (error) => {
+				if (error) this.#handleTransportWriteError(pending, attempt, error);
+			});
+		} catch (error) {
+			this.#handleTransportWriteError(
+				pending,
+				attempt,
+				error instanceof Error ? error : new Error(String(error)),
+			);
+		}
+	}
+
+	#handleTransportWriteError(
+		pending: PendingDelivery,
+		attempt: number,
+		error: Error,
+	): void {
+		if (
+			pending.terminal ||
+			pending.attempts !== attempt ||
+			this.#pendingDeliveries.get(pending.key) !== pending
+		) {
+			return;
+		}
+		pending.cancelTimer?.();
+		pending.cancelTimer = undefined;
+		if (!this.#recipientIsCurrent(pending)) {
+			this.#finishDelivery(pending, { status: "disconnected" });
+			return;
+		}
+		if (pending.attempts >= this.#deliveryRetryPolicy.maxAttempts) {
+			this.#finishDelivery(pending, {
+				status: "unknown",
+				error: `WebSocket write outcome remained unknown after ${pending.attempts} attempts: ${error.message}`,
+			});
+			return;
+		}
+		this.#scheduleDelivery(
+			pending,
+			this.#deliveryRetryPolicy.retryDelayMs,
+			() => this.#attemptDelivery(pending),
+		);
+	}
+
+	#handleAcknowledgementTimeout(
+		pending: PendingDelivery,
+		attempt: number,
+	): void {
+		if (
+			pending.terminal ||
+			pending.attempts !== attempt ||
+			this.#pendingDeliveries.get(pending.key) !== pending
+		) {
+			return;
+		}
+		if (!this.#recipientIsCurrent(pending)) {
+			this.#finishDelivery(pending, { status: "disconnected" });
+			return;
+		}
+		if (pending.attempts >= this.#deliveryRetryPolicy.maxAttempts) {
+			this.#finishDelivery(pending, {
+				status: "unknown",
+				error: `recipient did not acknowledge delivery after ${pending.attempts} attempts`,
+			});
+			return;
+		}
+		this.#attemptDelivery(pending);
+	}
+
+	#scheduleDelivery(
+		pending: PendingDelivery,
+		delayMs: number,
+		callback: () => void,
+	): void {
+		pending.cancelTimer?.();
+		pending.cancelTimer = this.#deliveryRetryPolicy.schedule(() => {
+			pending.cancelTimer = undefined;
+			callback();
+		}, delayMs);
+	}
+
+	#recipientIsCurrent(pending: PendingDelivery): boolean {
+		return (
+			pending.recipientSocket.readyState === WebSocket.OPEN &&
+			this.#presences.getBySocket(pending.recipientSocket)?.presenceId ===
+				pending.recipientPresenceId
+		);
+	}
+
+	#finishDelivery(
+		pending: PendingDelivery,
+		outcome?:
+			| { status: "delivered" | "disconnected" }
+			| { status: "failed" | "unknown"; error: string },
+	): void {
+		if (
+			pending.terminal ||
+			this.#pendingDeliveries.get(pending.key) !== pending
+		) {
+			return;
+		}
+		pending.terminal = true;
+		pending.cancelTimer?.();
+		pending.cancelTimer = undefined;
+		this.#pendingDeliveries.delete(pending.key);
+		if (!outcome || pending.senderSocket.readyState !== WebSocket.OPEN) return;
+		this.#send(
+			pending.senderSocket,
+			outcome.status === "failed" || outcome.status === "unknown"
+				? {
+						type: "delivery",
+						messageId: pending.messageId,
+						to: pending.recipientName,
+						status: outcome.status,
+						error: outcome.error,
+					}
+				: {
+						type: "delivery",
+						messageId: pending.messageId,
+						to: pending.recipientName,
+						status: outcome.status,
+					},
+		);
 	}
 
 	#release(
@@ -385,26 +680,13 @@ export class RealtimeHub {
 	): Presence | null {
 		const presence = this.#presences.remove(socket);
 		if (!presence) return null;
-		for (const [key, pending] of this.#pendingDeliveries) {
+		for (const pending of this.#pendingDeliveries.values()) {
 			if (pending.senderPresenceId === presence.presenceId) {
-				this.#pendingDeliveries.delete(key);
+				this.#finishDelivery(pending);
 				continue;
 			}
-			if (pending.recipientPresenceId !== presence.presenceId) continue;
-			this.#pendingDeliveries.delete(key);
-			const sender = this.#presences
-				.connections(presence.project)
-				.find(
-					(candidate) => candidate.presenceId === pending.senderPresenceId,
-				);
-			if (sender) {
-				this.#send(sender.socket, {
-					type: "delivery",
-					messageId: pending.messageId,
-					to: pending.recipientName,
-					status: "disconnected",
-				});
-			}
+			if (pending.recipientPresenceId === presence.presenceId)
+				this.#finishDelivery(pending, { status: "disconnected" });
 		}
 		if (!this.#closing) {
 			this.#broadcast(presence.project, presence.presenceId, {

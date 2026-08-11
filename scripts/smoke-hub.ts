@@ -107,6 +107,10 @@ async function main() {
 		messageId: "smoke-broadcast",
 	});
 	assert(
+		broadcast.replayed === false,
+		"new broadcast is not an idempotent replay",
+	);
+	assert(
 		broadcast.recipients.join(",") === "web,test",
 		"broadcast freezes the current Presence snapshot",
 	);

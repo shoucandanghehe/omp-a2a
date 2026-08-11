@@ -4,8 +4,10 @@ import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import WebSocket, { WebSocketServer } from "ws";
+import { createProject } from "../src/registry";
 import { A2aConnection } from "../src/hub/connection";
 import { HubClient } from "../src/hub/client";
+import type { MessageDraft } from "../src/hub/messages";
 import {
 	decodeTextPayload,
 	encodeTextPayload,
@@ -14,8 +16,13 @@ import {
 import {
 	A2A_PROTOCOL_VERSION,
 	type ClientFrame,
+	type RealtimeMessage,
 	type ServerFrame,
 } from "../src/hub/realtime-types";
+import {
+	RealtimeHub,
+	type RealtimeHubOptions,
+} from "../src/hub/realtime-server";
 import { type HubServerHandle, startHubServer } from "../src/hub/server";
 
 const roots: string[] = [];
@@ -36,6 +43,10 @@ class FrameQueue<Frame = ServerFrame> {
 		const frame = this.#frames.shift();
 		if (frame) return Promise.resolve(frame);
 		return new Promise<Frame>((resolve) => this.#waiters.push(resolve));
+	}
+
+	size(): number {
+		return this.#frames.length;
 	}
 }
 
@@ -99,6 +110,120 @@ async function startTestTransport(): Promise<{
 	};
 }
 
+type MessageLedger = ConstructorParameters<typeof RealtimeHub>[1];
+
+class ManualScheduler {
+	#now = 0;
+	#tasks: Array<{
+		callback: () => void;
+		cancelled: boolean;
+		runAt: number;
+	}> = [];
+
+	now = (): number => this.#now;
+
+	schedule = (callback: () => void, delayMs = 0): (() => void) => {
+		const task = {
+			callback,
+			cancelled: false,
+			runAt: this.#now + delayMs,
+		};
+		this.#tasks.push(task);
+		return () => {
+			task.cancelled = true;
+		};
+	};
+
+	advanceBy(delayMs: number): void {
+		this.#now += delayMs;
+	}
+
+	runNext(): void {
+		let nextIndex = -1;
+		for (let index = 0; index < this.#tasks.length; index += 1) {
+			const task = this.#tasks[index];
+			if (
+				task &&
+				!task.cancelled &&
+				(nextIndex === -1 ||
+					task.runAt < (this.#tasks[nextIndex]?.runAt ?? Number.POSITIVE_INFINITY))
+			) {
+				nextIndex = index;
+			}
+		}
+		if (nextIndex === -1)
+			throw new Error("expected a scheduled delivery action");
+		const [task] = this.#tasks.splice(nextIndex, 1);
+		if (!task) throw new Error("expected a scheduled delivery action");
+		this.#now = task.runAt;
+		task.callback();
+	}
+
+	get pending(): number {
+		return this.#tasks.filter((task) => !task.cancelled).length;
+	}
+}
+
+function messageFromDraft(draft: MessageDraft): RealtimeMessage {
+	return {
+		messageId: draft.messageId,
+		messageRef: `${draft.project}:1`,
+		project: draft.project,
+		sequence: 1,
+		from: { ...draft.from },
+		target: { ...draft.target },
+		payload: { ...draft.payload },
+		attachments: draft.attachments,
+		createdAt: draft.createdAt,
+		replyTo: draft.replyTo,
+	};
+}
+
+function acceptingLedger(appendError?: Error): MessageLedger {
+	const stored = new Map<string, RealtimeMessage>();
+	return {
+		append(draft) {
+			if (appendError) throw appendError;
+			const replayed = stored.get(draft.messageId);
+			if (replayed) return { replayed: true, message: replayed };
+			const message = messageFromDraft(draft);
+			stored.set(draft.messageId, message);
+			return { replayed: false, message };
+		},
+		replay(draft) {
+			const replayed = stored.get(draft.messageId);
+			return replayed ? { replayed: true, message: replayed } : null;
+		},
+	};
+}
+
+async function startRealtimeTransport(
+	messages: MessageLedger,
+	options: RealtimeHubOptions = {},
+): Promise<{ baseUrl: string; realtime: RealtimeHub }> {
+	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-retry-policy-"));
+	roots.push(dataDir);
+	createProject({ name: "room", dataDir });
+	const server = createHttpServer();
+	const realtime = new RealtimeHub(server, messages, dataDir, options);
+	await new Promise<void>((resolve, reject) => {
+		server.once("error", reject);
+		server.listen(0, "127.0.0.1", resolve);
+	});
+	const address = server.address();
+	if (!address || typeof address === "string")
+		throw new Error("expected realtime test TCP address");
+	transports.push(async () => {
+		await realtime.close();
+		server.closeAllConnections();
+		if (server.listening)
+			await new Promise<void>((resolve) => server.close(() => resolve()));
+	});
+	return {
+		baseUrl: `http://127.0.0.1:${address.port}`,
+		realtime,
+	};
+}
 
 function claimedFrame(name: string): ServerFrame {
 	return {
@@ -110,13 +235,17 @@ function claimedFrame(name: string): ServerFrame {
 	};
 }
 
-function acceptedFrame(requestId: string, messageId: string): ServerFrame {
+function acceptedFrame(
+	requestId: string,
+	messageId: string,
+): Extract<ServerFrame, { type: "accepted" }> {
 	return {
 		type: "accepted",
 		requestId,
+		replayed: false,
 		message: {
 			messageId,
-			messageRef: `room:${messageId}`,
+			messageRef: "room:1",
 			project: "room",
 			sequence: 1,
 			from: { name: "api", presenceId: "api-presence" },
@@ -203,7 +332,7 @@ test("transport close releases Presence and allows name reuse", async () => {
 	replacement.socket.close();
 });
 
-test("direct messages and broadcasts target the current Presence snapshot", async () => {
+test("direct messages and broadcasts bind the current concrete Presences", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-realtime-"));
 	roots.push(dataDir);
 	const hub = await startHubServer({ port: 0, dataDir });
@@ -245,6 +374,7 @@ test("direct messages and broadcasts target the current Presence snapshot", asyn
 	expect(await api.frames.next()).toMatchObject({
 		type: "accepted",
 		requestId: "request-direct",
+		replayed: false,
 		recipients: ["web"],
 	});
 	web.socket.send(JSON.stringify({ type: "delivered", messageId: "direct-1" }));
@@ -276,6 +406,7 @@ test("direct messages and broadcasts target the current Presence snapshot", asyn
 	expect(await api.frames.next()).toMatchObject({
 		type: "accepted",
 		requestId: "request-broadcast",
+		replayed: false,
 		message: { messageRef: "chat:2", target: { type: "project" } },
 		recipients: ["web", "test"],
 	});
@@ -314,6 +445,7 @@ test("direct messages and broadcasts target the current Presence snapshot", asyn
 	expect(await api.frames.next()).toMatchObject({
 		type: "accepted",
 		requestId: "request-disconnect",
+		replayed: false,
 	});
 	web.socket.close();
 	expect(await api.frames.next()).toEqual({
@@ -326,6 +458,24 @@ test("direct messages and broadcasts target the current Presence snapshot", asyn
 		type: "presence_left",
 		peer: { name: "web" },
 	});
+	api.socket.send(
+		JSON.stringify({
+			type: "message",
+			requestId: "request-direct-replay",
+			messageId: "direct-1",
+			target: { type: "agent", name: "web" },
+			payload: encodeTextPayload("check login"),
+			attachments: [],
+		}),
+	);
+	const replayed = await api.frames.next();
+	expect(replayed).toMatchObject({
+		type: "accepted",
+		requestId: "request-direct-replay",
+		replayed: true,
+		message: { messageRef: "chat:1" },
+	});
+	expect("recipients" in replayed).toBe(false);
 	const replacement = await connect(hub.meta.baseUrl, "chat", "web");
 	const replacementClaimed = await replacement.frames.next();
 	if (replacementClaimed.type !== "claimed")
@@ -889,6 +1039,121 @@ test("aborted and timed out message requests ignore late acceptance and errors",
 	await closing;
 });
 
+test("malformed accepted frames reject the matching request", async () => {
+	const cases: Array<{
+		name: string;
+		frame: (requestId: string, messageId: string) => unknown;
+	}> = [
+		{
+			name: "missing replayed",
+			frame(requestId, messageId) {
+				const frame = {
+					...acceptedFrame(requestId, messageId),
+				} as unknown as Record<string, unknown>;
+				delete frame.replayed;
+				return frame;
+			},
+		},
+		{
+			name: "non-boolean replayed",
+			frame(requestId, messageId) {
+				return {
+					...acceptedFrame(requestId, messageId),
+					replayed: "false",
+				};
+			},
+		},
+		{
+			name: "new acceptance missing recipients",
+			frame(requestId, messageId) {
+				const frame = {
+					...acceptedFrame(requestId, messageId),
+				} as unknown as Record<string, unknown>;
+				delete frame.recipients;
+				return frame;
+			},
+		},
+		{
+			name: "new acceptance with malformed recipients",
+			frame(requestId, messageId) {
+				return {
+					...acceptedFrame(requestId, messageId),
+					recipients: ["receiver", 1],
+				};
+			},
+		},
+		{
+			name: "replay containing recipients",
+			frame(requestId, messageId) {
+				const accepted = acceptedFrame(requestId, messageId);
+				return {
+					type: "accepted",
+					requestId,
+					replayed: true,
+					message: accepted.message,
+					recipients: [],
+				};
+			},
+		},
+		{
+			name: "unknown acceptance field",
+			frame(requestId, messageId) {
+				return {
+					...acceptedFrame(requestId, messageId),
+					unexpected: true,
+				};
+			},
+		},
+		{
+			name: "unknown canonical message field",
+			frame(requestId, messageId) {
+				const accepted = acceptedFrame(requestId, messageId);
+				return {
+					...accepted,
+					message: { ...accepted.message, unexpected: true },
+				};
+			},
+		},
+		{
+			name: "canonical message missing attachments",
+			frame(requestId, messageId) {
+				const accepted = acceptedFrame(requestId, messageId);
+				const message = {
+					...accepted.message,
+				} as unknown as Record<string, unknown>;
+				delete message.attachments;
+				return { ...accepted, message };
+			},
+		},
+	];
+
+	for (const [index, malformed] of cases.entries()) {
+		const transport = await startTestTransport();
+		const connecting = A2aConnection.connect({
+			baseUrl: transport.baseUrl,
+			project: "room",
+			name: "api",
+		});
+		const socket = await transport.socket;
+		await transport.frames.next();
+		socket.send(JSON.stringify(claimedFrame("api")));
+		const connection = await connecting;
+		const messageId = `malformed-acceptance-${index}`;
+		const pending = connection.send({
+			target: { type: "project" },
+			text: malformed.name,
+			messageId,
+		});
+		const request = await transport.frames.next();
+		if (request.type !== "message")
+			throw new Error("expected message request for malformed acceptance");
+		socket.send(JSON.stringify(malformed.frame(request.requestId, messageId)));
+		await expect(pending).rejects.toThrow(/accepted/i);
+		socket.terminate();
+		await connection.close();
+	}
+});
+
 test("message timeout overrides reject invalid and over-limit values before dispatch", async () => {
 	const transport = await startTestTransport();
 	const connecting = A2aConnection.connect({
@@ -1090,4 +1355,429 @@ test("delivery cleanup is fenced by recipient and sender Presence", async () => 
 	sender.socket.close();
 	recipient.socket.close();
 	recipientReplacement.socket.close();
+});
+
+test("RealtimeHub rejects invalid delivery retry overrides exactly", () => {
+	const cases: Array<{
+		policy: NonNullable<RealtimeHubOptions["deliveryRetryPolicy"]>;
+		message: string;
+	}> = [
+		{
+			policy: { maxAttempts: Number.NaN },
+			message:
+				"deliveryRetryPolicy.maxAttempts must be a finite positive integer",
+		},
+		{
+			policy: { maxAttempts: Number.POSITIVE_INFINITY },
+			message:
+				"deliveryRetryPolicy.maxAttempts must be a finite positive integer",
+		},
+		{
+			policy: { maxAttempts: 0 },
+			message:
+				"deliveryRetryPolicy.maxAttempts must be a finite positive integer",
+		},
+		{
+			policy: { maxAttempts: -1 },
+			message:
+				"deliveryRetryPolicy.maxAttempts must be a finite positive integer",
+		},
+		{
+			policy: { maxAttempts: 1.5 },
+			message:
+				"deliveryRetryPolicy.maxAttempts must be a finite positive integer",
+		},
+		{
+			policy: { maxAttempts: 4 },
+			message: "deliveryRetryPolicy.maxAttempts must not exceed 3",
+		},
+		{
+			policy: { acknowledgeTimeoutMs: Number.NaN },
+			message:
+				"deliveryRetryPolicy.acknowledgeTimeoutMs must be a finite positive number",
+		},
+		{
+			policy: { acknowledgeTimeoutMs: Number.POSITIVE_INFINITY },
+			message:
+				"deliveryRetryPolicy.acknowledgeTimeoutMs must be a finite positive number",
+		},
+		{
+			policy: { acknowledgeTimeoutMs: 0 },
+			message:
+				"deliveryRetryPolicy.acknowledgeTimeoutMs must be a finite positive number",
+		},
+		{
+			policy: { acknowledgeTimeoutMs: -1 },
+			message:
+				"deliveryRetryPolicy.acknowledgeTimeoutMs must be a finite positive number",
+		},
+		{
+			policy: { acknowledgeTimeoutMs: 2_001 },
+			message:
+				"deliveryRetryPolicy.acknowledgeTimeoutMs must not exceed 2000ms",
+		},
+		{
+			policy: {
+				schedule: 1 as unknown as NonNullable<
+					RealtimeHubOptions["deliveryRetryPolicy"]
+				>["schedule"],
+			},
+			message: "deliveryRetryPolicy.schedule must be a function",
+		},
+	];
+
+	for (const { policy, message } of cases) {
+		let thrown: unknown;
+		try {
+			new RealtimeHub(createHttpServer(), acceptingLedger(), tmpdir(), {
+				deliveryRetryPolicy: policy,
+			});
+		} catch (error) {
+			thrown = error;
+		}
+		expect(thrown).toBeInstanceOf(Error);
+		expect((thrown as Error).message).toBe(message);
+	}
+});
+
+test("broadcast snapshots current recipients once and replay does not redeliver", async () => {
+	const scheduler = new ManualScheduler();
+	const { baseUrl } = await startRealtimeTransport(acceptingLedger(), {
+		deliveryRetryPolicy: { schedule: scheduler.schedule },
+	});
+	const sender = await connect(baseUrl, "room", "sender");
+	await sender.frames.next();
+	const first = await connect(baseUrl, "room", "first");
+	await first.frames.next();
+	await sender.frames.next();
+	const second = await connect(baseUrl, "room", "second");
+	await second.frames.next();
+	await sender.frames.next();
+	await first.frames.next();
+
+	sender.socket.send(
+		JSON.stringify({
+			type: "message",
+			requestId: "broadcast-order",
+			messageId: "broadcast-order",
+			target: { type: "project" },
+			payload: encodeTextPayload("fan out"),
+			attachments: [],
+		}),
+	);
+	expect(await first.frames.next()).toMatchObject({
+		type: "message",
+		message: { messageId: "broadcast-order" },
+	});
+	expect(await second.frames.next()).toMatchObject({
+		type: "message",
+		message: { messageId: "broadcast-order" },
+	});
+	expect(await sender.frames.next()).toMatchObject({
+		type: "accepted",
+		replayed: false,
+		recipients: ["first", "second"],
+	});
+
+	const late = await connect(baseUrl, "room", "late");
+	expect(await late.frames.next()).toMatchObject({ type: "claimed" });
+	expect(await sender.frames.next()).toMatchObject({
+		type: "presence_joined",
+		peer: { name: "late" },
+	});
+	expect(late.frames.size()).toBe(0);
+	expect(scheduler.pending).toBe(2);
+	sender.socket.send(
+		JSON.stringify({
+			type: "message",
+			requestId: "broadcast-replay",
+			messageId: "broadcast-order",
+			target: { type: "project" },
+			payload: encodeTextPayload("fan out"),
+			attachments: [],
+		}),
+	);
+	const replayed = await sender.frames.next();
+	expect(replayed).toMatchObject({
+		type: "accepted",
+		requestId: "broadcast-replay",
+		replayed: true,
+	});
+	expect("recipients" in replayed).toBe(false);
+	sender.socket.close();
+	first.socket.close();
+	second.socket.close();
+	late.socket.close();
+});
+
+test("failed broadcast append sends no recipient frame", async () => {
+	const { baseUrl } = await startRealtimeTransport(
+		acceptingLedger(new Error("append unavailable")),
+	);
+	const sender = await connect(baseUrl, "room", "sender");
+	await sender.frames.next();
+	const recipient = await connect(baseUrl, "room", "recipient");
+	await recipient.frames.next();
+	await sender.frames.next();
+
+	sender.socket.send(
+		JSON.stringify({
+			type: "message",
+			requestId: "append-failure",
+			messageId: "append-failure",
+			target: { type: "project" },
+			payload: encodeTextPayload("must persist first"),
+			attachments: [],
+		}),
+	);
+	expect(await sender.frames.next()).toMatchObject({
+		type: "error",
+		requestId: "append-failure",
+		message: "append unavailable",
+	});
+	expect(recipient.frames.size()).toBe(0);
+	sender.socket.close();
+	recipient.socket.close();
+});
+
+test("ACK timeout retries only the bound Presence", async () => {
+	const scheduler = new ManualScheduler();
+	const { baseUrl } = await startRealtimeTransport(acceptingLedger(), {
+		deliveryRetryPolicy: { schedule: scheduler.schedule },
+	});
+	const sender = await connect(baseUrl, "room", "sender");
+	await sender.frames.next();
+	const recipient = await connect(baseUrl, "room", "recipient");
+	await recipient.frames.next();
+	await sender.frames.next();
+	sender.socket.send(
+		JSON.stringify({
+			type: "message",
+			requestId: "transport-retry",
+			messageId: "transport-retry",
+			target: { type: "agent", name: "recipient" },
+			payload: encodeTextPayload("retry write"),
+			attachments: [],
+		}),
+	);
+	expect(await sender.frames.next()).toMatchObject({
+		type: "accepted",
+		replayed: false,
+	});
+	expect(await recipient.frames.next()).toMatchObject({
+		type: "message",
+		message: { messageId: "transport-retry" },
+	});
+	expect(scheduler.pending).toBe(1);
+	scheduler.runNext();
+	expect(await recipient.frames.next()).toMatchObject({
+		type: "message",
+		message: { messageId: "transport-retry" },
+	});
+	recipient.socket.send(
+		JSON.stringify({ type: "delivered", messageId: "transport-retry" }),
+	);
+	expect(await sender.frames.next()).toEqual({
+		type: "delivery",
+		messageId: "transport-retry",
+		to: "recipient",
+		status: "delivered",
+	});
+	expect(scheduler.pending).toBe(0);
+	sender.socket.close();
+	recipient.socket.close();
+});
+
+test("ACK retries end unknown while terminal failure and sender departure cancel retry", async () => {
+	const scheduler = new ManualScheduler();
+	let attempts = 0;
+	const { baseUrl } = await startRealtimeTransport(acceptingLedger(), {
+		deliveryRetryPolicy: { schedule: scheduler.schedule },
+	});
+	const sender = await connect(baseUrl, "room", "sender");
+	await sender.frames.next();
+	const recipient = await connect(baseUrl, "room", "recipient");
+	await recipient.frames.next();
+	await sender.frames.next();
+
+	sender.socket.send(
+		JSON.stringify({
+			type: "message",
+			requestId: "unknown-request",
+			messageId: "unknown-delivery",
+			target: { type: "agent", name: "recipient" },
+			payload: encodeTextPayload("drop every ACK"),
+			attachments: [],
+		}),
+	);
+	await recipient.frames.next();
+	attempts += 1;
+	await sender.frames.next();
+	scheduler.runNext();
+	await recipient.frames.next();
+	attempts += 1;
+	scheduler.runNext();
+	await recipient.frames.next();
+	attempts += 1;
+	scheduler.runNext();
+	expect(await sender.frames.next()).toEqual({
+		type: "delivery",
+		messageId: "unknown-delivery",
+		to: "recipient",
+		status: "unknown",
+		error: "recipient did not acknowledge delivery after 3 attempts",
+	});
+	expect(attempts).toBe(3);
+	expect(scheduler.pending).toBe(0);
+
+	sender.socket.send(
+		JSON.stringify({
+			type: "message",
+			requestId: "failed-request",
+			messageId: "terminal-failure",
+			target: { type: "agent", name: "recipient" },
+			payload: encodeTextPayload("terminal failure"),
+			attachments: [],
+		}),
+	);
+	await recipient.frames.next();
+	attempts += 1;
+	await sender.frames.next();
+	recipient.socket.send(
+		JSON.stringify({
+			type: "delivery_failed",
+			messageId: "terminal-failure",
+			error: "receiver rejected injection",
+		}),
+	);
+	expect(await sender.frames.next()).toEqual({
+		type: "delivery",
+		messageId: "terminal-failure",
+		to: "recipient",
+		status: "failed",
+		error: "receiver rejected injection",
+	});
+	expect(attempts).toBe(4);
+	expect(scheduler.pending).toBe(0);
+
+	sender.socket.send(
+		JSON.stringify({
+			type: "message",
+			requestId: "sender-leaves-request",
+			messageId: "sender-leaves",
+			target: { type: "agent", name: "recipient" },
+			payload: encodeTextPayload("cancel timer"),
+			attachments: [],
+		}),
+	);
+	await recipient.frames.next();
+	attempts += 1;
+	await sender.frames.next();
+	expect(scheduler.pending).toBe(1);
+	sender.socket.send(JSON.stringify({ type: "goodbye" }));
+	expect(await sender.frames.next()).toEqual({ type: "goodbye" });
+	expect(await recipient.frames.next()).toMatchObject({
+		type: "presence_left",
+		peer: { name: "sender" },
+	});
+	expect(scheduler.pending).toBe(0);
+	expect(attempts).toBe(5);
+	sender.socket.close();
+	recipient.socket.close();
+});
+
+test("receiver expires terminal outcomes while idle with one ordered timer", async () => {
+	const transport = await startTestTransport();
+	const scheduler = new ManualScheduler();
+	const started = Promise.withResolvers<void>();
+	const release = Promise.withResolvers<void>();
+	let injections = 0;
+	const connecting = A2aConnection.connect({
+		baseUrl: transport.baseUrl,
+		project: "room",
+		name: "receiver",
+		deliveryOutcomeScheduler: {
+			now: scheduler.now,
+			schedule: scheduler.schedule,
+		},
+		events: {
+			async onMessage() {
+				injections += 1;
+				started.resolve();
+				await release.promise;
+			},
+		},
+	});
+	const socket = await transport.socket;
+	await transport.frames.next();
+	socket.send(JSON.stringify(claimedFrame("receiver")));
+	const connection = await connecting;
+	const accepted = acceptedFrame("unused", "deduplicated-message");
+	const retryFrame: ServerFrame = {
+		type: "message",
+		message: accepted.message,
+	};
+	socket.send(JSON.stringify(retryFrame));
+	socket.send(JSON.stringify(retryFrame));
+	await started.promise;
+	expect(injections).toBe(1);
+	release.resolve();
+	expect(await transport.frames.next()).toEqual({
+		type: "delivered",
+		messageId: "deduplicated-message",
+	});
+	expect(await transport.frames.next()).toEqual({
+		type: "delivered",
+		messageId: "deduplicated-message",
+	});
+	expect(scheduler.pending).toBe(1);
+	scheduler.advanceBy(1);
+
+	const laterMessageCount = 512;
+	for (let index = 0; index < laterMessageCount; index += 1) {
+		const sequence = index + 2;
+		socket.send(
+			JSON.stringify({
+				type: "message",
+				message: {
+					...accepted.message,
+					messageId: `later-message-${index}`,
+					messageRef: `room:${sequence}`,
+					sequence,
+					createdAt: sequence,
+				},
+			}),
+		);
+	}
+	for (let index = 0; index < laterMessageCount; index += 1) {
+		expect(await transport.frames.next()).toEqual({
+			type: "delivered",
+			messageId: `later-message-${index}`,
+		});
+	}
+	expect(injections).toBe(laterMessageCount + 1);
+	expect(scheduler.pending).toBe(1);
+	socket.send(JSON.stringify(retryFrame));
+	expect(await transport.frames.next()).toEqual({
+		type: "delivered",
+		messageId: "deduplicated-message",
+	});
+	expect(injections).toBe(laterMessageCount + 1);
+
+	scheduler.runNext();
+	expect(scheduler.pending).toBe(1);
+	socket.send(JSON.stringify(retryFrame));
+	expect(await transport.frames.next()).toEqual({
+		type: "delivered",
+		messageId: "deduplicated-message",
+	});
+	expect(injections).toBe(laterMessageCount + 2);
+	scheduler.runNext();
+	expect(scheduler.pending).toBe(1);
+
+	const closing = connection.close();
+	expect(await transport.frames.next()).toEqual({ type: "goodbye" });
+	socket.send(JSON.stringify({ type: "goodbye" }));
+	await closing;
+	expect(scheduler.pending).toBe(0);
 });

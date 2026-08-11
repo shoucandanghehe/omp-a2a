@@ -256,11 +256,14 @@ export default function a2aExtension(pi: ExtensionAPI) {
 				activeContext?.ui.notify(`[a2a] ${peer.name} joined`, "info"),
 			onPresenceLeft: (peer) =>
 				activeContext?.ui.notify(`[a2a] ${peer.name} left`, "info"),
-			onDelivery: (delivery) =>
+			onDelivery: (delivery) => {
+				const uncertain =
+					delivery.status === "failed" || delivery.status === "unknown";
 				activeContext?.ui.notify(
-					`[a2a] ${delivery.to} ${delivery.status}${delivery.status === "failed" ? `: ${delivery.error}` : ""}`,
-					delivery.status === "failed" ? "error" : "info",
-				),
+					`[a2a] ${delivery.to} ${delivery.status}${uncertain ? `: ${delivery.error}` : ""}`,
+					uncertain ? "error" : "info",
+				);
+			},
 			onError: (error) =>
 				pi.logger?.warn?.(`a2a realtime error: ${error.message}`),
 			onMessage: async (message) => {
@@ -565,15 +568,19 @@ export default function a2aExtension(pi: ExtensionAPI) {
 					},
 					{ signal },
 				);
-				const target =
-					parameters.target.type === "project"
+				const target = accepted.replayed
+					? null
+					: parameters.target.type === "project"
 						? `${accepted.recipients.length} Agents`
 						: parameters.target.name;
+				const result = accepted.replayed
+					? `Previously accepted ref=${accepted.message.messageRef}; no redelivery was attempted`
+					: `Sent to ${target} ref=${accepted.message.messageRef} attachments=${attachments.length}`;
 				return {
 					content: [
 						{
 							type: "text",
-							text: `Sent to ${target} ref=${accepted.message.messageRef} attachments=${attachments.length}\n${ASYNC_REPLY_GUIDANCE}`,
+							text: `${result}\n${ASYNC_REPLY_GUIDANCE}`,
 						},
 					],
 					details: {
