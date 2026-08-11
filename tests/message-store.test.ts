@@ -4,13 +4,32 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+	HubStore,
 	MAX_HISTORY_BYTES,
 	MessageIdConflictError,
-	MessageStore,
-} from "../src/hub/messages";
+	ProjectConflictError,
+	UnknownProjectError,
+} from "../src/hub/store";
 import { encodeBinaryPayload, encodeTextPayload } from "../src/hub/payload";
 
 const roots: string[] = [];
+
+function appendMessage(
+	store: HubStore,
+	project: string,
+	messageId: string,
+	createdAt = 100,
+) {
+	return store.append({
+		messageId,
+		project,
+		from: { name: "api", presenceId: "presence-api" },
+		target: { type: "project" },
+		payload: encodeTextPayload(messageId),
+		attachments: [],
+		createdAt,
+	});
+}
 
 afterEach(() => {
 	for (const root of roots.splice(0))
@@ -20,7 +39,8 @@ afterEach(() => {
 test("messages form one immutable sequence per Project", () => {
 	const root = mkdtempSync(join(tmpdir(), "omp-a2a-messages-"));
 	roots.push(root);
-	const store = new MessageStore(join(root, "messages.sqlite"));
+	const store = new HubStore(join(root, "messages.sqlite"));
+	store.createProject({ name: "billing" });
 
 	const first = store.append({
 		messageId: "message-1",
@@ -129,9 +149,10 @@ test("legacy message ledger migrates once into Project history", () => {
 	);
 	legacy.close();
 
-	const store = new MessageStore(join(root, "messages.sqlite"), {
+	const store = new HubStore(join(root, "messages.sqlite"), {
 		legacyDatabasePath: legacyPath,
 	});
+	store.createProject({ name: "legacy" });
 	expect(
 		store.history({ project: "legacy", limit: 10 }).messages,
 	).toMatchObject([
@@ -141,7 +162,7 @@ test("legacy message ledger migrates once into Project history", () => {
 	expect(store.integrityCheck()).toBe("ok");
 	store.close();
 
-	const reopened = new MessageStore(join(root, "messages.sqlite"), {
+	const reopened = new HubStore(join(root, "messages.sqlite"), {
 		legacyDatabasePath: legacyPath,
 	});
 	expect(
@@ -153,7 +174,8 @@ test("legacy message ledger migrates once into Project history", () => {
 test("history uses stable Project cursors and sender filters", () => {
 	const root = mkdtempSync(join(tmpdir(), "omp-a2a-messages-"));
 	roots.push(root);
-	const store = new MessageStore(join(root, "messages.sqlite"));
+	const store = new HubStore(join(root, "messages.sqlite"));
+	store.createProject({ name: "history" });
 	for (const [index, from] of ["api", "web", "api"].entries()) {
 		store.append({
 			messageId: `history-${index + 1}`,
@@ -192,7 +214,8 @@ test("history uses stable Project cursors and sender filters", () => {
 test("history response has an explicit decoded-byte bound", () => {
 	const root = mkdtempSync(join(tmpdir(), "omp-a2a-messages-"));
 	roots.push(root);
-	const store = new MessageStore(join(root, "messages.sqlite"));
+	const store = new HubStore(join(root, "messages.sqlite"));
+	store.createProject({ name: "bounded" });
 	const text = "x".repeat(MAX_HISTORY_BYTES / 2);
 	for (let index = 1; index <= 3; index++) {
 		store.append({
@@ -257,7 +280,8 @@ test("protocol v2 message databases migrate with empty attachments", () => {
 		);
 	previous.close();
 
-	const store = new MessageStore(databasePath);
+	const store = new HubStore(databasePath);
+	store.createProject({ name: "migration" });
 	expect(store.history({ project: "migration" }).messages).toMatchObject([
 		{
 			messageId: "v2-message",
@@ -265,7 +289,7 @@ test("protocol v2 message databases migrate with empty attachments", () => {
 		},
 	]);
 	store.close();
-	const reopened = new MessageStore(databasePath);
+	const reopened = new HubStore(databasePath);
 	expect(reopened.integrityCheck()).toBe("ok");
 	expect(reopened.history({ project: "migration" }).messages).toHaveLength(1);
 	reopened.close();
@@ -274,7 +298,8 @@ test("protocol v2 message databases migrate with empty attachments", () => {
 test("attachment content participates in messageId idempotency", () => {
 	const root = mkdtempSync(join(tmpdir(), "omp-a2a-attachment-idempotency-"));
 	roots.push(root);
-	const store = new MessageStore(join(root, "messages.sqlite"));
+	const store = new HubStore(join(root, "messages.sqlite"));
+	store.createProject({ name: "attachments" });
 	const draft = {
 		messageId: "attachment-idempotency",
 		project: "attachments",
@@ -312,5 +337,89 @@ test("attachment content participates in messageId idempotency", () => {
 			],
 		}),
 	).toThrow(MessageIdConflictError);
+	store.close();
+});
+
+test("Project metadata persists with deterministic sorting", () => {
+	const root = mkdtempSync(join(tmpdir(), "omp-a2a-project-store-"));
+	roots.push(root);
+	const databasePath = join(root, "messages.sqlite");
+	const store = new HubStore(databasePath);
+	const zeta = store.createProject({
+		name: "zeta",
+		displayName: "Zeta",
+		description: "last Project",
+		createdByCwd: "/repos/zeta",
+	});
+	const alpha = store.createProject({ name: "alpha" });
+
+	expect(store.listProjects()).toEqual([alpha, zeta]);
+	expect(store.getProject("zeta")).toEqual(zeta);
+	expect(() => store.createProject({ name: "zeta" })).toThrow(
+		ProjectConflictError,
+	);
+	store.close();
+
+	const reopened = new HubStore(databasePath);
+	expect(reopened.listProjects()).toEqual([alpha, zeta]);
+	expect(reopened.deleteProject("missing")).toBe(false);
+	reopened.close();
+});
+
+test("messages require an existing Project", () => {
+	const root = mkdtempSync(join(tmpdir(), "omp-a2a-project-required-"));
+	roots.push(root);
+	const store = new HubStore(join(root, "messages.sqlite"));
+
+	expect(() => appendMessage(store, "unknown", "unknown-project")).toThrow(
+		UnknownProjectError,
+	);
+	expect(() => store.history({ project: "unknown" })).toThrow(
+		UnknownProjectError,
+	);
+	store.close();
+});
+
+test("Project deletion rolls back metadata, history, and sequence together", () => {
+	const root = mkdtempSync(join(tmpdir(), "omp-a2a-delete-atomic-"));
+	roots.push(root);
+	const databasePath = join(root, "messages.sqlite");
+	const store = new HubStore(databasePath);
+	store.createProject({ name: "atomic" });
+	appendMessage(store, "atomic", "before-failure");
+
+	const injector = new Database(databasePath);
+	injector.run(`
+		CREATE TRIGGER fail_project_delete
+		BEFORE DELETE ON projects
+		BEGIN
+			SELECT RAISE(ABORT, 'forced delete failure');
+		END
+	`);
+	expect(() => store.deleteProject("atomic")).toThrow("forced delete failure");
+	expect(store.getProject("atomic")?.name).toBe("atomic");
+	expect(
+		store.history({ project: "atomic" }).messages.map((message) => message.messageId),
+	).toEqual(["before-failure"]);
+	expect(appendMessage(store, "atomic", "after-failure").message.sequence).toBe(2);
+
+	injector.run("DROP TRIGGER fail_project_delete");
+	injector.close();
+	expect(store.deleteProject("atomic")).toBe(true);
+	store.close();
+});
+
+test("deleting and recreating a Project cannot expose old history", () => {
+	const root = mkdtempSync(join(tmpdir(), "omp-a2a-delete-recreate-"));
+	roots.push(root);
+	const store = new HubStore(join(root, "messages.sqlite"));
+	store.createProject({ name: "recreated" });
+	appendMessage(store, "recreated", "old-history");
+
+	expect(store.deleteProject("recreated")).toBe(true);
+	expect(store.deleteProject("recreated")).toBe(false);
+	store.createProject({ name: "recreated" });
+	expect(store.history({ project: "recreated" }).messages).toEqual([]);
+	expect(appendMessage(store, "recreated", "new-history").message.sequence).toBe(1);
 	store.close();
 });

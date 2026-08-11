@@ -13,7 +13,7 @@ The wire protocol is private version `3`. It is not the standard A2A protocol, r
 - `src/hub/server.ts`: Express HTTP control/history surface and the HTTP server lifecycle used by the WebSocket Hub.
 - `src/hub/realtime-server.ts`: WebSocket Presence, realtime routing, delivery outcomes, heartbeat, and shutdown.
 - `src/operations.ts`: `A2aRuntime`, the extension-facing module over HTTP and WebSocket clients.
-- `scripts/smoke.ts`: persistent Project Registry smoke.
+- `scripts/smoke.ts`: persistent SQLite Project-store smoke.
 - `scripts/smoke-hub.ts`: in-process HTTP/WebSocket/persistence smoke.
 - `scripts/smoke-docker.ts`: public boundary smoke against an already-running Hub.
 
@@ -31,16 +31,15 @@ OMP session
        │ Projects/history  │ Presence/messages/delivery
        ▼                   ▼
               standalone Hub
-       ┌─────────┼──────────────┐
-       │         │              │
- filesystem   in-memory      SQLite
- Projects     Presence        append-only
- metadata     registry        message history
+       ┌───────────────┴───────────────┐
+       │                               │
+    in-memory                       SQLite
+    Presence              Project metadata + message history
 ```
 
 ### Control and history plane
 
-`HubClient` uses HTTP for Hub metadata, Project create/list/delete, and explicit history queries. Project metadata lives under `<dataDir>/projects/<name>/project.json`. Deletion is rejected while a Project has an active Presence, then removes Project metadata and its message history.
+`HubClient` uses HTTP for Hub metadata, Project create/list/delete, and explicit history queries. Project metadata, per-Project sequence, and Messages share `<dataDir>/messages.sqlite`. Deletion is rejected while a Project has an active Presence, then removes all three durable facts in one SQLite transaction.
 
 ### Realtime plane
 
@@ -48,15 +47,16 @@ OMP session
 2. `RealtimeHub` verifies the Project and atomically claims the name in `PresenceRegistry`.
 3. The client receives its `presenceId` and the current peer snapshot; current peers receive `presence_joined`.
 4. A message request resolves either one current Presence or the current Project Presence snapshot.
-5. `MessageStore` atomically appends one immutable Message—including encoded attachment content—and assigns the next Project sequence.
+5. `HubStore` atomically appends one immutable Message—including encoded attachment content—and assigns the next Project sequence.
 6. The Hub pushes the Message to selected sockets. Each receiver materializes attachments, injects the Message into OMP, then reports `delivered` or `failed`.
 7. The sender receives one in-memory `delivered`, `failed`, or `disconnected` outcome per selected Presence.
 8. Socket close or heartbeat timeout deletes the Presence and broadcasts `presence_left`.
 
 A same-named later connection is a new Presence and never inherits pending delivery. History is never replayed automatically.
 
-### Persistent message contract
+### Persistent store contract
 
+- `HubStore` is the single canonical owner of persistent Project metadata, Project sequence, and Messages.
 - Message references are `<project>:<sequence>` and sequence is monotonic per Project.
 - `messageId` is the persistent idempotency key; conflicting reuse fails.
 - `replyTo` must resolve inside the same Project.
@@ -82,7 +82,7 @@ The resolved URL is authoritative for HTTP and WebSocket connections; Hub metada
 
 Repository-local connection defaults require `project` and `name`; `autoConnect` defaults to enabled. Removed `agentId` and `autoJoin` fields fail with an explicit migration error.
 
-The Hub runs locally with `bun run hub` or in Docker Compose. Each Hub needs a unique URL and data directory. `HubDataLock` rejects concurrent ownership of one directory. SQLite message history uses WAL and `synchronous = FULL`.
+The Hub runs locally with `bun run hub` or in Docker Compose. Each Hub needs a unique URL and data directory. `HubDataLock` rejects concurrent ownership of one directory. The shared SQLite Hub store uses WAL and `synchronous = FULL`.
 
 ## User surfaces
 
@@ -118,15 +118,15 @@ The sender Extension snapshots attachment bytes before sending. Receivers and hi
 
 | Directory | Responsibility | Detailed map |
 | --- | --- | --- |
-| `src/` | OMP adapter, runtime, configuration, Project metadata, and domain names. | [`src/codemap.md`](src/codemap.md) |
-| `src/hub/` | HTTP/WebSocket protocol, Presence, routing, message history, payloads, locking, and process lifecycle. | [`src/hub/codemap.md`](src/hub/codemap.md) |
-| `scripts/` | Executable Registry, Hub, and Docker smoke scenarios. | [`scripts/codemap.md`](scripts/codemap.md) |
+| `src/` | OMP adapter, runtime, configuration, Project domain names, and Hub storage paths. | [`src/codemap.md`](src/codemap.md) |
+| `src/hub/` | HTTP/WebSocket protocol, Presence, routing, canonical SQLite persistence, payloads, locking, and process lifecycle. | [`src/hub/codemap.md`](src/hub/codemap.md) |
+| `scripts/` | Executable SQLite-store, Hub, and Docker smoke scenarios. | [`scripts/codemap.md`](scripts/codemap.md) |
 | `tests/` | Bun behavior tests for configuration, payloads, message history, realtime routing, control routes, runtime, and extension registration/completion. | Tests are excluded from generated map state. |
 | `docs/` | Implemented architecture decisions and historical fixed-snapshot review material. | Documentation is excluded from generated map state. |
 
 ## Verification
 
-The local release gate runs Biome, `bun run smoke`, both Bun entry-point builds, and `docker compose config`. It covers Project isolation and deletion, WebSocket Presence and name conflicts, Presence notifications, direct and broadcast routing, successful/failed/disconnected Delivery outcomes, attachment snapshot/materialization/history, persistent history and protocol version `2`/legacy migration, payload limits, Hub restart, extension registration, and command completion.
+The local release gate runs Biome, `bun run smoke`, both Bun entry-point builds, and `docker compose config`. It covers Project isolation, SQLite CRUD/reopen/sorting and atomic deletion, WebSocket Presence and name conflicts, Presence notifications, direct and broadcast routing, successful/failed/disconnected Delivery outcomes, attachment snapshot/materialization/history, persistent history and protocol version `2`/legacy message migration, payload limits, Hub restart and cleanup, extension registration, and command completion.
 
 `bun run smoke:docker` crosses the public HTTP/WebSocket process boundary of the selected running Hub, verifies persisted history, and removes its temporary Project.
 
@@ -136,6 +136,5 @@ The implemented realtime model is documented in [`docs/realtime-presence-archite
 
 - No authentication, authorization, tenant isolation, or confidentiality guarantee exists.
 - Established WebSockets do not move when `hubUrl` changes; disconnect and reconnect.
-- Project metadata deletion and SQLite history deletion are separate operations rather than one transaction.
 - Ordinary HTTP Project/history calls have no default deadline.
 - The default Compose port publication binds all host interfaces unless the operator narrows it.

@@ -1,12 +1,6 @@
 import type { IncomingMessage, Server } from "node:http";
 import type { Socket } from "node:net";
 import { WebSocket, WebSocketServer } from "ws";
-import { getProject } from "../registry";
-import {
-	MessageIdConflictError,
-	type MessageStore,
-	UnknownReplyTargetError,
-} from "./messages";
 import { PayloadTooLargeError } from "./payload";
 import { NameInUseError, type Presence, PresenceRegistry } from "./presence";
 import {
@@ -15,6 +9,11 @@ import {
 	type MessageTarget,
 	type ServerFrame,
 } from "./realtime-types";
+import {
+	type HubStore,
+	MessageIdConflictError,
+	UnknownReplyTargetError,
+} from "./store";
 
 const MAX_FRAME_BYTES = 6 * 1024 * 1024;
 const HEARTBEAT_MS = 10_000;
@@ -33,8 +32,7 @@ type PendingDelivery = {
 export class RealtimeHub {
 	#server: Server;
 	#wss: WebSocketServer;
-	#messages: MessageStore;
-	#dataDir: string;
+	#store: HubStore;
 	#presences = new PresenceRegistry();
 	#alive = new Map<WebSocket, boolean>();
 	#closeReasons = new Map<
@@ -49,11 +47,11 @@ export class RealtimeHub {
 		head: Buffer,
 	) => void;
 	#closing = false;
+	#closePromise: Promise<void> | null = null;
 
-	constructor(server: Server, messages: MessageStore, dataDir: string) {
+	constructor(server: Server, store: HubStore) {
 		this.#server = server;
-		this.#messages = messages;
-		this.#dataDir = dataDir;
+		this.#store = store;
 		this.#wss = new WebSocketServer({
 			noServer: true,
 			maxPayload: MAX_FRAME_BYTES,
@@ -80,17 +78,22 @@ export class RealtimeHub {
 		return this.#presences.count(project);
 	}
 
-	async close(): Promise<void> {
-		if (this.#closing) return;
+	close(): Promise<void> {
+		if (this.#closePromise) return this.#closePromise;
 		this.#closing = true;
-		clearInterval(this.#heartbeat);
-		this.#server.off("upgrade", this.#upgradeHandler);
-		for (const presence of this.#presences.close()) {
-			this.#closeReasons.set(presence.socket, "hub_shutdown");
-		}
-		for (const socket of this.#wss.clients) socket.terminate();
-		this.#pendingDeliveries.clear();
-		this.#wss.close();
+		this.#closePromise = (async () => {
+			clearInterval(this.#heartbeat);
+			this.#server.off("upgrade", this.#upgradeHandler);
+			for (const presence of this.#presences.close()) {
+				this.#closeReasons.set(presence.socket, "hub_shutdown");
+			}
+			for (const socket of this.#wss.clients) socket.terminate();
+			this.#pendingDeliveries.clear();
+			await new Promise<void>((resolve, reject) =>
+				this.#wss.close((error) => (error ? reject(error) : resolve())),
+			);
+		})();
+		return this.#closePromise;
 	}
 
 	#accept(socket: WebSocket): void {
@@ -203,7 +206,7 @@ export class RealtimeHub {
 			if (typeof frame.project !== "string" || typeof frame.name !== "string") {
 				throw new Error("project and name are required");
 			}
-			if (!getProject(frame.project, this.#dataDir))
+			if (!this.#store.getProject(frame.project))
 				throw new Error(`unknown project: ${frame.project}`);
 			const { self, peers } = this.#presences.claim(
 				frame.project,
@@ -259,7 +262,7 @@ export class RealtimeHub {
 				throw new Error("invalid message target");
 			if (frame.replyTo !== undefined && typeof frame.replyTo !== "string")
 				throw new Error("invalid replyTo");
-			// MessageStore owns content validation and persistence atomically.
+			// HubStore owns content validation and persistence atomically.
 			let target: MessageTarget;
 			let recipients: Presence[];
 			if (frame.target.type === "agent") {
@@ -287,7 +290,7 @@ export class RealtimeHub {
 					.connections(presence.project)
 					.filter((recipient) => recipient.presenceId !== presence.presenceId);
 			}
-			const appended = this.#messages.append({
+			const appended = this.#store.append({
 				messageId: frame.messageId,
 				project: presence.project,
 				from: { name: presence.name, presenceId: presence.presenceId },
