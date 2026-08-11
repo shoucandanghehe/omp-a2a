@@ -5,7 +5,6 @@ import {
 	type AcceptedMessage,
 	type ClientFrame,
 	type DeliveryEvent,
-	DELIVERY_OUTCOME_CACHE_MAX,
 	DELIVERY_OUTCOME_CACHE_TTL_MS,
 	type MessageRequestTarget,
 	type Peer,
@@ -33,6 +32,160 @@ function unknownMessageOutcome(reason: string): Error {
 	return new Error(
 		`A2A message acceptance and Delivery outcomes are unknown because ${reason}`,
 	);
+}
+type JsonObject = Record<string, unknown>;
+
+function isJsonObject(value: unknown): value is JsonObject {
+	return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
+function hasExactKeys(value: JsonObject, expected: readonly string[]): boolean {
+	const keys = Object.keys(value);
+	return (
+		keys.length === expected.length &&
+		keys.every((key) => expected.includes(key))
+	);
+}
+
+function isPeer(value: unknown): value is Peer {
+	return (
+		isJsonObject(value) &&
+		hasExactKeys(value, ["name", "presenceId"]) &&
+		typeof value.name === "string" &&
+		typeof value.presenceId === "string"
+	);
+}
+
+function isMessageTarget(value: unknown): value is RealtimeMessage["target"] {
+	if (!isJsonObject(value) || typeof value.type !== "string") return false;
+	if (value.type === "project") return hasExactKeys(value, ["type"]);
+	if (value.type !== "agent") return false;
+	const expectedKeys =
+		"presenceId" in value
+			? ["type", "name", "presenceId"]
+			: ["type", "name"];
+	return (
+		hasExactKeys(value, expectedKeys) &&
+		typeof value.name === "string" &&
+		(!("presenceId" in value) || typeof value.presenceId === "string")
+	);
+}
+
+function isEncodedTextPayload(
+	value: unknown,
+): value is RealtimeMessage["payload"] {
+	return (
+		isJsonObject(value) &&
+		hasExactKeys(value, ["encoding", "data", "uncompressedBytes"]) &&
+		(value.encoding === "identity" || value.encoding === "gzip+base64") &&
+		typeof value.data === "string" &&
+		typeof value.uncompressedBytes === "number" &&
+		Number.isSafeInteger(value.uncompressedBytes) &&
+		value.uncompressedBytes >= 0
+	);
+}
+
+function isEncodedAttachment(
+	value: unknown,
+): value is RealtimeMessage["attachments"][number] {
+	if (
+		!isJsonObject(value) ||
+		!hasExactKeys(value, ["name", "payload"]) ||
+		typeof value.name !== "string" ||
+		!isJsonObject(value.payload)
+	) {
+		return false;
+	}
+	return (
+		hasExactKeys(value.payload, ["encoding", "data", "uncompressedBytes"]) &&
+		(value.payload.encoding === "base64" ||
+			value.payload.encoding === "gzip+base64") &&
+		typeof value.payload.data === "string" &&
+		typeof value.payload.uncompressedBytes === "number" &&
+		Number.isSafeInteger(value.payload.uncompressedBytes) &&
+		value.payload.uncompressedBytes >= 0
+	);
+}
+
+function isRealtimeMessage(value: unknown): value is RealtimeMessage {
+	if (!isJsonObject(value)) return false;
+	const expectedKeys =
+		"replyTo" in value
+			? [
+					"messageId",
+					"messageRef",
+					"project",
+					"sequence",
+					"from",
+					"target",
+					"payload",
+					"attachments",
+					"createdAt",
+					"replyTo",
+				]
+			: [
+					"messageId",
+					"messageRef",
+					"project",
+					"sequence",
+					"from",
+					"target",
+					"payload",
+					"attachments",
+					"createdAt",
+				];
+	return (
+		hasExactKeys(value, expectedKeys) &&
+		typeof value.messageId === "string" &&
+		typeof value.messageRef === "string" &&
+		typeof value.project === "string" &&
+		typeof value.sequence === "number" &&
+		Number.isSafeInteger(value.sequence) &&
+		value.sequence > 0 &&
+		isPeer(value.from) &&
+		isMessageTarget(value.target) &&
+		isEncodedTextPayload(value.payload) &&
+		Array.isArray(value.attachments) &&
+		value.attachments.every(isEncodedAttachment) &&
+		typeof value.createdAt === "number" &&
+		Number.isFinite(value.createdAt) &&
+		(!("replyTo" in value) || typeof value.replyTo === "string")
+	);
+}
+
+function decodeAcceptedFrame(frame: unknown): AcceptedMessage {
+	if (
+		!isJsonObject(frame) ||
+		frame.type !== "accepted" ||
+		typeof frame.requestId !== "string" ||
+		typeof frame.replayed !== "boolean" ||
+		!isRealtimeMessage(frame.message)
+	) {
+		throw new Error("Invalid accepted frame from A2A Hub");
+	}
+	if (frame.replayed) {
+		if (!hasExactKeys(frame, ["type", "requestId", "replayed", "message"]))
+			throw new Error("Invalid accepted replay frame from A2A Hub");
+		return { replayed: true, message: frame.message };
+	}
+	if (
+		!hasExactKeys(frame, [
+			"type",
+			"requestId",
+			"replayed",
+			"message",
+			"recipients",
+		]) ||
+		!Array.isArray(frame.recipients) ||
+		!frame.recipients.every((recipient) => typeof recipient === "string")
+	) {
+		throw new Error("Invalid new accepted frame from A2A Hub");
+	}
+	return {
+		replayed: false,
+		message: frame.message,
+		recipients: frame.recipients,
+	};
 }
 
 export type A2aConnectionEvents = {
@@ -375,18 +528,13 @@ export class A2aConnection {
 			case "accepted": {
 				const pending = this.#takePending(frame.requestId);
 				if (!pending) return;
-				pending.resolve(
-					frame.replayed
-						? {
-								replayed: true,
-								message: frame.message,
-							}
-						: {
-								replayed: false,
-								message: frame.message,
-								recipients: frame.recipients,
-							},
-				);
+				try {
+					pending.resolve(decodeAcceptedFrame(frame));
+				} catch (error) {
+					pending.reject(
+						error instanceof Error ? error : new Error(String(error)),
+					);
+				}
 				return;
 			}
 			case "error": {
@@ -405,7 +553,7 @@ export class A2aConnection {
 	#receiveMessage(message: RealtimeMessage): void {
 		const cached = this.#deliveryOutcomes.get(message.messageId);
 		if (cached) {
-			if (cached.expiresAt > Date.now()) {
+			if (cached.expiresAt > performance.now()) {
 				this.#sendDeliveryOutcome(cached.frame);
 				return;
 			}
@@ -430,14 +578,11 @@ export class A2aConnection {
 				return;
 			}
 			this.#deliveryInflight.delete(message.messageId);
-			const now = Date.now();
+			const now = performance.now();
+			// Monotonic completion times make Map insertion order the expiry order.
 			for (const [messageId, retained] of this.#deliveryOutcomes) {
-				if (retained.expiresAt <= now) this.#deliveryOutcomes.delete(messageId);
-			}
-			while (this.#deliveryOutcomes.size >= DELIVERY_OUTCOME_CACHE_MAX) {
-				const oldest = this.#deliveryOutcomes.keys().next().value;
-				if (oldest === undefined) break;
-				this.#deliveryOutcomes.delete(oldest);
+				if (retained.expiresAt > now) break;
+				this.#deliveryOutcomes.delete(messageId);
 			}
 			this.#deliveryOutcomes.set(message.messageId, {
 				frame,

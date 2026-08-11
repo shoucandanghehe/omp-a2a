@@ -200,14 +200,17 @@ function claimedFrame(name: string): ServerFrame {
 	};
 }
 
-function acceptedFrame(requestId: string, messageId: string): ServerFrame {
+function acceptedFrame(
+	requestId: string,
+	messageId: string,
+): Extract<ServerFrame, { type: "accepted" }> {
 	return {
 		type: "accepted",
 		requestId,
 		replayed: false,
 		message: {
 			messageId,
-			messageRef: `room:${messageId}`,
+			messageRef: "room:1",
 			project: "room",
 			sequence: 1,
 			from: { name: "api", presenceId: "api-presence" },
@@ -712,6 +715,121 @@ test("aborted and timed out message requests ignore late acceptance and errors",
 	await closing;
 });
 
+test("malformed accepted frames reject the matching request", async () => {
+	const cases: Array<{
+		name: string;
+		frame: (requestId: string, messageId: string) => unknown;
+	}> = [
+		{
+			name: "missing replayed",
+			frame(requestId, messageId) {
+				const frame = {
+					...acceptedFrame(requestId, messageId),
+				} as unknown as Record<string, unknown>;
+				delete frame.replayed;
+				return frame;
+			},
+		},
+		{
+			name: "non-boolean replayed",
+			frame(requestId, messageId) {
+				return {
+					...acceptedFrame(requestId, messageId),
+					replayed: "false",
+				};
+			},
+		},
+		{
+			name: "new acceptance missing recipients",
+			frame(requestId, messageId) {
+				const frame = {
+					...acceptedFrame(requestId, messageId),
+				} as unknown as Record<string, unknown>;
+				delete frame.recipients;
+				return frame;
+			},
+		},
+		{
+			name: "new acceptance with malformed recipients",
+			frame(requestId, messageId) {
+				return {
+					...acceptedFrame(requestId, messageId),
+					recipients: ["receiver", 1],
+				};
+			},
+		},
+		{
+			name: "replay containing recipients",
+			frame(requestId, messageId) {
+				const accepted = acceptedFrame(requestId, messageId);
+				return {
+					type: "accepted",
+					requestId,
+					replayed: true,
+					message: accepted.message,
+					recipients: [],
+				};
+			},
+		},
+		{
+			name: "unknown acceptance field",
+			frame(requestId, messageId) {
+				return {
+					...acceptedFrame(requestId, messageId),
+					unexpected: true,
+				};
+			},
+		},
+		{
+			name: "unknown canonical message field",
+			frame(requestId, messageId) {
+				const accepted = acceptedFrame(requestId, messageId);
+				return {
+					...accepted,
+					message: { ...accepted.message, unexpected: true },
+				};
+			},
+		},
+		{
+			name: "canonical message missing attachments",
+			frame(requestId, messageId) {
+				const accepted = acceptedFrame(requestId, messageId);
+				const message = {
+					...accepted.message,
+				} as unknown as Record<string, unknown>;
+				delete message.attachments;
+				return { ...accepted, message };
+			},
+		},
+	];
+
+	for (const [index, malformed] of cases.entries()) {
+		const transport = await startTestTransport();
+		const connecting = A2aConnection.connect({
+			baseUrl: transport.baseUrl,
+			project: "room",
+			name: "api",
+		});
+		const socket = await transport.socket;
+		await transport.frames.next();
+		socket.send(JSON.stringify(claimedFrame("api")));
+		const connection = await connecting;
+		const messageId = `malformed-acceptance-${index}`;
+		const pending = connection.send({
+			target: { type: "project" },
+			text: malformed.name,
+			messageId,
+		});
+		const request = await transport.frames.next();
+		if (request.type !== "message")
+			throw new Error("expected message request for malformed acceptance");
+		socket.send(JSON.stringify(malformed.frame(request.requestId, messageId)));
+		await expect(pending).rejects.toThrow(/accepted/i);
+		socket.terminate();
+		await connection.close();
+	}
+});
+
 test("delivery cleanup is fenced by recipient and sender Presence", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-delivery-cleanup-"));
 	roots.push(dataDir);
@@ -1099,30 +1217,53 @@ test("ACK retries end unknown while terminal failure and sender departure cancel
 	recipient.socket.close();
 });
 
-test("receiver coalesces retry frames and resends its cached terminal outcome", async () => {
+test("receiver retains outcomes and amortizes expiry work across a burst", async () => {
 	const transport = await startTestTransport();
 	const started = Promise.withResolvers<void>();
 	const release = Promise.withResolvers<void>();
 	let injections = 0;
-	const connecting = A2aConnection.connect({
-		baseUrl: transport.baseUrl,
-		project: "room",
-		name: "receiver",
-		events: {
-			async onMessage() {
-				injections += 1;
-				started.resolve();
-				await release.promise;
-			},
-		},
-	});
+	let outcomeEntryVisits = 0;
+	const NativeMap = globalThis.Map;
+	class CountingMap<K, V> extends NativeMap<K, V> {
+		override *[Symbol.iterator]() {
+			for (const entry of super[Symbol.iterator]()) {
+				const value = entry[1];
+				if (
+					typeof value === "object" &&
+					value !== null &&
+					"frame" in value &&
+					"expiresAt" in value
+				) {
+					outcomeEntryVisits += 1;
+				}
+				yield entry;
+			}
+		}
+	}
+	const connecting = (() => {
+		globalThis.Map = CountingMap as MapConstructor;
+		try {
+			return A2aConnection.connect({
+				baseUrl: transport.baseUrl,
+				project: "room",
+				name: "receiver",
+				events: {
+					async onMessage() {
+						injections += 1;
+						started.resolve();
+						await release.promise;
+					},
+				},
+			});
+		} finally {
+			globalThis.Map = NativeMap;
+		}
+	})();
 	const socket = await transport.socket;
 	await transport.frames.next();
 	socket.send(JSON.stringify(claimedFrame("receiver")));
 	const connection = await connecting;
 	const accepted = acceptedFrame("unused", "deduplicated-message");
-	if (accepted.type !== "accepted")
-		throw new Error("expected accepted fixture");
 	const retryFrame: ServerFrame = {
 		type: "message",
 		message: accepted.message,
@@ -1146,6 +1287,36 @@ test("receiver coalesces retry frames and resends its cached terminal outcome", 
 		messageId: "deduplicated-message",
 	});
 	expect(injections).toBe(1);
+	const laterMessageCount = 512;
+	for (let index = 0; index < laterMessageCount; index += 1) {
+		const sequence = index + 2;
+		socket.send(
+			JSON.stringify({
+				type: "message",
+				message: {
+					...accepted.message,
+					messageId: `later-message-${index}`,
+					messageRef: `room:${sequence}`,
+					sequence,
+					createdAt: sequence,
+				},
+			}),
+		);
+	}
+	for (let index = 0; index < laterMessageCount; index += 1) {
+		expect(await transport.frames.next()).toEqual({
+			type: "delivered",
+			messageId: `later-message-${index}`,
+		});
+	}
+	expect(injections).toBe(laterMessageCount + 1);
+	expect(outcomeEntryVisits).toBeLessThanOrEqual(laterMessageCount * 2);
+	socket.send(JSON.stringify(retryFrame));
+	expect(await transport.frames.next()).toEqual({
+		type: "delivered",
+		messageId: "deduplicated-message",
+	});
+	expect(injections).toBe(laterMessageCount + 1);
 	const closing = connection.close();
 	expect(await transport.frames.next()).toEqual({ type: "goodbye" });
 	socket.send(JSON.stringify({ type: "goodbye" }));

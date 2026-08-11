@@ -69,7 +69,7 @@ Repeating an accepted request with the same `messageId` and content returns the 
 
 ### Delivery
 
-Receiving extensions process Messages serially in Hub-assigned Project sequence, materialize all attachments, and inject each OMP message through `steer` delivery. Retries of one `messageId` are coalesced with the original in-flight injection or a short-lived bounded outcome cache, so they resend the same `delivered` or `delivery_failed` result without injecting twice. `delivery_failed` is terminal and is not classified by matching error text.
+Receiving extensions process Messages serially in Hub-assigned Project sequence, materialize all attachments, and inject each OMP message through `steer` delivery. Retries of one `messageId` are coalesced with the original in-flight injection or a 10-second terminal outcome cache, so they resend the same `delivered` or `delivery_failed` result without injecting twice. `delivery_failed` is terminal and is not classified by matching error text.
 
 The sender receives `delivered`, `failed`, `disconnected`, or `unknown` for each selected Presence. `failed` means the receiver explicitly reported that materialization or injection failed. `disconnected` means the selected Presence left. `unknown` means the finite retry budget ended without a conclusive receiver result—for example, after repeated ACK timeouts or transport writes whose dispatch outcome could not be established. Delivery still proves neither model understanding nor task completion.
 

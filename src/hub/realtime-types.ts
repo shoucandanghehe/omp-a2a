@@ -5,7 +5,6 @@ export const DELIVERY_MAX_ATTEMPTS = 3;
 export const DELIVERY_ACKNOWLEDGE_TIMEOUT_MS = 2_000;
 export const DELIVERY_RETRY_DELAY_MS = 100;
 export const DELIVERY_OUTCOME_CACHE_TTL_MS = 10_000;
-export const DELIVERY_OUTCOME_CACHE_MAX = 512;
 
 export type Peer = {
 	name: string;

@@ -43,11 +43,11 @@ test("messages form one immutable sequence per Project", () => {
 	});
 
 	expect(first).toMatchObject({
-		inserted: true,
+		replayed: false,
 		message: { sequence: 1, messageRef: "billing:1" },
 	});
 	expect(second).toMatchObject({
-		inserted: true,
+		replayed: false,
 		message: { sequence: 2, messageRef: "billing:2", replyTo: "billing:1" },
 	});
 	expect(
@@ -65,7 +65,7 @@ test("messages form one immutable sequence per Project", () => {
 		attachments: [],
 		createdAt: 999,
 	});
-	expect(repeated).toEqual({ inserted: false, message: first.message });
+	expect(repeated).toEqual({ replayed: true, message: first.message });
 	expect(() =>
 		store.append({
 			messageId: "message-1",
@@ -298,7 +298,7 @@ test("attachment content participates in messageId idempotency", () => {
 			from: { name: "api", presenceId: "replacement-presence" },
 			createdAt: 200,
 		}),
-	).toEqual({ inserted: false, message: first.message });
+	).toEqual({ replayed: true, message: first.message });
 	expect(() =>
 		store.append({
 			...draft,

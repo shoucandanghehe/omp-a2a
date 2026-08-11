@@ -74,7 +74,7 @@ The client waits 15 seconds by default for `accepted` or request-scoped `error`.
 
 The Hub owns exactly one in-memory pending record per `(messageId, recipientPresenceId)`. It stores the original sender socket, original recipient socket and Presence, attempt count, one timer, and a terminal guard. A WebSocket write callback error or delivery ACK timeout retries the same frame only while that socket still owns that Presence. The default policy permits three attempts, with a two-second ACK window and a fixed 100 ms transport-error delay.
 
-Receiver `A2aConnection` coalesces duplicate `messageId` frames with one in-flight Promise or a terminal outcome cache retained for 10 seconds and capped at 512 entries. Project sequence order remains serial, `onMessage` runs once, and each retry re-sends the cached `delivered` or `delivery_failed` frame. `delivery_failed` is terminal; no error-string retry classification exists.
+Receiver `A2aConnection` coalesces duplicate `messageId` frames with one in-flight Promise or a terminal outcome cache retained for 10 seconds. Project sequence order remains serial, `onMessage` runs once, and each retry re-sends the cached `delivered` or `delivery_failed` frame. `delivery_failed` is terminal; no error-string retry classification exists.
 
 `delivered` proves attachment materialization and injection into the receiving OMP extension. `failed` records an explicit terminal receiver failure. `disconnected` means the bound recipient Presence left. `unknown` means the finite attempt budget ended without a conclusive ACK or the transport write dispatch result remained uncertain. None proves model comprehension or task completion.
 
