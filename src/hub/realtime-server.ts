@@ -156,9 +156,9 @@ export class RealtimeHub {
 		if (value.type === "goodbye") {
 			if (!isExactGoodbyeFrame(value))
 				throw new Error("goodbye frame must contain only type");
-			this.#send(socket, { type: "goodbye" });
 			this.#departed.add(socket);
 			this.#release(socket, "connection_closed");
+			this.#send(socket, { type: "goodbye" });
 			this.#closeAfterGoodbye(socket);
 			return;
 		}
