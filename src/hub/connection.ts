@@ -3,6 +3,7 @@ import { encodeTextPayload } from "./payload";
 import {
 	A2A_PROTOCOL_VERSION,
 	type AcceptedMessage,
+	isExactGoodbyeFrame,
 	type ClientFrame,
 	type DeliveryEvent,
 	type MessageRequestTarget,
@@ -12,6 +13,24 @@ import {
 } from "./realtime-types";
 import type { EncodedAttachment } from "./types";
 
+const HANDSHAKE_TIMEOUT_MS = 5_000;
+const MESSAGE_TIMEOUT_MS = 15_000;
+const GOODBYE_TIMEOUT_MS = 1_000;
+const CLOSE_TIMEOUT_MS = 2_000;
+
+function boundedTimeout(
+	value: number | undefined,
+	maximumMs: number,
+	name: string,
+): number {
+	if (value === undefined) return maximumMs;
+	if (!Number.isFinite(value) || value <= 0)
+		throw new Error(`${name} must be a finite positive number`);
+	if (value > maximumMs)
+		throw new Error(`${name} must not exceed ${maximumMs}ms`);
+	return value;
+}
+
 function deliveryFailureMessage(error: unknown): string {
 	const message = error instanceof Error ? error.message : String(error);
 	if (Buffer.byteLength(message, "utf8") <= 512)
@@ -20,6 +39,12 @@ function deliveryFailureMessage(error: unknown): string {
 		.subarray(0, 512)
 		.toString("utf8")
 		.replace(/\uFFFD$/, "");
+}
+
+function unknownMessageOutcome(reason: string): Error {
+	return new Error(
+		`A2A message acceptance and Delivery outcomes are unknown because ${reason}`,
+	);
 }
 
 export type A2aConnectionEvents = {
@@ -37,6 +62,9 @@ export type A2aConnectionEvents = {
 type PendingRequest = {
 	resolve: (result: AcceptedMessage) => void;
 	reject: (error: Error) => void;
+	timer: NodeJS.Timeout;
+	signal?: AbortSignal;
+	onAbort?: () => void;
 };
 
 export class A2aConnection {
@@ -49,21 +77,32 @@ export class A2aConnection {
 	#events: A2aConnectionEvents;
 	#ready: Promise<void>;
 	#resolveReady!: () => void;
-	#rejectReady!: (error: Error) => void;
+	#rejectReady!: (reason?: unknown) => void;
 	#closed: Promise<void>;
 	#resolveClosed!: () => void;
+	#closePromise: Promise<void> | null = null;
+	#resolveGoodbyeWait: (() => void) | null = null;
+	#goodbyeTimeoutMs: number;
+	#closeTimeoutMs: number;
 	#manualClose = false;
 	#messageQueue = Promise.resolve();
+	#handshakeAborted = false;
+	#handshakeAbortReason: unknown;
+	#closeFinalized = false;
 
 	private constructor(
 		baseUrl: string,
 		project: string,
 		name: string,
 		events: A2aConnectionEvents,
+		goodbyeTimeoutMs: number,
+		closeTimeoutMs: number,
 	) {
 		this.#project = project;
 		this.#name = name;
 		this.#events = events;
+		this.#goodbyeTimeoutMs = goodbyeTimeoutMs;
+		this.#closeTimeoutMs = closeTimeoutMs;
 		this.#ready = new Promise<void>((resolve, reject) => {
 			this.#resolveReady = resolve;
 			this.#rejectReady = reject;
@@ -90,20 +129,9 @@ export class A2aConnection {
 			this.#events.onError?.(failure);
 			if (!this.#self) this.#rejectReady(failure);
 		});
-		this.#socket.on("close", (code, reason) => {
-			const failure = new Error(
-				`A2A connection closed (${code}): ${reason.toString() || "no reason"}`,
-			);
-			if (!this.#self) this.#rejectReady(failure);
-			for (const pending of this.#pending.values()) pending.reject(failure);
-			this.#pending.clear();
-			this.#events.onClose?.({
-				manual: this.#manualClose,
-				code,
-				reason: reason.toString(),
-			});
-			this.#resolveClosed();
-		});
+		this.#socket.on("close", (code, reason) =>
+			this.#finalizeClose(code, reason.toString()),
+		);
 	}
 
 	static async connect(options: {
@@ -111,15 +139,66 @@ export class A2aConnection {
 		project: string;
 		name: string;
 		events?: A2aConnectionEvents;
+		signal?: AbortSignal;
+		timeoutMs?: number;
+		goodbyeTimeoutMs?: number;
+		closeTimeoutMs?: number;
 	}): Promise<A2aConnection> {
+		if (options.signal?.aborted) throw options.signal.reason;
+		const handshakeTimeoutMs = boundedTimeout(
+			options.timeoutMs,
+			HANDSHAKE_TIMEOUT_MS,
+			"timeoutMs",
+		);
+		const goodbyeTimeoutMs = boundedTimeout(
+			options.goodbyeTimeoutMs,
+			GOODBYE_TIMEOUT_MS,
+			"goodbyeTimeoutMs",
+		);
+		const closeTimeoutMs = boundedTimeout(
+			options.closeTimeoutMs,
+			CLOSE_TIMEOUT_MS,
+			"closeTimeoutMs",
+		);
 		const connection = new A2aConnection(
 			options.baseUrl,
 			options.project,
 			options.name,
 			options.events ?? {},
+			goodbyeTimeoutMs,
+			closeTimeoutMs,
 		);
-		await connection.#ready;
-		return connection;
+		const timeoutMs = handshakeTimeoutMs;
+		let timer: NodeJS.Timeout | undefined;
+		let onAbort: (() => void) | undefined;
+		const failed = new Promise<never>((_, reject) => {
+			timer = setTimeout(
+				() => reject(new Error(`A2A handshake timed out after ${timeoutMs}ms`)),
+				timeoutMs,
+			);
+			if (options.signal) {
+				onAbort = () => {
+					connection.#handshakeAborted = true;
+					connection.#handshakeAbortReason = options.signal?.reason;
+					reject(connection.#handshakeAbortReason);
+				};
+				options.signal.addEventListener("abort", onAbort, { once: true });
+			}
+		});
+		try {
+			await Promise.race([connection.#ready, failed]);
+			return connection;
+		} catch (error) {
+			connection.#manualClose = true;
+			if (connection.#socket.readyState !== WebSocket.CLOSED)
+				connection.#socket.terminate();
+			await connection.#waitForClose();
+			throw error;
+		} finally {
+			clearTimeout(timer);
+			if (options.signal && onAbort)
+				options.signal.removeEventListener("abort", onAbort);
+		}
 	}
 
 	get project(): string {
@@ -141,39 +220,160 @@ export class A2aConnection {
 		);
 	}
 
-	send(options: {
-		target: MessageRequestTarget;
-		text: string;
-		attachments?: EncodedAttachment[];
-		replyTo?: string;
-		messageId?: string;
-	}): Promise<AcceptedMessage> {
-		const requestId = crypto.randomUUID();
-		const messageId = options.messageId ?? crypto.randomUUID();
+	send(
+		options: {
+			target: MessageRequestTarget;
+			text: string;
+			attachments?: EncodedAttachment[];
+			replyTo?: string;
+			messageId?: string;
+		},
+		request: { signal?: AbortSignal; timeoutMs?: number } = {},
+	): Promise<AcceptedMessage> {
+		if (this.#closePromise)
+			return Promise.reject(new Error("A2A connection is closing"));
+		if (request.signal?.aborted)
+			return Promise.reject(
+				new Error("A2A message request aborted before dispatch"),
+			);
 		return new Promise<AcceptedMessage>((resolve, reject) => {
-			this.#pending.set(requestId, { resolve, reject });
-			try {
-				this.#send({
-					type: "message",
+			const timeoutMs = boundedTimeout(
+				request.timeoutMs,
+				MESSAGE_TIMEOUT_MS,
+				"timeoutMs",
+			);
+			const requestId = crypto.randomUUID();
+			const messageId = options.messageId ?? crypto.randomUUID();
+			const frame: ClientFrame = {
+				type: "message",
+				requestId,
+				messageId,
+				target: options.target,
+				payload: encodeTextPayload(options.text),
+				attachments: options.attachments ?? [],
+				replyTo: options.replyTo,
+			};
+			const timer = setTimeout(() => {
+				this.#rejectPending(
 					requestId,
-					messageId,
-					target: options.target,
-					payload: encodeTextPayload(options.text),
-					attachments: options.attachments ?? [],
-					replyTo: options.replyTo,
+					unknownMessageOutcome(
+						`the Hub did not reply within ${timeoutMs}ms after dispatch`,
+					),
+				);
+			}, timeoutMs);
+			const pending: PendingRequest = {
+				resolve,
+				reject,
+				timer,
+				signal: request.signal,
+			};
+			if (request.signal) {
+				pending.onAbort = () =>
+					this.#rejectPending(
+						requestId,
+						unknownMessageOutcome("the caller aborted after dispatch"),
+					);
+				request.signal.addEventListener("abort", pending.onAbort, {
+					once: true,
 				});
+			}
+			this.#pending.set(requestId, pending);
+			try {
+				this.#send(frame);
 			} catch (error) {
-				this.#pending.delete(requestId);
-				reject(error instanceof Error ? error : new Error(String(error)));
+				this.#rejectPending(
+					requestId,
+					error instanceof Error ? error : new Error(String(error)),
+				);
 			}
 		});
 	}
 
 	close(): Promise<void> {
 		this.#manualClose = true;
-		if (this.#socket.readyState === WebSocket.CLOSED) return Promise.resolve();
-		this.#socket.close(1000, "client disconnect");
-		return this.#closed;
+		this.#closePromise ??= this.#performClose();
+		return this.#closePromise;
+	}
+
+	async #performClose(): Promise<void> {
+		if (this.#socket.readyState === WebSocket.CLOSED)
+			return await this.#waitForClose();
+		if (!this.#self || this.#socket.readyState !== WebSocket.OPEN) {
+			this.#socket.terminate();
+			return await this.#waitForClose();
+		}
+
+		try {
+			this.#send({ type: "goodbye" });
+			await new Promise<void>((resolve) => {
+				let settled = false;
+				const finish = () => {
+					if (settled) return;
+					settled = true;
+					clearTimeout(timer);
+					this.#resolveGoodbyeWait = null;
+					resolve();
+				};
+				const timer = setTimeout(finish, this.#goodbyeTimeoutMs);
+				this.#resolveGoodbyeWait = finish;
+			});
+		} catch {
+			this.#resolveGoodbyeWait = null;
+		}
+
+		if (this.#socket.readyState === WebSocket.OPEN)
+			this.#socket.close(1000, "client disconnect");
+		return await this.#waitForClose();
+	}
+
+	async #waitForClose(): Promise<void> {
+		if (this.#closeFinalized) return await this.#closed;
+		let closeTimer: NodeJS.Timeout | undefined;
+		await Promise.race([
+			this.#closed,
+			new Promise<void>((resolve) => {
+				closeTimer = setTimeout(() => {
+					const reason = `WebSocket close timed out after ${this.#closeTimeoutMs}ms`;
+					try {
+						this.#finalizeClose(1006, reason);
+					} finally {
+						if (this.#socket.readyState !== WebSocket.CLOSED)
+							this.#socket.terminate();
+						resolve();
+					}
+				}, this.#closeTimeoutMs);
+			}),
+		]);
+		clearTimeout(closeTimer);
+		return await this.#closed;
+	}
+
+	#finalizeClose(code: number, reason: string): void {
+		if (this.#closeFinalized) return;
+		this.#closeFinalized = true;
+		const failure = unknownMessageOutcome(
+			`the WebSocket closed (${code}: ${reason || "no reason"}) before the Hub replied`,
+		);
+		if (!this.#self)
+			this.#rejectReady(
+				this.#handshakeAborted
+					? this.#handshakeAbortReason
+					: new Error(
+							`A2A connection closed (${code}): ${reason || "no reason"}`,
+						),
+			);
+		for (const requestId of this.#pending.keys())
+			this.#rejectPending(requestId, failure);
+		this.#resolveGoodbyeWait?.();
+		try {
+			this.#events.onClose?.({
+				manual: this.#manualClose,
+				code,
+				reason,
+			});
+		} finally {
+			this.#resolveClosed();
+		}
 	}
 
 	#handleFrame(frame: ServerFrame): void {
@@ -184,6 +384,15 @@ export class A2aConnection {
 					frame.peers.map((peer) => [peer.presenceId, peer]),
 				);
 				this.#resolveReady();
+				return;
+			case "goodbye":
+				if (!isExactGoodbyeFrame(frame)) {
+					this.#events.onError?.(
+						new Error("A2A goodbye frame must contain only type"),
+					);
+					return;
+				}
+				this.#resolveGoodbyeWait?.();
 				return;
 			case "presence_joined":
 				this.#peers.set(frame.peer.presenceId, frame.peer);
@@ -215,9 +424,8 @@ export class A2aConnection {
 				);
 				return;
 			case "accepted": {
-				const pending = this.#pending.get(frame.requestId);
+				const pending = this.#takePending(frame.requestId);
 				if (!pending) return;
-				this.#pending.delete(frame.requestId);
 				pending.resolve({
 					message: frame.message,
 					recipients: frame.recipients,
@@ -227,12 +435,8 @@ export class A2aConnection {
 			case "error": {
 				const failure = new Error(`${frame.code}: ${frame.message}`);
 				if (frame.requestId) {
-					const pending = this.#pending.get(frame.requestId);
-					if (pending) {
-						this.#pending.delete(frame.requestId);
-						pending.reject(failure);
-						return;
-					}
+					this.#takePending(frame.requestId)?.reject(failure);
+					return;
 				}
 				if (!this.#self) this.#rejectReady(failure);
 				else this.#events.onError?.(failure);
@@ -263,6 +467,20 @@ export class A2aConnection {
 			}
 			this.#events.onError?.(failure);
 		}
+	}
+
+	#takePending(requestId: string): PendingRequest | undefined {
+		const pending = this.#pending.get(requestId);
+		if (!pending) return undefined;
+		this.#pending.delete(requestId);
+		clearTimeout(pending.timer);
+		if (pending.signal && pending.onAbort)
+			pending.signal.removeEventListener("abort", pending.onAbort);
+		return pending;
+	}
+
+	#rejectPending(requestId: string, error: Error): void {
+		this.#takePending(requestId)?.reject(error);
 	}
 
 	#send(frame: ClientFrame): void {

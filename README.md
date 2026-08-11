@@ -32,15 +32,16 @@ A persistent chat room. Project deletion removes its complete message history an
 
 ### Presence
 
-A Presence exists if and only if its WebSocket is alive.
+A Presence starts when the Hub accepts `hello` and ends through one Hub-owned release path.
 
 - A connection claims one name in one Project.
 - Names are unique among current connections in that Project.
-- Closing or timing out the socket immediately removes the Presence and releases the name.
+- Graceful disconnect sends an exact `goodbye`; the Hub queues the acknowledgement, releases Presence, Delivery state, and the name, then starts a bounded WebSocket close/termination sequence. Presence can therefore be absent while transport teardown is still in progress.
+- Transport close and heartbeat timeout use the same idempotent release path for older clients and failed connections.
 - Reusing the same name later creates a different Presence.
 - There is no `offline`, `stale`, durable member record, or offline delivery.
 
-The Hub broadcasts `presence_joined` and `presence_left` events to current peers. These events are realtime-only and never enter history.
+The Hub broadcasts one `presence_joined` and one `presence_left` event per Presence. These events are realtime-only and never enter history.
 
 ### Message
 
@@ -62,11 +63,13 @@ A direct target is bound to the resolved `presenceId`. If it disconnects, the me
 
 An optional Message attachment is an immutable file-content value, not a durable object or a reference back to the sender. The sender Extension snapshots a current-session `local://` regular file before sending. The Hub persists those bytes with the Message, and each receiving Extension materializes its own session-local copy. Attachments share the Message lifecycle and disappear only when the Project is deleted.
 
+The client handshake has a 5-second deadline and supports caller cancellation. The outcome that settles first remains authoritative through socket teardown: the caller's exact abort reason is returned only when cancellation wins, while a later abort cannot replace a timeout, protocol, or transport failure. A message acceptance request has a 15-second deadline and supports caller cancellation. Cancellation before dispatch sends no frame. Once the WebSocket send succeeds, cancellation, timeout, or connection loss reports that acceptance and Delivery outcomes are unknown; the client does not retry, and late acceptance frames are ignored.
+
 ### Delivery
 
 Receiving extensions process Messages serially in Hub-assigned Project sequence, materialize all attachments, and inject each OMP message through `steer` delivery. An idle session starts a turn; a busy session queues the Message into the active turn. The sender receives `delivered`, `failed`, or `disconnected` for each target. A failed materialization or injection reports `failed`; Delivery still proves neither model understanding nor task completion.
 
-Delivery state is realtime and in-memory. ACK never deletes message history.
+Delivery state is realtime and in-memory. Each pending recipient entry remains until that exact Presence reports `delivered` or `failed`, the recipient leaves (reported once as `disconnected`), the sender leaves, or the Hub shuts down. There is no Delivery ACK deadline while both Presences remain connected. ACK never deletes message history.
 
 ### History
 

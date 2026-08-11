@@ -15,7 +15,7 @@ Those mechanics did not match the actual product boundary: independent OMP sessi
 ### Domain model
 
 - A **Project** is a persistent room.
-- A **Presence** exists if and only if one WebSocket is alive. It belongs to one Project and claims one temporary name.
+- A **Presence** starts when the Hub accepts `hello` and ends when the Hub runs its idempotent release path. An exact `goodbye` releases it before the old WebSocket transport necessarily finishes closing; transport close and heartbeat timeout are the fallback release triggers.
 - A **Message** is immutable, receives one monotonically increasing Project sequence, and remains until Project deletion. Optional attachments are immutable file-content values inside the Message, not independently identified objects.
 - A **Delivery** is the in-memory outcome for one selected Presence: `delivered`, `failed`, or `disconnected`.
 
@@ -27,7 +27,7 @@ Direct messaging resolves one current name and binds the target `presenceId`. Pr
 
 Private protocol version `3` reuses the Hub HTTP server:
 
-- WebSocket `/v1/connect` carries handshake, Presence events, Messages with inline attachment content, acknowledgments, and Delivery outcomes.
+- WebSocket `/v1/connect` carries handshake, Presence events, Messages with inline attachment content, acknowledgments, and Delivery outcomes. Failed handshake teardown preserves whichever timeout, protocol, transport, or caller-cancellation outcome settled first.
 - HTTP carries Hub metadata, Project administration, and explicit history queries.
 - filesystem JSON stores Project metadata;
 - in-memory indexes store Presence and pending delivery;
@@ -53,7 +53,7 @@ Opening a protocol version `2` `messages.sqlite` adds attachment storage and dec
 
 ## Consequences
 
-- Presence state is simple and observable: socket alive means present; socket closed means absent.
+- Presence state is simple and observable: a successfully claimed socket is present until Hub release; graceful release and bounded transport teardown are separate steps.
 - Missing direct recipients fail immediately instead of creating latent work.
 - Hub restart clears Presence and delivery state but preserves message history.
 - `delivered` proves successful attachment materialization and injection into the receiving OMP extension, not model understanding or task completion. Materialization or injection errors produce a terminal `failed` Delivery.
@@ -63,7 +63,7 @@ Opening a protocol version `2` `messages.sqlite` adds attachment storage and dec
 
 ## Verification
 
-The behavior suite and executable smoke scenarios cover duplicate names, immediate Presence removal, direct-target failure, broadcast snapshots, causal replies, non-persistent Presence events, attachment snapshot/materialization/history, failed Delivery, restart persistence, protocol version `2` database migration, legacy Inbox migration, the three-tool model surface, the reduced human command surface, and the Docker HTTP/WebSocket boundary.
+The behavior suite and executable smoke scenarios cover duplicate names, immediate Presence removal, direct-target failure, broadcast snapshots, causal replies, non-persistent Presence events, bounded close termination against TCP-proxied nonresponsive peers, handshake failure precedence during teardown, attachment snapshot/materialization/history, failed Delivery, restart persistence, protocol version `2` database migration, legacy Inbox migration, the three-tool model surface, the reduced human command surface, and the Docker HTTP/WebSocket boundary.
 
 ## Deployment and rollback
 

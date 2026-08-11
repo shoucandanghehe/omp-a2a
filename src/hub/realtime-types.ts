@@ -34,6 +34,19 @@ export function parseMessageRef(reference: string): ParsedMessageRef {
 	return { project, sequence };
 }
 
+export function isExactGoodbyeFrame(
+	value: unknown,
+): value is { type: "goodbye" } {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		!Array.isArray(value) &&
+		Object.keys(value).length === 1 &&
+		"type" in value &&
+		value.type === "goodbye"
+	);
+}
+
 export type Peer = {
 	name: string;
 	presenceId: string;
@@ -97,7 +110,8 @@ export type ClientFrame =
 			replyTo?: string;
 	  }
 	| { type: "delivered"; messageId: string }
-	| { type: "delivery_failed"; messageId: string; error: string };
+	| { type: "delivery_failed"; messageId: string; error: string }
+	| { type: "goodbye" };
 
 export type ServerFrame =
 	| {
@@ -121,4 +135,5 @@ export type ServerFrame =
 	  }
 	| { type: "message"; message: RealtimeMessage }
 	| ({ type: "delivery" } & DeliveryEvent)
+	| { type: "goodbye" }
 	| { type: "error"; code: string; message: string; requestId?: string };

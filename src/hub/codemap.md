@@ -48,13 +48,13 @@ The public `baseUrl` reported in Hub metadata can differ from the listen host. C
 
 ### Handshake
 
-1. A new socket must send `hello` within 5 seconds.
+1. A new socket must send `hello`; the client waits at most 5 seconds by default and may cancel through a caller `AbortSignal`.
 2. The frame supplies protocol version, Project, and temporary name.
 3. The Hub verifies the Project and protocol, then claims the name in `PresenceRegistry`.
 4. The claimant receives `claimed` with a new `presenceId` and current peer snapshot.
 5. Existing peers receive `presence_joined`.
 
-One socket can claim one name. One name can be held by one current socket inside a Project. A duplicate fails with `name_in_use`; it never replaces the owner.
+Handshake failure, timeout, or cancellation terminates the unpublished socket and waits for its close before returning. The first settled handshake outcome remains authoritative through teardown: caller cancellation preserves its exact reason only when abort wins, and a later abort cannot replace a timeout, protocol, or transport failure. Lifecycle timeout overrides must be finite, positive, and no greater than the 5-second handshake, 1-second goodbye, and 2-second close bounds; invalid or over-limit options reject before opening a socket. One socket can claim one name. One name can be held by one current socket inside a Project. A duplicate fails with `name_in_use`; it never replaces the owner.
 
 ### Message request
 
@@ -68,15 +68,19 @@ The client sends `message` with `requestId`, opaque `messageId`, typed target, e
 - The sender receives `accepted` with the canonical message and selected recipient names.
 - Each selected socket receives the canonical `message` frame.
 
+The client waits 15 seconds by default for `accepted` or request-scoped `error`; a timeout override must be finite, positive, and no greater than 15 seconds or it rejects before dispatch. A caller abort before dispatch sends no frame. After `socket.send` succeeds, caller abort, timeout, or transport close reports ordinary error text that acceptance and Delivery outcomes are unknown, removes the request, ignores late replies, and never retries.
+
 ### Delivery
 
-The Hub records selected recipients only in memory. Receiver `delivered` or `delivery_failed` frames resolve the matching `(messageId, recipientPresenceId)` entry and produce a sender Delivery event. If that exact Presence disconnects first, the sender receives `disconnected`.
+The Hub records selected recipients only in memory and fences each entry by sender and recipient `presenceId`. Receiver `delivered` or `delivery_failed` frames resolve the matching `(messageId, recipientPresenceId)` entry and produce one sender Delivery event. If that exact recipient Presence disconnects first, the sender receives `disconnected`; if the sender disconnects first, its entries are deleted silently. Neither case transfers state to a same-named replacement.
 
-`delivered` proves attachment materialization and injection into the receiving OMP extension. `failed` proves that the accepted Message could not be materialized or injected. Neither proves model comprehension or task completion. Delivery state is not history and is never transferred to a same-named replacement socket.
+`delivered` proves attachment materialization and injection into the receiving OMP extension. `failed` proves that the accepted Message could not be materialized or injected. Neither proves model comprehension or task completion. Pending Delivery has no ACK deadline while both Presences stay connected; it remains until receiver result, either Presence leaving, or Hub shutdown.
 
 ### Presence lifetime
 
-`RealtimeHub` pings sockets every 10 seconds. A socket that does not answer the heartbeat is terminated. Close removes the Presence immediately, emits `presence_left`, and resolves its outstanding deliveries as disconnected. Hub shutdown uses the distinct `hub_shutdown` reason.
+Graceful client close sends one exact `goodbye`. The Hub queues its acknowledgement, atomically removes the Presence, cleans related Delivery entries, broadcasts one `presence_left`, and then starts its own bounded transport close/termination. The client waits at most 1 second for the acknowledgement, begins WebSocket close, and terminates after at most another 2 seconds if close stalls. Native close and that deadline enter one idempotent client finalizer for pending requests, the goodbye barrier, `onClose`, and the shared close Promise. A deadline with no native close reports abnormal code `1006` and its timeout reason; any later native close is ignored. Presence release is distinct from transport teardown, so the name can be reused while the old socket is still closing. Concurrent close calls share this one flow. An unpublished socket terminates directly.
+
+Legacy transport close and heartbeat timeout enter the same idempotent Hub release path, so a later close callback cannot repeat Presence or Delivery events. Hub shutdown clears all remaining Presence and Delivery state with the distinct `hub_shutdown` reason.
 
 Presence events are realtime-only and never enter `MessageStore`.
 
@@ -162,11 +166,11 @@ Stop closes realtime clients, the HTTP server, message storage, metadata files, 
 
 ## Test coverage
 
-- `hub-realtime.test.ts`: Presence lifetime, duplicate names, direct/broadcast snapshots, Delivery outcomes, attachment persistence, and restart.
+- `hub-realtime.test.ts`: bounded/cancellable handshake with winning-failure preservation, maximum-validated timeout overrides, exact goodbye frames, separately bounded client/server teardown against normal and TCP-proxied nonresponsive peers, concurrent close, Presence release and name reuse before transport teardown, message request cancellation/timeout and late replies, rejected encoding failures, Delivery outcomes and disconnect cleanup, attachment persistence, and restart.
 - `message-store.test.ts`: ordering, attachment-aware idempotency, causal references, filters, protocol version `2`/legacy migration, integrity, and deletion.
 - `hub-control.test.ts`: independent Hubs, Project control, active-Presence deletion rejection, and safe name reuse.
 - `payload.test.ts`: text/binary compression, attachment count, and decoded-size enforcement.
-- `operations.test.ts`: client/runtime integration plus successful and failed Delivery callbacks.
+- `operations.test.ts`: client/runtime integration, HTTP caller cancellation, pre-dispatch message cancellation, and successful/failed Delivery callbacks.
 - `hub-client.test.ts`: HTTP header/body deadlines, caller cancellation, error preservation, successful-response decoding, probe classification, and history wire validation.
 
 See `scripts/codemap.md` for executable boundary scenarios.

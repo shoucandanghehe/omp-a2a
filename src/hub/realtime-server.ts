@@ -12,6 +12,7 @@ import { NameInUseError, type Presence, PresenceRegistry } from "./presence";
 import {
 	A2A_PROTOCOL_VERSION,
 	type ClientFrame,
+	isExactGoodbyeFrame,
 	type MessageTarget,
 	type ServerFrame,
 } from "./realtime-types";
@@ -20,6 +21,7 @@ const MAX_FRAME_BYTES = 6 * 1024 * 1024;
 const HEARTBEAT_MS = 10_000;
 const HELLO_TIMEOUT_MS = 5_000;
 const MAX_DELIVERY_ERROR_BYTES = 512;
+const GOODBYE_CLOSE_TIMEOUT_MS = 2_000;
 
 class RecipientNotPresentError extends Error {}
 
@@ -42,6 +44,7 @@ export class RealtimeHub {
 		"connection_closed" | "heartbeat_timeout" | "hub_shutdown"
 	>();
 	#pendingDeliveries = new Map<string, PendingDelivery>();
+	#departed = new WeakSet<WebSocket>();
 	#heartbeat: NodeJS.Timeout;
 	#upgradeHandler: (
 		request: IncomingMessage,
@@ -123,17 +126,9 @@ export class RealtimeHub {
 		socket.once("close", () => {
 			clearTimeout(helloTimeout);
 			this.#alive.delete(socket);
-			const presence = this.#presences.remove(socket);
-			if (!presence) return;
-			this.#failDeliveriesFor(presence);
-			if (!this.#closing) {
-				this.#broadcast(presence.project, presence.presenceId, {
-					type: "presence_left",
-					peer: { name: presence.name, presenceId: presence.presenceId },
-					reason: this.#closeReasons.get(socket) ?? "connection_closed",
-				});
-			}
+			const reason = this.#closeReasons.get(socket) ?? "connection_closed";
 			this.#closeReasons.delete(socket);
+			this.#release(socket, reason);
 		});
 	}
 
@@ -146,6 +141,8 @@ export class RealtimeHub {
 		) {
 			throw new Error("frame type is required");
 		}
+		if (this.#departed.has(socket))
+			throw new Error("connection has already left its Presence");
 		const claimed = this.#presences.getBySocket(socket);
 		if (!claimed) {
 			if (value.type !== "hello")
@@ -154,6 +151,15 @@ export class RealtimeHub {
 				socket,
 				value as Partial<Extract<ClientFrame, { type: "hello" }>>,
 			);
+			return;
+		}
+		if (value.type === "goodbye") {
+			if (!isExactGoodbyeFrame(value))
+				throw new Error("goodbye frame must contain only type");
+			this.#departed.add(socket);
+			this.#release(socket, "connection_closed");
+			this.#send(socket, { type: "goodbye" });
+			this.#closeAfterGoodbye(socket);
 			return;
 		}
 		if (value.type === "message") {
@@ -349,7 +355,7 @@ export class RealtimeHub {
 		if (typeof messageId !== "string") throw new Error("messageId is required");
 		const key = `${messageId}:${presence.presenceId}`;
 		const pending = this.#pendingDeliveries.get(key);
-		if (!pending) throw new Error(`unknown delivery: ${messageId}`);
+		if (!pending) return;
 		this.#pendingDeliveries.delete(key);
 		const sender = this.#presences
 			.connections(presence.project)
@@ -373,13 +379,24 @@ export class RealtimeHub {
 		});
 	}
 
-	#failDeliveriesFor(presence: Presence): void {
+	#release(
+		socket: WebSocket,
+		reason: "connection_closed" | "heartbeat_timeout" | "hub_shutdown",
+	): Presence | null {
+		const presence = this.#presences.remove(socket);
+		if (!presence) return null;
 		for (const [key, pending] of this.#pendingDeliveries) {
+			if (pending.senderPresenceId === presence.presenceId) {
+				this.#pendingDeliveries.delete(key);
+				continue;
+			}
 			if (pending.recipientPresenceId !== presence.presenceId) continue;
 			this.#pendingDeliveries.delete(key);
 			const sender = this.#presences
 				.connections(presence.project)
-				.find((candidate) => candidate.presenceId === pending.senderPresenceId);
+				.find(
+					(candidate) => candidate.presenceId === pending.senderPresenceId,
+				);
 			if (sender) {
 				this.#send(sender.socket, {
 					type: "delivery",
@@ -389,6 +406,14 @@ export class RealtimeHub {
 				});
 			}
 		}
+		if (!this.#closing) {
+			this.#broadcast(presence.project, presence.presenceId, {
+				type: "presence_left",
+				peer: { name: presence.name, presenceId: presence.presenceId },
+				reason,
+			});
+		}
+		return presence;
 	}
 
 	#broadcast(
@@ -400,6 +425,16 @@ export class RealtimeHub {
 			if (presence.presenceId !== excludedPresenceId)
 				this.#send(presence.socket, frame);
 		}
+	}
+
+	#closeAfterGoodbye(socket: WebSocket): void {
+		socket.close(1000, "goodbye acknowledged");
+		const terminateTimer = setTimeout(
+			() => socket.terminate(),
+			GOODBYE_CLOSE_TIMEOUT_MS,
+		);
+		terminateTimer.unref();
+		socket.once("close", () => clearTimeout(terminateTimer));
 	}
 
 	#send(socket: WebSocket, frame: ServerFrame): void {
