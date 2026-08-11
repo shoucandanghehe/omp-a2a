@@ -127,7 +127,7 @@ Reusing `messageId` with the same Project, sender name, target kind/name, text e
 
 `messages.sqlite` carries `MESSAGE_STORAGE_VERSION`, which is independent of `A2A_PROTOCOL_VERSION`. A new database creates both current tables, the sender-history index, and the storage version in one transaction.
 
-Opening an existing database requires both the exact current storage version and the complete required schema. Any mismatch fails startup with `unsupported pre-release storage; start with an empty data directory`; no column detection, `ALTER TABLE`, backfill, import, or fallback runs. Pre-0.1 `inbox.sqlite` is never opened or detected and remains untouched.
+Opening an existing database requires the exact current storage version and the complete, exclusive set of current non-internal tables and indexes. Any missing, changed, or unexpected schema object fails startup with `unsupported pre-release storage; start with an empty data directory`; no schema conversion or fallback runs. SQLite-owned autoindexes remain valid.
 
 ## Payload codec
 
@@ -162,7 +162,7 @@ Stop closes realtime clients, the HTTP server, message storage, metadata files, 
 
 - `hub-realtime.test.ts`: Presence lifetime, duplicate names, direct/broadcast snapshots, Delivery outcomes, attachment persistence, and restart.
 - `message-store.test.ts`: ordering, attachment-aware idempotency, causal references, filters, current schema creation/reopen, fail-closed schema guards, and deletion.
-- `hub-control.test.ts`: independent Hubs, Project control, active-Presence deletion rejection, safe name reuse, storage startup rejection, and ignored pre-0.1 Inbox files.
+- `hub-control.test.ts`: independent Hubs, Project control, active-Presence deletion rejection, safe name reuse, and storage startup rejection.
 - `payload.test.ts`: text/binary compression, attachment count, and decoded-size enforcement.
 - `operations.test.ts`: client/runtime integration plus successful and failed Delivery callbacks.
 

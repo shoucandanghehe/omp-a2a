@@ -43,13 +43,9 @@ Humans administer Projects and their own connection through `/a2a`. Models recei
 
 Repository configuration uses `name` and `autoConnect`. Removed `agentId` and `autoJoin` fields fail with an explicit migration error.
 
-### Legacy migration
+### Storage schema
 
-On first start, ordinary rows from the old `inbox.sqlite` message ledger are copied into a new database in deterministic `(project, created_at, msg_id)` order. Pending rows become history only. Member records, cursor state, ACKs, delivery receipts, and offline-delivery semantics are intentionally discarded.
-
-Migration runs transactionally in the new database, validates the imported count and `PRAGMA integrity_check`, and does not mutate the old database.
-
-Opening a protocol version `2` `messages.sqlite` adds attachment storage and decoded-content accounting in place. Existing Messages migrate to an empty attachment list without changing their sequence, reference, text, target, or causal parent.
+`messages.sqlite` has an independent storage version. New storage creates the complete current schema atomically. Existing storage must contain exactly the current version and non-internal schema objects; startup fails closed rather than converting an incompatible database.
 
 ## Consequences
 
@@ -58,13 +54,13 @@ Opening a protocol version `2` `messages.sqlite` adds attachment storage and dec
 - Hub restart clears Presence and delivery state but preserves message history.
 - `delivered` proves successful attachment materialization and injection into the receiving OMP extension, not model understanding or task completion. Materialization or injection errors produce a terminal `failed` Delivery.
 - Direct routing is not confidential history. Without accounts and authorization, any trusted current Agent can query Project history.
-- Hub and extension must upgrade together because protocol version `3` has no compatibility path for version `2` Message frames.
+- Hub and extension must upgrade together because the private wire protocol requires an exact version match.
 - Project metadata deletion and SQLite history deletion remain separate operations; interrupted deletion requires operator inspection before name reuse.
 
 ## Verification
 
-The behavior suite and executable smoke scenarios cover duplicate names, immediate Presence removal, direct-target failure, broadcast snapshots, causal replies, non-persistent Presence events, attachment snapshot/materialization/history, failed Delivery, restart persistence, protocol version `2` database migration, legacy Inbox migration, the three-tool model surface, the reduced human command surface, and the Docker HTTP/WebSocket boundary.
+The behavior suite and executable smoke scenarios cover duplicate names, immediate Presence removal, direct-target failure, broadcast snapshots, causal replies, non-persistent Presence events, attachment snapshot/materialization/history, failed Delivery, restart persistence, exact current storage guards, the three-tool model surface, the reduced human command surface, and the Docker HTTP/WebSocket boundary.
 
-## Deployment and rollback
+## Deployment
 
-The old and new protocols must not run concurrently. Deployment preserves a consistent pre-upgrade data backup and upgrades Hub plus extension together. Rollback restores both the old image and its matching pre-upgrade data; rolling back only one side creates a protocol mismatch.
+Deploy matching Hub and extension versions together. If persistent storage does not have the exact current schema and storage version, initialize an empty data directory instead of converting it.

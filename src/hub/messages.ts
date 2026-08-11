@@ -313,17 +313,21 @@ export class MessageStore {
 
 	#initializeSchema(): void {
 		this.#database.transaction(() => {
-			const tables = this.#database
-				.query<{ name: string }, []>(
-					"SELECT name FROM sqlite_schema WHERE type = 'table' AND name NOT LIKE 'sqlite_%' ORDER BY name",
+			const schema = this.#database
+				.query<{ type: string; name: string; sql: string | null }, []>(
+					"SELECT type, name, sql FROM sqlite_schema WHERE name NOT GLOB 'sqlite_*' ORDER BY type, name",
 				)
 				.all()
-				.map((row) => row.name);
+				.map(({ type, name, sql }) => ({
+					type,
+					name,
+					sql: normalizeSchema(sql ?? ""),
+				}));
 			const version =
 				this.#database
 					.query<{ user_version: number }, []>("PRAGMA user_version")
 					.get()?.user_version ?? 0;
-			if (tables.length === 0 && version === 0) {
+			if (schema.length === 0 && version === 0) {
 				this.#database.run(PROJECT_SEQUENCES_SCHEMA);
 				this.#database.run(MESSAGES_SCHEMA);
 				this.#database.run(MESSAGES_PROJECT_SENDER_INDEX_SCHEMA);
@@ -334,31 +338,11 @@ export class MessageStore {
 			}
 			if (
 				version !== MESSAGE_STORAGE_VERSION ||
-				!this.#hasCurrentSchema(tables)
+				JSON.stringify(schema) !== JSON.stringify(CURRENT_SCHEMA)
 			) {
 				throw new Error(UNSUPPORTED_STORAGE_MESSAGE);
 			}
 		})();
-	}
-
-	#hasCurrentSchema(tables: string[]): boolean {
-		if (
-			JSON.stringify(tables) !==
-			JSON.stringify(["messages", "project_sequences"])
-		) {
-			return false;
-		}
-		const schema = this.#database
-			.query<{ type: string; name: string; sql: string | null }, []>(
-				"SELECT type, name, sql FROM sqlite_schema WHERE name IN ('messages', 'project_sequences', 'messages_project_sender') ORDER BY type, name",
-			)
-			.all()
-			.map(({ type, name, sql }) => ({
-				type,
-				name,
-				sql: normalizeSchema(sql ?? ""),
-			}));
-		return JSON.stringify(schema) === JSON.stringify(CURRENT_SCHEMA);
 	}
 
 	#resolveReply(project: string, replyTo: string | undefined): number | null {

@@ -63,7 +63,7 @@ A same-named later connection is a new Presence and never inherits pending deliv
 - Direct messages are bound to the resolved `presenceId`; Project broadcasts freeze their recipient snapshot at acceptance.
 - History is append-only until Project deletion. Presence and delivery events are not persisted.
 - Attachments are ordered immutable values inside a Message. Their names and bytes participate in `messageId` idempotency; they share the Message lifecycle.
-- `messages.sqlite` has an independent storage version. Startup accepts only the exact current version and required schema; pre-0.1 storage is unsupported, and old `inbox.sqlite` files are ignored without modification.
+- `messages.sqlite` has an independent storage version. Startup accepts only the exact current version and complete set of current non-internal schema objects; unsupported storage fails closed.
 
 ### Payload contract
 

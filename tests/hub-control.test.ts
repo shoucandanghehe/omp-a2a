@@ -1,6 +1,6 @@
 import { Database } from "bun:sqlite";
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HubClient } from "../src/hub/client";
@@ -47,16 +47,6 @@ test("configured Hub URL remains authoritative over advertised metadata", async 
 	await connection.close();
 });
 
-test("Hub ignores unreleased Inbox storage", async () => {
-	const root = dataDir();
-	const inboxPath = join(root, "inbox.sqlite");
-	const original = Buffer.from("unsupported pre-release Inbox storage");
-	writeFileSync(inboxPath, original);
-
-	const hub = await startHubServer({ port: 0, dataDir: root });
-	hubs.push(hub);
-	expect(readFileSync(inboxPath)).toEqual(original);
-});
 
 test("Hub rejects unsupported message storage before listening", async () => {
 	const root = dataDir();

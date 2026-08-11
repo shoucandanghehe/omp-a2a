@@ -280,9 +280,7 @@ Inbound messages are pushed automatically and processed serially in Hub-assigned
 - History uses SQLite WAL with `synchronous = FULL`.
 - The Hub data directory has an exclusive lock; two Hub processes cannot write the same data.
 
-The `messages.sqlite` schema has its own storage version, independent of the wire protocol version. A new database creates the complete current schema and records that version atomically. An existing database must have the exact current storage version and schema or Hub startup fails with `unsupported pre-release storage; start with an empty data directory`.
-
-Pre-0.1 storage is unsupported. The Hub never imports or upgrades it: an old `inbox.sqlite` is ignored and left unchanged, and an old `messages.sqlite` must be replaced by starting with an empty data directory.
+The `messages.sqlite` schema has its own storage version, independent of the wire protocol version. A new database creates the complete current schema and records that version atomically. An existing database must contain exactly the current non-internal tables and index at the current storage version or Hub startup fails with `unsupported pre-release storage; start with an empty data directory`.
 
 ## Verify
 

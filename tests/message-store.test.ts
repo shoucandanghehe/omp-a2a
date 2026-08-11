@@ -211,6 +211,78 @@ test("current storage version rejects an incomplete schema", () => {
 	);
 });
 
+test("current storage version rejects unexpected schema objects", () => {
+	const unexpectedObjects = [
+		{
+			type: "table",
+			sql: "CREATE TABLE unexpected_table (id INTEGER)",
+		},
+		{
+			type: "index",
+			sql: "CREATE INDEX unexpected_index ON messages(created_at)",
+		},
+		{
+			type: "trigger",
+			sql: "CREATE TRIGGER unexpected_trigger AFTER INSERT ON messages BEGIN SELECT 1; END",
+		},
+		{
+			type: "view",
+			sql: "CREATE VIEW unexpected_view AS SELECT project FROM messages",
+		},
+	];
+	const outcomes: Array<{
+		type: string;
+		accepted: boolean;
+		error?: string;
+	}> = [];
+
+	for (const unexpected of unexpectedObjects) {
+		const root = mkdtempSync(join(tmpdir(), "omp-a2a-extra-schema-"));
+		roots.push(root);
+		const databasePath = join(root, "messages.sqlite");
+		const current = new MessageStore(databasePath);
+		current.close();
+		const database = new Database(databasePath);
+		database.run(unexpected.sql);
+		database.close();
+
+		try {
+			const reopened = new MessageStore(databasePath);
+			reopened.close();
+			outcomes.push({ type: unexpected.type, accepted: true });
+		} catch (error) {
+			outcomes.push({
+				type: unexpected.type,
+				accepted: false,
+				error: error instanceof Error ? error.message : String(error),
+			});
+		}
+	}
+
+	expect(outcomes).toEqual([
+		{
+			type: "table",
+			accepted: false,
+			error: UNSUPPORTED_STORAGE_MESSAGE,
+		},
+		{
+			type: "index",
+			accepted: false,
+			error: UNSUPPORTED_STORAGE_MESSAGE,
+		},
+		{
+			type: "trigger",
+			accepted: false,
+			error: UNSUPPORTED_STORAGE_MESSAGE,
+		},
+		{
+			type: "view",
+			accepted: false,
+			error: UNSUPPORTED_STORAGE_MESSAGE,
+		},
+	]);
+});
+
 test("attachment content participates in messageId idempotency", () => {
 	const root = mkdtempSync(join(tmpdir(), "omp-a2a-attachment-idempotency-"));
 	roots.push(root);
