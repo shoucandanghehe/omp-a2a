@@ -11,12 +11,12 @@ import { createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { HubClient } from "../src/hub/client";
 import { parseHubCliOptions } from "../src/hub/cli";
+import { HubClient } from "../src/hub/client";
 import { A2aConnection } from "../src/hub/connection";
 import { A2A_PROTOCOL_VERSION } from "../src/hub/realtime-types";
-import { MESSAGE_STORAGE_VERSION } from "../src/hub/store";
 import { type HubServerHandle, startHubServer } from "../src/hub/server";
+import { MESSAGE_STORAGE_VERSION } from "../src/hub/store";
 
 const roots: string[] = [];
 const UNSUPPORTED_STORAGE_MESSAGE =
@@ -177,9 +177,7 @@ test("CLI rejects present blank environment settings", () => {
 });
 
 test("package Hub executable runs directly", async () => {
-	const manifest = await Bun.file(
-		join(repositoryRoot, "package.json"),
-	).json();
+	const manifest = await Bun.file(join(repositoryRoot, "package.json")).json();
 	const executable = join(repositoryRoot, manifest.bin["omp-a2a-hub"] ?? "");
 	accessSync(executable, constants.X_OK);
 	const result = Bun.spawnSync([executable, "--unknown"]);
@@ -190,9 +188,7 @@ test("package Hub executable runs directly", async () => {
 });
 
 test("CLI readiness is minimal and does not advertise a route", async () => {
-	const manifest = await Bun.file(
-		join(repositoryRoot, "package.json"),
-	).json();
+	const manifest = await Bun.file(join(repositoryRoot, "package.json")).json();
 	const executable = join(repositoryRoot, manifest.bin["omp-a2a-hub"] ?? "");
 	const process = Bun.spawn({
 		cmd: [
@@ -240,9 +236,8 @@ test("Compose resolves non-default published port and resource limits", () => {
 	if (result.exitCode !== 0) {
 		throw new Error(new TextDecoder().decode(result.stderr));
 	}
-	const service = JSON.parse(
-		new TextDecoder().decode(result.stdout),
-	).services.hub;
+	const service = JSON.parse(new TextDecoder().decode(result.stdout)).services
+		.hub;
 	expect(service.environment).toBeUndefined();
 	expect(service.ports).toContainEqual(
 		expect.objectContaining({ target: 4173, published: "5180" }),
@@ -253,17 +248,18 @@ test("Compose resolves non-default published port and resource limits", () => {
 	expect(service.restart).toBe("unless-stopped");
 });
 
-
 test("Hub rejects unsupported message storage before listening", async () => {
 	const root = dataDir();
-	const database = new Database(join(root, "messages.sqlite"), { create: true });
+	const database = new Database(join(root, "messages.sqlite"), {
+		create: true,
+	});
 	database.run("CREATE TABLE messages (id TEXT)");
 	database.run(`PRAGMA user_version = ${MESSAGE_STORAGE_VERSION + 1}`);
 	database.close();
 
-	await expect(startHubServer({ host: "127.0.0.1", port: 0, dataDir: root })).rejects.toThrow(
-		UNSUPPORTED_STORAGE_MESSAGE,
-	);
+	await expect(
+		startHubServer({ host: "127.0.0.1", port: 0, dataDir: root }),
+	).rejects.toThrow(UNSUPPORTED_STORAGE_MESSAGE);
 });
 
 describe("Hub Project control plane", () => {
@@ -290,7 +286,11 @@ describe("Hub Project control plane", () => {
 	});
 
 	test("control requests have no application body cap", async () => {
-		const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir: dataDir() });
+		const hub = await startHubServer({
+			host: "127.0.0.1",
+			port: 0,
+			dataDir: dataDir(),
+		});
 		hubs.push(hub);
 		const description = "x".repeat(6 * 1024 * 1024 + 1);
 		const project = await new HubClient(hub.listenUrl).createProject({
@@ -310,9 +310,7 @@ describe("Hub Project control plane", () => {
 		hubs.push(hub);
 		await expect(
 			startHubServer({ host: "127.0.0.1", port: 0, dataDir: root }),
-		).rejects.toThrow(
-			"already in use",
-		);
+		).rejects.toThrow("already in use");
 	});
 
 	test("connecting to an unknown Project fails at the claim boundary", async () => {
@@ -366,7 +364,11 @@ describe("Hub Project control plane", () => {
 	});
 
 	test("deletion that wins before a claim makes the Project unknown", async () => {
-		const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir: dataDir() });
+		const hub = await startHubServer({
+			host: "127.0.0.1",
+			port: 0,
+			dataDir: dataDir(),
+		});
 		hubs.push(hub);
 		const client = new HubClient(hub.listenUrl);
 		await client.createProject({ name: "deleted-first" });
@@ -450,7 +452,11 @@ test("listener startup failure releases the SQLite store and data lock", async (
 
 test("concurrent stops share and await one cleanup", async () => {
 	const root = dataDir();
-	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir: root });
+	const hub = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir: root,
+	});
 	const port = Number(new URL(hub.listenUrl).port);
 	const firstStop = hub.stop();
 	const secondStop = hub.stop();

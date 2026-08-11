@@ -4,9 +4,7 @@ import * as path from "node:path";
 import { HubStore } from "../src/hub/store";
 import { hubStoreDatabasePath } from "../src/paths";
 
-const dataDir = fs.mkdtempSync(
-	path.join(os.tmpdir(), "omp-a2a-store-smoke-"),
-);
+const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), "omp-a2a-store-smoke-"));
 const databasePath = hubStoreDatabasePath(dataDir);
 let store: HubStore | null = null;
 

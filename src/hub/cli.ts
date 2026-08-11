@@ -1,10 +1,7 @@
 #!/usr/bin/env bun
 import { defaultDataDir } from "../paths";
 import { A2A_PROTOCOL_VERSION } from "./realtime-types";
-import {
-	startHubServer,
-	type StartHubServerOptions,
-} from "./server";
+import { type StartHubServerOptions, startHubServer } from "./server";
 
 type HubCliEnvironment = Record<string, string | undefined>;
 
@@ -52,7 +49,8 @@ export function parseHubCliOptions(
 	if (!hostValue.trim()) throw new Error("empty value for Hub host");
 	const dataDirValue =
 		dataDirFlag ?? environment.OMP_A2A_HUB_DATA_DIR ?? defaultDataDir();
-	if (!dataDirValue.trim()) throw new Error("empty value for Hub data directory");
+	if (!dataDirValue.trim())
+		throw new Error("empty value for Hub data directory");
 	const host = hostValue.trim();
 	const dataDir = dataDirValue.trim();
 	return { host, port, dataDir };

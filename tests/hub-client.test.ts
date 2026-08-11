@@ -1,7 +1,7 @@
 import { afterEach, expect, test } from "bun:test";
 import { once } from "node:events";
-import { createServer, type RequestListener, type Server } from "node:http";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { createServer, type RequestListener, type Server } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -63,9 +63,7 @@ test("global config rejects non-object roots and unknown aliases", () => {
 			"config.json",
 			JSON.stringify({ [field]: "http://hub:4173" }),
 		);
-		expect(() => resolveHubUrl({ home })).toThrow(
-			`${field} must be removed`,
-		);
+		expect(() => resolveHubUrl({ home })).toThrow(`${field} must be removed`);
 	}
 });
 
@@ -99,19 +97,15 @@ test("first existing global config remains authoritative when invalid", () => {
 test("global config names missing, blank, and mistyped hubUrl", () => {
 	const home = createHome();
 	writeConfig(home, "config.yml", "{}\n");
-	expect(() => resolveHubUrl({ home })).toThrow(
-		"hubUrl must be a string",
-	);
+	expect(() => resolveHubUrl({ home })).toThrow("hubUrl must be a string");
 
-	writeConfig(home, "config.yml", "hubUrl: \" \"\n");
+	writeConfig(home, "config.yml", 'hubUrl: " "\n');
 	expect(() => resolveHubUrl({ home })).toThrow(
 		"hubUrl must be a non-blank string",
 	);
 
 	writeConfig(home, "config.yml", "hubUrl: 4173\n");
-	expect(() => resolveHubUrl({ home })).toThrow(
-		"hubUrl must be a string",
-	);
+	expect(() => resolveHubUrl({ home })).toThrow("hubUrl must be a string");
 });
 
 type HttpTestServer = {
@@ -248,10 +242,7 @@ test("a successful response with the wrong shape fails at the HubClient seam", a
 });
 
 test("a JSON Hub error preserves its status and request URL", async () => {
-	const { baseUrl } = await serveJson(
-		{ error: "project already exists" },
-		409,
-	);
+	const { baseUrl } = await serveJson({ error: "project already exists" }, 409);
 	const error = await new HubClient(baseUrl)
 		.createProject({ name: "client-test" })
 		.catch((caught: unknown) => caught);
@@ -595,12 +586,11 @@ test("history snapshots its mutable query before dispatch", async () => {
 });
 
 test("probeHub catches only transport failures and preserves its metadata deadline", async () => {
-	const {
-		baseUrl: unreachableUrl,
-		server: unreachableServer,
-	} = await serve((_request, response) => {
-		response.end("unexpected");
-	});
+	const { baseUrl: unreachableUrl, server: unreachableServer } = await serve(
+		(_request, response) => {
+			response.end("unexpected");
+		},
+	);
 	await closeServer(unreachableServer);
 	const transportError = await new HubClient(unreachableUrl)
 		.meta()

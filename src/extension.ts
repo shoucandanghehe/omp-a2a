@@ -8,11 +8,7 @@ import {
 	snapshotLocalAttachments,
 } from "./local-attachments";
 import { A2aRuntime, type MessageView } from "./operations";
-import {
-	AGENT_NAME_RE,
-	type A2aLocalConfig,
-	PROJECT_NAME_RE,
-} from "./types";
+import { type A2aLocalConfig, AGENT_NAME_RE, PROJECT_NAME_RE } from "./types";
 
 const ASYNC_REPLY_GUIDANCE =
 	"Replies arrive automatically. After sending, continue independent work; if blocked, end the current turn. Never wait, sleep, or poll a2a_history for a reply.";
@@ -342,8 +338,7 @@ export default function a2aExtension(
 		} catch (error) {
 			configuredHubUrl = undefined;
 			client = null;
-			const failure =
-				error instanceof Error ? error : new Error(String(error));
+			const failure = error instanceof Error ? error : new Error(String(error));
 			configError = failure;
 			configLoaded = true;
 			configRevision += 1;
@@ -455,9 +450,7 @@ export default function a2aExtension(
 							deliverAs: "steer",
 							triggerTurn: false,
 						});
-					const attachments = formatAttachments(
-						materialized.value.attachments,
-					);
+					const attachments = formatAttachments(materialized.value.attachments);
 					pi.sendMessage(
 						{
 							customType: "a2a-inbound",
@@ -517,15 +510,11 @@ export default function a2aExtension(
 		};
 	}
 
-	const connectDesired = async (
-		target = desiredConnection,
-	): Promise<void> => {
+	const connectDesired = async (target = desiredConnection): Promise<void> => {
 		if (!target || desiredConnection !== target) return;
 		try {
-			await runtime.connect(
-				target.project,
-				target.name,
-				() => desiredClient(target),
+			await runtime.connect(target.project, target.name, () =>
+				desiredClient(target),
 			);
 			if (desiredConnection !== target) return;
 			modelPeerNames = currentPeerNames();
@@ -767,10 +756,7 @@ export default function a2aExtension(
 					const limit =
 						flags.limit === undefined ? undefined : Number(flags.limit);
 					const connectionToken = runtime.connectionToken();
-					const signal = combineAbortSignals(
-						sessionToken,
-						connectionToken,
-					);
+					const signal = combineAbortSignals(sessionToken, connectionToken);
 					signal.throwIfAborted();
 					const messages = await runtime.history({
 						before: typeof flags.before === "string" ? flags.before : undefined,
@@ -796,16 +782,12 @@ export default function a2aExtension(
 								"A2A history cancelled after session or connection change",
 							);
 						context.ui.notify(
-							formatMessages(
-								materialized.map((message) => message.value),
-							),
+							formatMessages(materialized.map((message) => message.value)),
 							"info",
 						);
 						for (const message of materialized) message.commit();
 					} finally {
-						await Promise.all(
-							materialized.map((message) => message.dispose()),
-						);
+						await Promise.all(materialized.map((message) => message.dispose()));
 					}
 					return;
 				}
@@ -825,12 +807,13 @@ export default function a2aExtension(
 		},
 	});
 
-	pi.registerTool({
+	const peersParameters = type({});
+	pi.registerTool<typeof peersParameters>({
 		name: "a2a_peers",
 		label: "A2A Peers",
 		description:
 			"List the exact A2A roster names currently addressable in this Project. Use only a returned name for target.type=agent.",
-		parameters: type({}),
+		parameters: peersParameters,
 		async execute() {
 			try {
 				const peers = runtime.peers();
@@ -857,17 +840,18 @@ export default function a2aExtension(
 		},
 	});
 
-	pi.registerTool({
+	const messageParameters = type({
+		target: [{ type: "'agent'", name: "string" }, "|", { type: "'project'" }],
+		text: "string",
+		"attachments?": "string[]",
+		"replyTo?": "string",
+		"messageId?": "string",
+	});
+	pi.registerTool<typeof messageParameters>({
 		name: "a2a_message",
 		label: "A2A Message",
 		description: `Send to one current peer or all current peers. Use target.type=agent with a name from a2a_peers, or target.type=project for all current peers. Set replyTo to reply to an earlier Project message. Attachments must be current-session local:// regular files. ${ASYNC_REPLY_GUIDANCE}`,
-		parameters: type({
-			target: [{ type: "'agent'", name: "string" }, "|", { type: "'project'" }],
-			text: "string",
-			"attachments?": "string[]",
-			"replyTo?": "string",
-			"messageId?": "string",
-		}),
+		parameters: messageParameters,
 		async execute(_id, parameters, callerSignal, _onUpdate, context) {
 			try {
 				const generation = sessionGeneration;
@@ -942,17 +926,18 @@ export default function a2aExtension(
 		},
 	});
 
-	pi.registerTool({
+	const historyParameters = type({
+		"before?": "string",
+		"after?": "string",
+		"limit?": "number",
+		"from?": "string",
+	});
+	pi.registerTool<typeof historyParameters>({
 		name: "a2a_history",
 		label: "A2A History",
 		description:
 			"Review earlier Project messages using before, after, limit, or from. Returned attachment links are valid in the current session. Use only for past context; never wait or poll for new replies.",
-		parameters: type({
-			"before?": "string",
-			"after?": "string",
-			"limit?": "number",
-			"from?": "string",
-		}),
+		parameters: historyParameters,
 		async execute(_id, parameters, callerSignal, _onUpdate, context) {
 			try {
 				const generation = sessionGeneration;
@@ -990,9 +975,7 @@ export default function a2aExtension(
 					for (const message of materialized) message.commit();
 					return result;
 				} finally {
-					await Promise.all(
-						materialized.map((message) => message.dispose()),
-					);
+					await Promise.all(materialized.map((message) => message.dispose()));
 				}
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);

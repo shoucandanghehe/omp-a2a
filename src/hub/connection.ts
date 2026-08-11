@@ -7,10 +7,10 @@ import {
 import {
 	A2A_PROTOCOL_VERSION,
 	type AcceptedMessage,
-	isExactGoodbyeFrame,
 	type ClientFrame,
-	type DeliveryEvent,
 	DELIVERY_OUTCOME_CACHE_TTL_MS,
+	type DeliveryEvent,
+	isExactGoodbyeFrame,
 	type MessageRequestTarget,
 	type Peer,
 	type RealtimeMessage,
@@ -87,9 +87,7 @@ function isMessageTarget(value: unknown): value is RealtimeMessage["target"] {
 	if (value.type === "project") return hasExactKeys(value, ["type"]);
 	if (value.type !== "agent") return false;
 	const expectedKeys =
-		"presenceId" in value
-			? ["type", "name", "presenceId"]
-			: ["type", "name"];
+		"presenceId" in value ? ["type", "name", "presenceId"] : ["type", "name"];
 	return (
 		hasExactKeys(value, expectedKeys) &&
 		typeof value.name === "string" &&
@@ -369,8 +367,7 @@ export class A2aConnection {
 			options.events ?? {},
 			goodbyeTimeoutMs,
 			closeTimeoutMs,
-			options.deliveryOutcomeScheduler ??
-				DEFAULT_DELIVERY_OUTCOME_SCHEDULER,
+			options.deliveryOutcomeScheduler ?? DEFAULT_DELIVERY_OUTCOME_SCHEDULER,
 		);
 		const timeoutMs = handshakeTimeoutMs;
 		const abort = () => connection.#terminateHandshake(options.signal?.reason);
@@ -702,8 +699,8 @@ export class A2aConnection {
 			0,
 			earliest.expiresAt - this.#deliveryOutcomeScheduler.now(),
 		);
-		this.#cancelDeliveryOutcomeExpiry =
-			this.#deliveryOutcomeScheduler.schedule(() => {
+		this.#cancelDeliveryOutcomeExpiry = this.#deliveryOutcomeScheduler.schedule(
+			() => {
 				this.#cancelDeliveryOutcomeExpiry = null;
 				const now = this.#deliveryOutcomeScheduler.now();
 				for (const [messageId, retained] of this.#deliveryOutcomes) {
@@ -711,7 +708,9 @@ export class A2aConnection {
 					this.#deliveryOutcomes.delete(messageId);
 				}
 				this.#scheduleDeliveryOutcomeExpiry();
-			}, delayMs);
+			},
+			delayMs,
+		);
 	}
 
 	#rescheduleDeliveryOutcomeExpiry(): void {

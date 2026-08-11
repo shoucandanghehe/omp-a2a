@@ -3,8 +3,8 @@ import {
 	existsSync,
 	mkdirSync,
 	mkdtempSync,
-	readFileSync,
 	readdirSync,
+	readFileSync,
 	rmSync,
 	writeFileSync,
 } from "node:fs";
@@ -13,9 +13,9 @@ import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveLocalUrlToFile } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
-import WebSocket, { WebSocketServer } from "ws";
+import type WebSocket from "ws";
+import { WebSocketServer } from "ws";
 import a2aExtension from "../src/extension";
-import { materializeLocalAttachments } from "../src/local-attachments";
 import { HubClient } from "../src/hub/client";
 import { A2aConnection } from "../src/hub/connection";
 import { encodeBinaryPayload } from "../src/hub/payload";
@@ -24,6 +24,7 @@ import {
 	type DeliveryEvent,
 } from "../src/hub/realtime-types";
 import { startHubServer } from "../src/hub/server";
+import { materializeLocalAttachments } from "../src/local-attachments";
 
 interface CompletionItem {
 	value: string;
@@ -111,9 +112,11 @@ test("human commands and model tools expose separate A2A surfaces", async () => 
 	expect(help).not.toContain("/a2a send");
 	expect(help).not.toContain("/a2a inbox");
 	expect(help).not.toContain("/a2a join");
-	if (!commandCompletions)
-		throw new Error("a2a command completions were not registered");
-	expect(commandCompletions("").map((item) => item.label)).toEqual([
+	const complete = commandCompletions;
+	if (!complete) throw new Error("a2a command completions were not registered");
+	const rootCompletions = complete("");
+	if (!rootCompletions) throw new Error("expected root a2a completions");
+	expect(rootCompletions.map((item) => item.label)).toEqual([
 		"hub",
 		"project",
 		"connect",
@@ -123,29 +126,27 @@ test("human commands and model tools expose separate A2A surfaces", async () => 
 		"history",
 		"help",
 	]);
-	expect(commandCompletions("project d")).toEqual([
+	expect(complete("project d")).toEqual([
 		{
 			value: "project delete ",
 			label: "delete",
 			description: "Delete a Project and its history",
 		},
 	]);
-	expect(commandCompletions("connect billing ")).toEqual([
+	expect(complete("connect billing ")).toEqual([
 		{
 			value: "connect billing --as ",
 			label: "--as",
 			description: "Set this Presence name",
 		},
 	]);
-	expect(
-		commandCompletions("history --before billing:42 ").map(
-			(item) => item.value,
-		),
-	).toEqual([
+	const historyCompletions = complete("history --before billing:42 ");
+	if (!historyCompletions) throw new Error("expected history flag completions");
+	expect(historyCompletions.map((item) => item.value)).toEqual([
 		"history --before billing:42 --limit ",
 		"history --before billing:42 --from ",
 	]);
-	expect(commandCompletions("history --limit ")).toBeNull();
+	expect(complete("history --limit ")).toBeNull();
 });
 
 test("model tools stay push-driven and forward history cancellation", async () => {
@@ -310,7 +311,7 @@ test("idle Presence changes collapse to the roster delta before the next message
 		};
 	}> = [];
 	let commandHandler:
-		| ((args: string, context: typeof context) => Promise<void>)
+		| ((args: string, commandContext: typeof context) => Promise<void>)
 		| undefined;
 	let beforeAgentStart:
 		| (() =>
@@ -369,7 +370,10 @@ test("idle Presence changes collapse to the roster delta before the next message
 				if (event === "agent_end") agentEnd = handler as typeof agentEnd;
 			},
 			logger: { warn() {} },
-			sendMessage(message, options) {
+			sendMessage(
+				message: (typeof injected)[number]["message"],
+				options?: (typeof injected)[number]["options"],
+			) {
 				injected.push({ message, options });
 				if (message.customType === "a2a-inbound") inboundInjected.resolve();
 			},
@@ -709,7 +713,7 @@ test("a2a_message cannot cross a Project switch after a slow snapshot", async ()
 	const releaseSnapshot = Promise.withResolvers<void>();
 	const tools = new Map<string, RegisteredTool>();
 	let commandHandler:
-		| ((args: string, context: typeof context) => Promise<void>)
+		| ((args: string, commandContext: typeof context) => Promise<void>)
 		| undefined;
 	const context = {
 		cwd,
@@ -775,12 +779,12 @@ test("a2a_message cannot cross a Project switch after a slow snapshot", async ()
 		releaseSnapshot.resolve();
 
 		expect((await send).isError).toBe(true);
-		expect((await client.history({ project: "send-fence-a" })).messages).toEqual(
-			[],
-		);
-		expect((await client.history({ project: "send-fence-b" })).messages).toEqual(
-			[],
-		);
+		expect(
+			(await client.history({ project: "send-fence-a" })).messages,
+		).toEqual([]);
+		expect(
+			(await client.history({ project: "send-fence-b" })).messages,
+		).toEqual([]);
 	} finally {
 		releaseSnapshot.resolve();
 		if (commandHandler) await commandHandler("disconnect", context);
@@ -799,7 +803,7 @@ test("history materialization disposes successful siblings when one fails", asyn
 	const firstMaterialized = Promise.withResolvers<void>();
 	let sender: A2aConnection | undefined;
 	let commandHandler:
-		| ((args: string, context: typeof context) => Promise<void>)
+		| ((args: string, commandContext: typeof context) => Promise<void>)
 		| undefined;
 	const context = {
 		cwd,
@@ -869,11 +873,7 @@ test("history materialization disposes successful siblings when one fails", asyn
 				},
 			} as never,
 			{
-				materializeAttachments: async (
-					attachments,
-					options,
-					signal,
-				) => {
+				materializeAttachments: async (attachments, options, signal) => {
 					if (attachments[0]?.name === "fail.txt") {
 						await firstMaterialized.promise;
 						throw new Error("second history materialization failed");
@@ -928,7 +928,7 @@ test("session shutdown aborts slash history and suppresses stale UI", async () =
 	const notifications: string[] = [];
 	let sender: A2aConnection | undefined;
 	let commandHandler:
-		| ((args: string, context: typeof context) => Promise<void>)
+		| ((args: string, commandContext: typeof context) => Promise<void>)
 		| undefined;
 	let sessionShutdown: (() => Promise<void>) | undefined;
 	const context = {
@@ -993,11 +993,7 @@ test("session shutdown aborts slash history and suppresses stale UI", async () =
 				registerTool() {},
 			} as never,
 			{
-				materializeAttachments: async (
-					attachments,
-					options,
-					signal,
-				) => {
+				materializeAttachments: async (attachments, options, signal) => {
 					const pending = await materializeLocalAttachments(
 						attachments,
 						options,
@@ -1159,7 +1155,9 @@ test("session switch cancels an in-flight inbound injection", async () => {
 });
 
 test("manual Project switch cancels old in-flight attachment injection", async () => {
-	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-extension-project-switch-"));
+	const dataDir = mkdtempSync(
+		join(tmpdir(), "omp-a2a-extension-project-switch-"),
+	);
 	const receiverCwd = join(dataDir, "receiver");
 	const receiverArtifacts = join(dataDir, "receiver-artifacts");
 	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
@@ -1370,7 +1368,9 @@ test("ordinary command contexts do not cancel same-session inbound injection", a
 });
 
 test("session switch invalidates obsolete reconnect work before awaiting teardown", async () => {
-	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-extension-session-fence-"));
+	const dataDir = mkdtempSync(
+		join(tmpdir(), "omp-a2a-extension-session-fence-"),
+	);
 	const firstCwd = join(dataDir, "first");
 	const nextCwd = join(dataDir, "next");
 	const server = createServer((request, response) => {
@@ -1456,7 +1456,6 @@ test("session switch invalidates obsolete reconnect work before awaiting teardow
 			},
 			setLabel() {},
 			on(event: string, handler: unknown) {
-
 				if (event === "session_switch")
 					sessionSwitch = handler as typeof sessionSwitch;
 			},
@@ -1474,7 +1473,10 @@ test("session switch invalidates obsolete reconnect work before awaiting teardow
 			throw new Error("a2a lifecycle handlers were not registered");
 		await commandHandler("connect stable --as worker", firstContext);
 		await stableConnected.promise;
-		obsoleteConnect = commandHandler("connect stalled --as worker", firstContext);
+		obsoleteConnect = commandHandler(
+			"connect stalled --as worker",
+			firstContext,
+		);
 		await stalledHello.promise;
 
 		closeSpy = vi
@@ -1517,7 +1519,9 @@ test("session switch invalidates obsolete reconnect work before awaiting teardow
 });
 
 test("name conflict restores the accepting Hub as reconnect intent", async () => {
-	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-extension-name-conflict-"));
+	const dataDir = mkdtempSync(
+		join(tmpdir(), "omp-a2a-extension-name-conflict-"),
+	);
 	const cwd = join(dataDir, "client");
 	const server = createServer((request, response) => {
 		if (!request.url?.endsWith("/v1/meta")) {
@@ -1584,7 +1588,7 @@ test("name conflict restores the accepting Hub as reconnect intent", async () =>
 	});
 	const notifications: string[] = [];
 	let commandHandler:
-		| ((args: string, context: typeof context) => Promise<void>)
+		| ((args: string, commandContext: typeof context) => Promise<void>)
 		| undefined;
 	const context = {
 		cwd,
@@ -1701,16 +1705,19 @@ test("invalid Session config blocks fallback Hub access until a successful reloa
 		| undefined;
 
 	process.env.OMP_A2A_HUB_URL = fallbackUrl;
-	globalThis.fetch = (async () => {
-		fetchCount += 1;
-		return new Response(
-			JSON.stringify({ protocolVersion: A2A_PROTOCOL_VERSION }),
-			{
-				status: 200,
-				headers: { "content-type": "application/json" },
-			},
-		);
-	}) as typeof fetch;
+	globalThis.fetch = Object.assign(
+		async () => {
+			fetchCount += 1;
+			return new Response(
+				JSON.stringify({ protocolVersion: A2A_PROTOCOL_VERSION }),
+				{
+					status: 200,
+					headers: { "content-type": "application/json" },
+				},
+			);
+		},
+		{ preconnect: originalFetch.preconnect },
+	);
 
 	try {
 		a2aExtension({
@@ -1751,9 +1758,7 @@ test("invalid Session config blocks fallback Hub access until a successful reloa
 		await commandHandler("project list", invalidContext);
 		expect(fetchCount).toBe(countBeforeBlockedCommands);
 		expect(
-			notifications
-				.slice(-2)
-				.every((message) => message.includes(invalidFile)),
+			notifications.slice(-2).every((message) => message.includes(invalidFile)),
 		).toBe(true);
 
 		writeFileSync(
@@ -1799,14 +1804,14 @@ test("invalid config reload closes fallback Presence and blocks sends without tr
 		},
 	};
 	let sessionStart:
-		| ((event: unknown, context: typeof context) => Promise<void>)
+		| ((event: unknown, sessionContext: typeof context) => Promise<void>)
 		| undefined;
 	let sessionSwitch:
-		| ((event: unknown, context: typeof context) => Promise<void>)
+		| ((event: unknown, sessionContext: typeof context) => Promise<void>)
 		| undefined;
 	let sessionShutdown: (() => Promise<void>) | undefined;
 	let commandHandler:
-		| ((args: string, context: typeof context) => Promise<void>)
+		| ((args: string, commandContext: typeof context) => Promise<void>)
 		| undefined;
 	const previousEnvironmentUrl = process.env.OMP_A2A_HUB_URL;
 	process.env.OMP_A2A_HUB_URL = hub.listenUrl;
@@ -1864,7 +1869,12 @@ test("invalid config reload closes fallback Presence and blocks sends without tr
 			},
 		} as never);
 
-		if (!sessionStart || !sessionSwitch || !sessionShutdown || !commandHandler) {
+		if (
+			!sessionStart ||
+			!sessionSwitch ||
+			!sessionShutdown ||
+			!commandHandler
+		) {
 			throw new Error("A2A Session handlers were not registered");
 		}
 		const messageTool = tools.get("a2a_message");
@@ -1872,9 +1882,9 @@ test("invalid config reload closes fallback Presence and blocks sends without tr
 
 		await sessionStart({}, context);
 		await firstJoined.promise;
-		originalPresenceId = observer.peers().find(
-			(peer) => peer.name === "api",
-		)?.presenceId;
+		originalPresenceId = observer
+			.peers()
+			.find((peer) => peer.name === "api")?.presenceId;
 		if (!originalPresenceId)
 			throw new Error("observer did not see the Extension Presence");
 
@@ -1891,8 +1901,7 @@ test("invalid config reload closes fallback Presence and blocks sends without tr
 			});
 			await originalPresenceLeft.promise;
 		} catch (error) {
-			replacementError =
-				error instanceof Error ? error.message : String(error);
+			replacementError = error instanceof Error ? error.message : String(error);
 		}
 
 		const blockedSend = await messageTool.execute("blocked-send", {

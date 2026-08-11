@@ -1,0 +1,19 @@
+{
+	"compilerOptions": {
+		"allowImportingTsExtensions": true,
+		"forceConsistentCasingInFileNames": true,
+		"module": "Preserve",
+		"moduleDetection": "force",
+		"moduleResolution": "bundler",
+		"noFallthroughCasesInSwitch": true,
+		"noEmit": true,
+		"noImplicitOverride": true,
+		"resolveJsonModule": true,
+		"skipLibCheck": true,
+		"strict": true,
+		"target": "ESNext",
+		"verbatimModuleSyntax": true,
+		"types": ["bun"]
+	},
+	"include": ["src/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts"]
+}

@@ -273,7 +273,9 @@ test("runtime HTTP operations preserve caller cancellation", async () => {
 		api.createProject({ name: "should-not-exist" }, options),
 	).rejects.toBe(reason);
 	await expect(api.listProjects(options)).rejects.toBe(reason);
-	await expect(api.deleteProject("runtime-cancel", options)).rejects.toBe(reason);
+	await expect(api.deleteProject("runtime-cancel", options)).rejects.toBe(
+		reason,
+	);
 	await api.disconnect();
 });
 
@@ -309,8 +311,16 @@ test("published connection keeps its Hub binding until a replacement succeeds", 
 	const firstRoot = mkdtempSync(join(tmpdir(), "omp-a2a-runtime-first-hub-"));
 	const secondRoot = mkdtempSync(join(tmpdir(), "omp-a2a-runtime-second-hub-"));
 	roots.push(firstRoot, secondRoot);
-	const firstHub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir: firstRoot });
-	const secondHub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir: secondRoot });
+	const firstHub = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir: firstRoot,
+	});
+	const secondHub = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir: secondRoot,
+	});
 	hubs.push(firstHub, secondHub);
 	const firstClient = new HubClient(firstHub.listenUrl);
 	const secondClient = new HubClient(secondHub.listenUrl);

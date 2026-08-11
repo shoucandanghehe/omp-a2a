@@ -4,8 +4,8 @@ import {
 	decodeTextPayload,
 	encodeBinaryPayload,
 	encodeTextPayload,
-	parseEncodedAttachments,
 	PAYLOAD_COMPRESSION_THRESHOLD_BYTES,
+	parseEncodedAttachments,
 } from "../src/hub/payload";
 
 function pseudoRandomBytes(size: number): Buffer {
@@ -37,9 +37,7 @@ test("binary payloads use gzip only when it is smaller", () => {
 	expect(compressed.encoding).toBe("gzip+base64");
 	expect(decodeBinaryPayload(compressed)).toEqual(compressible);
 
-	const incompressible = pseudoRandomBytes(
-		PAYLOAD_COMPRESSION_THRESHOLD_BYTES,
-	);
+	const incompressible = pseudoRandomBytes(PAYLOAD_COMPRESSION_THRESHOLD_BYTES);
 	const identity = encodeBinaryPayload(incompressible);
 	expect(identity.encoding).toBe("base64");
 	expect(decodeBinaryPayload(identity)).toEqual(incompressible);
@@ -130,9 +128,7 @@ test("payload decoders require exact encoding and data fields", () => {
 test("attachment parsing requires exact attachment and payload fields", () => {
 	const payload = { encoding: "base64" as const, data: "YQ==" };
 	expect(() =>
-		parseEncodedAttachments([
-			{ name: "handoff.txt", payload, unknown: true },
-		]),
+		parseEncodedAttachments([{ name: "handoff.txt", payload, unknown: true }]),
 	).toThrow();
 	expect(() =>
 		parseEncodedAttachments([
@@ -151,9 +147,7 @@ test("attachment parsing requires exact attachment and payload fields", () => {
 
 test("malformed compressed payloads throw their codec errors", () => {
 	const data = Buffer.from("not gzip", "utf8").toString("base64");
-	expect(() =>
-		decodeTextPayload({ encoding: "gzip+base64", data }),
-	).toThrow();
+	expect(() => decodeTextPayload({ encoding: "gzip+base64", data })).toThrow();
 	expect(() =>
 		decodeBinaryPayload({ encoding: "gzip+base64", data }),
 	).toThrow();

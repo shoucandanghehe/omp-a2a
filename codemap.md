@@ -110,13 +110,17 @@ The sender Extension snapshots attachment bytes before sending and fences the fi
 
 | Asset | Responsibility |
 | --- | --- |
-| `package.json` | Bun metadata, OMP extension registration, Hub executable, and smoke scripts. |
+| `package.json` | Bun metadata, pinned toolchain, OMP extension registration, Hub executable, build, check, and smoke scripts. |
 | `bun.lock` | Locked dependency graph. |
+| `biome.json` | Canonical formatting, lint, and import-organization policy. |
+| `tsconfig.json` | Strict TypeScript 7 no-emit project boundary for source, scripts, and tests. |
+| `.github/workflows/ci.yml` | Read-only source quality and real container smoke gates. |
+| `.github/dependabot.yml` | Weekly Bun, GitHub Actions, and Docker dependency updates. |
 | `AGENTS.md` | Repository map, commit-message style, signing, and history-rewrite rules. |
 | `README.md` | Operator and user how-to plus public behavior contract. |
 | `config.example.yml` | Global Hub URL example. |
 | `.env.example` | Compose host-port and resource-limit defaults plus local CLI storage example. |
-| `Dockerfile` | Pinned Bun `1.3.14`, unprivileged standalone Hub image on fixed `0.0.0.0:4173`. |
+| `Dockerfile` | Unprivileged standalone Hub image pinned to Bun `1.3.14` and an exact image digest, listening on fixed `0.0.0.0:4173`. |
 | `docker-compose.yml` | Hub health, host-port publication, persistent volume, restart policy, and memory/CPU/PID limits. |
 
 ## Directory map
@@ -127,13 +131,13 @@ The sender Extension snapshots attachment bytes before sending and fences the fi
 | `src/hub/` | HTTP/WebSocket protocol, Presence, routing, canonical SQLite persistence, payloads, locking, and process lifecycle. | [`src/hub/codemap.md`](src/hub/codemap.md) |
 | `scripts/` | Executable SQLite-store, Hub, and Docker smoke scenarios. | [`scripts/codemap.md`](scripts/codemap.md) |
 | `tests/` | Bun behavior tests for configuration, payload codecs and structural validation, local attachment materialization, message history, realtime routing, control routes, runtime, and extension registration/completion. | Tests are excluded from generated map state. |
-| `docs/` | Implemented architecture decisions and historical fixed-snapshot review material. | Documentation is excluded from generated map state. |
+| `docs/` | Implemented architecture decisions, dated CI research, and historical fixed-snapshot review material. | Documentation is excluded from generated map state. |
 
 ## Verification
 
-The local release gate runs Biome, `bun run smoke`, both Bun entry-point builds, and `docker compose config`. It covers SQLite Project CRUD/reopen/sorting and atomic deletion, current storage creation/reopen and fail-closed schema guards, bounded WebSocket lifecycles, caller cancellation, Presence notifications and routing, replay and retries, receiver deduplication, terminal Delivery cleanup, attachment ownership and history, uncapped trusted payload and history behavior, Hub restart/cleanup, extension lifecycle, and command completion.
+`bun run check` enforces zero-warning Biome CI checks and strict TypeScript 7 no-emit checking. `bun run verify` adds both Bun entry-point builds, all Bun tests, the SQLite Project-store smoke, and the live in-process Hub smoke. It covers current storage guards, bounded WebSocket lifecycles, caller cancellation, Presence routing, replay and retries, receiver deduplication, Delivery cleanup, attachment ownership and history, uncapped trusted payload/history behavior, Hub restart/cleanup, extension lifecycle, and command completion. `bun run audit` rejects high or critical advisories in production dependencies.
 
-`bun run smoke:docker` crosses the public HTTP/WebSocket process boundary of the selected running Hub, verifies persisted history, and removes its temporary Project.
+GitHub Actions runs those source and dependency gates alongside an independent Docker Compose job that validates the model, waits for the real container health check, crosses its HTTP/WebSocket boundary with `bun run smoke:docker`, prints logs on failure, and always removes containers and volumes. Third-party actions are commit-SHA pinned; workflow permissions are read-only; superseded runs are cancelled. Dependabot checks the Bun lockfile, action pins, and Docker base image weekly.
 
 The implemented realtime model is documented in [`docs/realtime-presence-architecture.md`](docs/realtime-presence-architecture.md). The dated review in `docs/code-review-2026-07-19.md` is archival and does not define the current contract.
 

@@ -302,23 +302,27 @@ The `messages.sqlite` schema has its own storage version, independent of the wir
 ### Local release gate
 
 ```bash
-biome check .slim/codemap.json src tests scripts package.json
-bun run smoke
-bun build src/extension.ts --target=bun --external @oh-my-pi/pi-coding-agent/internal-urls/local-protocol --outdir=/tmp/omp-a2a-extension-build
-bun build src/hub/cli.ts --target=bun --outdir=/tmp/omp-a2a-hub-build
-docker compose config
+bun install --frozen-lockfile
+bun run verify
+bun run audit
+docker compose --project-name omp-a2a-boundary-smoke config --quiet
 ```
 
-These commands check formatting, run the Bun tests plus SQLite Project-store and live Hub/client smokes, build both executable entry points, and validate the Compose model. Coverage includes WebSocket Presence, retries and Delivery outcomes, attachment ownership and history, atomic Project deletion, current unified storage creation/reopen and fail-closed schema guards, uncapped trusted payload and history paths, Hub restart semantics, and command completion.
+`bun run verify` is the canonical source gate: zero-warning Biome formatting/lint/import checks, TypeScript 7 strict no-emit checking, both Bun entry-point builds, all Bun tests, and the SQLite Project-store plus live in-process Hub smokes. Coverage includes WebSocket Presence, retries and Delivery outcomes, attachment ownership and history, atomic Project deletion, current unified storage creation/reopen and fail-closed schema guards, uncapped trusted payload and history paths, Hub restart semantics, and command completion. `bun run audit` separately fails on high or critical production-dependency advisories.
 
 ### Docker boundary
 
 ```bash
-docker compose up -d --build --force-recreate --wait --wait-timeout 60 hub
+docker compose --project-name omp-a2a-boundary-smoke up -d --build --wait --wait-timeout 90
 bun run smoke:docker
+docker compose --project-name omp-a2a-boundary-smoke down --volumes --remove-orphans
 ```
 
-`smoke:docker` targets the running Hub selected by `OMP_A2A_HUB_URL`, crosses the public HTTP and WebSocket boundary, verifies persisted history, and deletes its temporary Project. `bun run smoke` alone does not build or start a container.
+The dedicated Compose project keeps this disposable smoke volume separate from the operator's normal Hub volume. CI uses the same project name for configuration, startup, failure logs, and unconditional teardown.
+
+`smoke:docker` targets the running Hub selected by `OMP_A2A_HUB_URL`, crosses the public HTTP and WebSocket boundary, verifies persisted history, and deletes its temporary Project. GitHub Actions runs source, production dependency audit, and container gates independently; pins third-party actions by commit SHA; grants read-only repository access; cancels superseded runs; and always removes container resources. Dependabot checks Bun, Actions, and Docker dependencies weekly.
+
+The dated tool/version rationale and rejected alternatives are recorded in [`docs/ci-best-practices-2026-08-11.md`](docs/ci-best-practices-2026-08-11.md).
 
 ## Layout
 

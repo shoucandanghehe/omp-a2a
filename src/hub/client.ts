@@ -1,17 +1,13 @@
-import { type as omptype } from "@oh-my-pi/omptype";
 import * as fs from "node:fs";
 import * as os from "node:os";
 import * as path from "node:path";
+import { type as omptype } from "@oh-my-pi/omptype";
 import { parseWithSchema } from "../config-document";
 import { a2aRoot } from "../paths";
+import { type A2aProject, AGENT_NAME_RE, PROJECT_NAME_RE } from "../types";
 import {
-	AGENT_NAME_RE,
-	type A2aProject,
-	PROJECT_NAME_RE,
-} from "../types";
-import {
-	decodeTextPayload as validateEncodedText,
 	parseEncodedAttachments,
+	decodeTextPayload as validateEncodedText,
 } from "./payload";
 import {
 	A2A_PROTOCOL_VERSION,
@@ -140,7 +136,8 @@ function stringField(
 	label: string,
 ): string {
 	const field = value[key];
-	if (typeof field !== "string") throw new Error(`${label}.${key} must be a string`);
+	if (typeof field !== "string")
+		throw new Error(`${label}.${key} must be a string`);
 	return field;
 }
 
@@ -151,7 +148,8 @@ function optionalStringField(
 ): string | undefined {
 	const field = value[key];
 	if (field === undefined) return undefined;
-	if (typeof field !== "string") throw new Error(`${label}.${key} must be a string`);
+	if (typeof field !== "string")
+		throw new Error(`${label}.${key} must be a string`);
 	return field;
 }
 
@@ -199,7 +197,8 @@ function decodeProject(value: unknown): A2aProject {
 function decodePeer(value: unknown): Peer {
 	const peer = exactRecord(value, "message.from", PEER_KEYS);
 	const name = stringField(peer, "name", "message.from");
-	if (!AGENT_NAME_RE.test(name)) throw new Error("message.from.name is invalid");
+	if (!AGENT_NAME_RE.test(name))
+		throw new Error("message.from.name is invalid");
 	const presenceId = stringField(peer, "presenceId", "message.from");
 	if (!presenceId) throw new Error("message.from.presenceId must not be empty");
 	return { name, presenceId };
@@ -216,16 +215,16 @@ function decodeTarget(value: unknown): MessageTarget {
 	if (type === "project") return { type };
 	if (type !== "agent") throw new Error("message.target.type is invalid");
 	const name = stringField(target, "name", "message.target");
-	if (!AGENT_NAME_RE.test(name)) throw new Error("message.target.name is invalid");
+	if (!AGENT_NAME_RE.test(name))
+		throw new Error("message.target.name is invalid");
 	const presenceId = optionalStringField(
 		target,
 		"presenceId",
 		"message.target",
 	);
-	if (presenceId === "") throw new Error("message.target.presenceId is invalid");
-	return presenceId === undefined
-		? { type, name }
-		: { type, name, presenceId };
+	if (presenceId === "")
+		throw new Error("message.target.presenceId is invalid");
+	return presenceId === undefined ? { type, name } : { type, name, presenceId };
 }
 
 function decodeTextPayload(value: unknown): EncodedTextPayload {
@@ -242,9 +241,11 @@ function decodeTextPayload(value: unknown): EncodedTextPayload {
 function decodeRealtimeMessage(value: unknown): RealtimeMessage {
 	const message = exactRecord(value, "message", MESSAGE_KEYS);
 	const messageId = stringField(message, "messageId", "message");
-	if (!MESSAGE_ID_RE.test(messageId)) throw new Error("message.messageId is invalid");
+	if (!MESSAGE_ID_RE.test(messageId))
+		throw new Error("message.messageId is invalid");
 	const project = stringField(message, "project", "message");
-	if (!PROJECT_NAME_RE.test(project)) throw new Error("message.project is invalid");
+	if (!PROJECT_NAME_RE.test(project))
+		throw new Error("message.project is invalid");
 	const sequence = safeIntegerField(message, "sequence", "message", 1);
 	const messageRef = stringField(message, "messageRef", "message");
 	if (messageRef !== formatMessageRef(project, sequence))
@@ -276,22 +277,19 @@ function decodeRealtimeMessage(value: unknown): RealtimeMessage {
 }
 
 function decodeProjectList(value: unknown): A2aProject[] {
-	const projects = exactRecord(
-		value,
-		"Project list response",
-		["projects"],
-	).projects;
+	const projects = exactRecord(value, "Project list response", [
+		"projects",
+	]).projects;
 	if (!Array.isArray(projects))
 		throw new Error("Project list response.projects must be an array");
 	return projects.map(decodeProject);
 }
 
 function decodeProjectDeletion(value: unknown): boolean {
-	const response = exactRecord(
-		value,
-		"Project deletion response",
-		["ok", "deleted"],
-	);
+	const response = exactRecord(value, "Project deletion response", [
+		"ok",
+		"deleted",
+	]);
 	if (response.ok !== true)
 		throw new Error("Project deletion response.ok must be true");
 	if (typeof response.deleted !== "boolean")
@@ -372,11 +370,7 @@ async function requestJson<T>(options: {
 		options.timeoutMs,
 	);
 	if (!response.ok)
-		throw new HubHttpError(
-			response.status,
-			options.url,
-			decodeHttpError(body),
-		);
+		throw new HubHttpError(response.status, options.url, decodeHttpError(body));
 	let value: unknown;
 	try {
 		value = JSON.parse(body);
@@ -476,7 +470,9 @@ export class HubClient {
 			!Number.isSafeInteger(this.#requestTimeoutMs) ||
 			this.#requestTimeoutMs < 0
 		) {
-			throw new Error("Hub request timeout must be a non-negative safe integer");
+			throw new Error(
+				"Hub request timeout must be a non-negative safe integer",
+			);
 		}
 	}
 
@@ -522,11 +518,9 @@ export class HubClient {
 			"Project creation response",
 			"/v1/projects",
 			(value) => {
-				const response = exactRecord(
-					value,
-					"Project creation response",
-					["project"],
-				);
+				const response = exactRecord(value, "Project creation response", [
+					"project",
+				]);
 				return decodeProject(response.project);
 			},
 			options,
@@ -566,13 +560,7 @@ export class HubClient {
 		query: HistoryQuery,
 		options?: HubRequestOptions,
 	): Promise<HistoryPage> {
-		const {
-			project: requestedProject,
-			before,
-			after,
-			from,
-			limit,
-		} = query;
+		const { project: requestedProject, before, after, from, limit } = query;
 		const parameters = new URLSearchParams({ project: requestedProject });
 		if (before) parameters.set("before", before);
 		if (after) parameters.set("after", after);

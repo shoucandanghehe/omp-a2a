@@ -3,6 +3,7 @@ import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { encodeBinaryPayload, encodeTextPayload } from "../src/hub/payload";
 import {
 	HubStore,
 	MESSAGE_STORAGE_VERSION,
@@ -10,7 +11,6 @@ import {
 	ProjectConflictError,
 	UnknownProjectError,
 } from "../src/hub/store";
-import { encodeBinaryPayload, encodeTextPayload } from "../src/hub/payload";
 
 const roots: string[] = [];
 const UNSUPPORTED_STORAGE_MESSAGE =
@@ -228,9 +228,7 @@ test("storage version mismatch fails closed without changing the database", () =
 	unsupported.close();
 	const before = readFileSync(databasePath);
 
-	expect(() => new HubStore(databasePath)).toThrow(
-		UNSUPPORTED_STORAGE_MESSAGE,
-	);
+	expect(() => new HubStore(databasePath)).toThrow(UNSUPPORTED_STORAGE_MESSAGE);
 	expect(readFileSync(databasePath)).toEqual(before);
 });
 
@@ -240,11 +238,8 @@ test("pre-existing empty storage fails closed", () => {
 	const databasePath = join(root, "messages.sqlite");
 	new Database(databasePath, { create: true }).close();
 
-	expect(() => new HubStore(databasePath)).toThrow(
-		UNSUPPORTED_STORAGE_MESSAGE,
-	);
+	expect(() => new HubStore(databasePath)).toThrow(UNSUPPORTED_STORAGE_MESSAGE);
 });
-
 
 test("current storage version rejects an incomplete schema", () => {
 	const root = mkdtempSync(join(tmpdir(), "omp-a2a-invalid-storage-"));
@@ -255,9 +250,7 @@ test("current storage version rejects an incomplete schema", () => {
 	invalid.run(`PRAGMA user_version = ${MESSAGE_STORAGE_VERSION}`);
 	invalid.close();
 
-	expect(() => new HubStore(databasePath)).toThrow(
-		UNSUPPORTED_STORAGE_MESSAGE,
-	);
+	expect(() => new HubStore(databasePath)).toThrow(UNSUPPORTED_STORAGE_MESSAGE);
 });
 
 test("current storage version rejects unexpected schema objects", () => {
@@ -330,7 +323,6 @@ test("current storage version rejects unexpected schema objects", () => {
 			error: UNSUPPORTED_STORAGE_MESSAGE,
 		},
 	]);
-
 });
 test("attachment content participates in messageId idempotency", () => {
 	const root = mkdtempSync(join(tmpdir(), "omp-a2a-attachment-idempotency-"));
@@ -436,9 +428,13 @@ test("Project deletion rolls back metadata, history, and sequence together", () 
 	expect(() => store.deleteProject("atomic")).toThrow("forced delete failure");
 	expect(store.getProject("atomic")?.name).toBe("atomic");
 	expect(
-		store.history({ project: "atomic" }).messages.map((message) => message.messageId),
+		store
+			.history({ project: "atomic" })
+			.messages.map((message) => message.messageId),
 	).toEqual(["before-failure"]);
-	expect(appendMessage(store, "atomic", "after-failure").message.sequence).toBe(2);
+	expect(appendMessage(store, "atomic", "after-failure").message.sequence).toBe(
+		2,
+	);
 
 	injector.run("DROP TRIGGER fail_project_delete");
 	injector.close();
@@ -457,6 +453,8 @@ test("deleting and recreating a Project cannot expose old history", () => {
 	expect(store.deleteProject("recreated")).toBe(false);
 	store.createProject({ name: "recreated" });
 	expect(store.history({ project: "recreated" }).messages).toEqual([]);
-	expect(appendMessage(store, "recreated", "new-history").message.sequence).toBe(1);
+	expect(
+		appendMessage(store, "recreated", "new-history").message.sequence,
+	).toBe(1);
 	store.close();
 });

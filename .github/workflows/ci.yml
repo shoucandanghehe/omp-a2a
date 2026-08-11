@@ -1,0 +1,72 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: ci-${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  quality:
+    name: Quality gate
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Run quality gate
+        run: bun run verify
+
+  dependencies:
+    name: Production dependency audit
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Audit production dependencies
+        run: bun run audit
+
+  container:
+    name: Container smoke
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - name: Set up Bun
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2.2.0
+      - name: Install dependencies
+        run: bun install --frozen-lockfile
+      - name: Validate Compose configuration
+        run: docker compose --project-name omp-a2a-boundary-smoke config --quiet
+      - name: Start Hub container
+        run: docker compose --project-name omp-a2a-boundary-smoke up --build --wait --wait-timeout 90
+      - name: Exercise container boundary
+        env:
+          OMP_A2A_HUB_URL: http://127.0.0.1:4173
+        run: bun run smoke:docker
+      - name: Show container logs on failure
+        if: failure()
+        run: docker compose --project-name omp-a2a-boundary-smoke logs --no-color
+      - name: Stop Hub container
+        if: always()
+        run: docker compose --project-name omp-a2a-boundary-smoke down --volumes --remove-orphans

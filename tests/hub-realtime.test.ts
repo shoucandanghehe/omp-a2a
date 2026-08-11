@@ -4,26 +4,26 @@ import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import WebSocket, { WebSocketServer } from "ws";
-import { A2aConnection } from "../src/hub/connection";
 import { HubClient } from "../src/hub/client";
-import type { MessageDraft } from "../src/hub/store";
+import { A2aConnection } from "../src/hub/connection";
 import {
 	decodeBinaryPayload,
 	decodeTextPayload,
 	encodeTextPayload,
 } from "../src/hub/payload";
 import {
+	RealtimeHub,
+	type RealtimeHubOptions,
+} from "../src/hub/realtime-server";
+import {
 	A2A_PROTOCOL_VERSION,
 	type ClientFrame,
 	type RealtimeMessage,
 	type ServerFrame,
 } from "../src/hub/realtime-types";
-import {
-	RealtimeHub,
-	type RealtimeHubOptions,
-} from "../src/hub/realtime-server";
-import type { EncodedAttachment } from "../src/hub/types";
 import { type HubServerHandle, startHubServer } from "../src/hub/server";
+import type { MessageDraft } from "../src/hub/store";
+import type { EncodedAttachment } from "../src/hub/types";
 
 const roots: string[] = [];
 const hubs: HubServerHandle[] = [];
@@ -101,7 +101,9 @@ async function startTestTransport(): Promise<{
 		for (const socket of websocketServer.clients) socket.terminate();
 		server.closeAllConnections();
 		await new Promise<void>((resolve) => server.close(() => resolve()));
-		await new Promise<void>((resolve) => websocketServer.close(() => resolve()));
+		await new Promise<void>((resolve) =>
+			websocketServer.close(() => resolve()),
+		);
 	});
 	return {
 		baseUrl: `http://127.0.0.1:${address.port}`,
@@ -146,7 +148,8 @@ class ManualScheduler {
 				task &&
 				!task.cancelled &&
 				(nextIndex === -1 ||
-					task.runAt < (this.#tasks[nextIndex]?.runAt ?? Number.POSITIVE_INFINITY))
+					task.runAt <
+						(this.#tasks[nextIndex]?.runAt ?? Number.POSITIVE_INFINITY))
 			) {
 				nextIndex = index;
 			}
@@ -183,9 +186,7 @@ function acceptingLedger(appendError?: Error): MessageLedger {
 	const stored = new Map<string, RealtimeMessage>();
 	return {
 		getProject(name) {
-			return name === "room"
-				? { name, createdAt: 1 }
-				: null;
+			return name === "room" ? { name, createdAt: 1 } : null;
 		},
 		append(draft) {
 			if (appendError) throw appendError;
@@ -260,7 +261,6 @@ function acceptedFrame(
 	};
 }
 
-
 afterEach(async () => {
 	jest.useRealTimers();
 	const cleanups = [
@@ -272,7 +272,9 @@ afterEach(async () => {
 	);
 	for (const root of roots.splice(0))
 		rmSync(root, { recursive: true, force: true });
-	const failedCleanup = outcomes.find((outcome) => outcome.status === "rejected");
+	const failedCleanup = outcomes.find(
+		(outcome) => outcome.status === "rejected",
+	);
 	if (failedCleanup?.status === "rejected") throw failedCleanup.reason;
 });
 
@@ -523,7 +525,7 @@ test("message history survives Hub restart while Presence does not", async () =>
 	await web.frames.next();
 	await api.frames.next();
 	const attachmentBytes = Buffer.from("# Training handoff\nseed=20\n", "utf8");
-	const attachment = {
+	const attachment: EncodedAttachment = {
 		name: "training-handoff.md",
 		payload: {
 			encoding: "base64",
@@ -764,11 +766,7 @@ test("the Hub closes transport after acknowledging goodbye", async () => {
 	hubs.push(hub);
 	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "server-goodbye" });
-	const observer = await connect(
-		hub.listenUrl,
-		"server-goodbye",
-		"observer",
-	);
+	const observer = await connect(hub.listenUrl, "server-goodbye", "observer");
 	await observer.frames.next();
 	const api = await connect(hub.listenUrl, "server-goodbye", "api");
 	await api.frames.next();
@@ -796,11 +794,7 @@ test("the Hub terminates a transport whose close frames cannot reach the peer", 
 	hubs.push(hub);
 	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "server-terminate" });
-	const observer = await connect(
-		hub.listenUrl,
-		"server-terminate",
-		"observer",
-	);
+	const observer = await connect(hub.listenUrl, "server-terminate", "observer");
 	await observer.frames.next();
 	const api = await connect(hub.listenUrl, "server-terminate", "api");
 	const closed = Promise.withResolvers<void>();
@@ -825,11 +819,7 @@ test("the Hub terminates a transport whose close frames cannot reach the peer", 
 		closeSpy.mockRestore();
 	}
 
-	const replacement = await connect(
-		hub.listenUrl,
-		"server-terminate",
-		"api",
-	);
+	const replacement = await connect(hub.listenUrl, "server-terminate", "api");
 	expect(await replacement.frames.next()).toMatchObject({ type: "claimed" });
 	replacement.socket.terminate();
 	observer.socket.terminate();
@@ -1047,7 +1037,9 @@ test("aborted and timed out message requests ignore late acceptance and errors",
 	const finalFrame = await transport.frames.next();
 	if (finalFrame.type !== "message")
 		throw new Error("expected final message request");
-	socket.send(JSON.stringify(acceptedFrame(finalFrame.requestId, "final-message")));
+	socket.send(
+		JSON.stringify(acceptedFrame(finalFrame.requestId, "final-message")),
+	);
 	expect((await final).message.messageId).toBe("final-message");
 	expect(unexpectedErrors).toEqual([]);
 	const closing = connection.close();
@@ -1235,7 +1227,6 @@ test("message timeout overrides reject invalid and over-limit values before disp
 	await closing;
 });
 
-
 test("delivery cleanup is fenced by recipient and sender Presence", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-delivery-cleanup-"));
 	roots.push(dataDir);
@@ -1285,11 +1276,7 @@ test("delivery cleanup is fenced by recipient and sender Presence", async () => 
 	expect(await recipientReplacement.frames.next()).toEqual({ type: "goodbye" });
 	await sender.frames.next();
 
-	const recipientTwo = await connect(
-		hub.listenUrl,
-		"cleanup",
-		"recipient",
-	);
+	const recipientTwo = await connect(hub.listenUrl, "cleanup", "recipient");
 	await recipientTwo.frames.next();
 	await sender.frames.next();
 	sender.socket.send(
@@ -1311,11 +1298,7 @@ test("delivery cleanup is fenced by recipient and sender Presence", async () => 
 		peer: { name: "sender" },
 	});
 
-	const senderReplacement = await connect(
-		hub.listenUrl,
-		"cleanup",
-		"sender",
-	);
+	const senderReplacement = await connect(hub.listenUrl, "cleanup", "sender");
 	await senderReplacement.frames.next();
 	await recipientTwo.frames.next();
 	recipientTwo.socket.send(
@@ -1814,9 +1797,9 @@ test("same-version clients carry large messages and arbitrary attachment counts"
 	expect(accepted.message.attachments).toHaveLength(9);
 	const received = await inbound.promise;
 	expect(received.attachments).toHaveLength(9);
-	expect(decodeBinaryPayload(received.attachments[8]!.payload)).toEqual(
-		largeBytes,
-	);
+	const largeAttachment = received.attachments[8];
+	if (!largeAttachment) throw new Error("expected ninth attachment");
+	expect(decodeBinaryPayload(largeAttachment.payload)).toEqual(largeBytes);
 	await sender.close();
 	await receiver.close();
 });

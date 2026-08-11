@@ -40,7 +40,8 @@ export async function startHubServer(
 	const host = options.host.trim();
 	if (!host) throw new Error("Hub host must not be empty");
 	const configuredDataDir = options.dataDir.trim();
-	if (!configuredDataDir) throw new Error("Hub data directory must not be empty");
+	if (!configuredDataDir)
+		throw new Error("Hub data directory must not be empty");
 	const dataDir = path.resolve(configuredDataDir);
 	let dataLock: HubDataLock | null = null;
 	let store: HubStore | null = null;
@@ -50,12 +51,12 @@ export async function startHubServer(
 	const cleanup = (): Promise<void> => {
 		if (cleanupPromise) return cleanupPromise;
 		cleanupPromise = (async () => {
-			let firstError: { value: unknown } | null = null;
+			const errors: unknown[] = [];
 			const release = async (action: () => void | Promise<void>) => {
 				try {
 					await action();
 				} catch (error) {
-					firstError ??= { value: error };
+					if (errors.length === 0) errors.push(error);
 				}
 			};
 			await release(async () => {
@@ -67,14 +68,12 @@ export async function startHubServer(
 				const listeningServer = server;
 				if (!listeningServer?.listening) return;
 				await new Promise<void>((resolve, reject) =>
-					listeningServer.close((error) =>
-						error ? reject(error) : resolve(),
-					),
+					listeningServer.close((error) => (error ? reject(error) : resolve())),
 				);
 			});
 			await release(() => store?.close());
 			await release(() => dataLock?.close());
-			if (firstError) throw firstError.value;
+			if (errors.length > 0) throw errors[0];
 		})();
 		return cleanupPromise;
 	};

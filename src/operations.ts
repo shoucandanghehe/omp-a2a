@@ -21,7 +21,6 @@ export type AcceptedMessageView =
 	| { replayed: false; message: MessageView; recipients: string[] }
 	| { replayed: true; message: MessageView };
 
-
 export type RuntimeStatus = {
 	hub: {
 		baseUrl: string;
@@ -108,10 +107,7 @@ export class A2aRuntime {
 	}
 
 	isPublishedConnection(token: AbortSignal): boolean {
-		return (
-			this.#published?.lifecycle.signal === token &&
-			!token.aborted
-		);
+		return this.#published?.lifecycle.signal === token && !token.aborted;
 	}
 	connectionToken(): AbortSignal {
 		const published = this.#published;
@@ -220,9 +216,7 @@ export class A2aRuntime {
 				},
 				onMessage: async (message) => {
 					if (this.#published?.connection !== connection) {
-						throw new Error(
-							"A2A message arrived on an unpublished connection",
-						);
+						throw new Error("A2A message arrived on an unpublished connection");
 					}
 					const handler = this.#events.onMessage;
 					if (!handler)
@@ -280,9 +274,7 @@ export class A2aRuntime {
 		++this.#transition;
 		const candidate = this.#candidate;
 		this.#candidate = null;
-		candidate?.abort.abort(
-			new Error("A2A connection transition disconnected"),
-		);
+		candidate?.abort.abort(new Error("A2A connection transition disconnected"));
 		const published = this.#published;
 		this.#published = null;
 		published?.lifecycle.abort(

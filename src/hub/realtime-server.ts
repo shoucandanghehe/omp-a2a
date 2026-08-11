@@ -15,21 +15,17 @@ import {
 } from "./realtime-types";
 import {
 	type HubStore,
-	MessageIdConflictError,
 	type MessageAppendResult,
 	type MessageDraft,
+	MessageIdConflictError,
 	UnknownReplyTargetError,
 } from "./store";
 
 const HEARTBEAT_MS = 10_000;
 const HELLO_TIMEOUT_MS = 5_000;
-const MAX_DELIVERY_ERROR_BYTES = 512;
 const GOODBYE_CLOSE_TIMEOUT_MS = 2_000;
 
-type DeliveryScheduler = (
-	callback: () => void,
-	delayMs: number,
-) => () => void;
+type DeliveryScheduler = (callback: () => void, delayMs: number) => () => void;
 
 type DeliveryRetryPolicy = {
 	maxAttempts: number;
@@ -109,7 +105,6 @@ function deliveryRetryPolicy(
 }
 
 class RecipientNotPresentError extends Error {}
-
 
 type PendingDelivery = {
 	key: string;
@@ -433,10 +428,7 @@ export class RealtimeHub {
 				}
 				recipients = this.#presences
 					.connections(presence.project)
-					.filter(
-						(recipient) =>
-							recipient.presenceId !== presence.presenceId,
-					);
+					.filter((recipient) => recipient.presenceId !== presence.presenceId);
 			}
 
 			if (appended.replayed) {

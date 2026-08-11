@@ -68,9 +68,7 @@ test("local config reports malformed YAML with its path", () => {
 test("local config rejects a non-object document root", () => {
 	const root = createRoot();
 	const file = writeConfig(root, "a2a.json", "[]");
-	expect(() => loadLocalConfig(root)).toThrow(
-		`invalid a2a config at ${file}`,
-	);
+	expect(() => loadLocalConfig(root)).toThrow(`invalid a2a config at ${file}`);
 });
 
 test("local config rejects unknown fields instead of accepting aliases", () => {
@@ -195,7 +193,5 @@ test("local config names invalid required and optional fields", () => {
 			autoConnect: "false",
 		}),
 	);
-	expect(() => loadLocalConfig(root)).toThrow(
-		"autoConnect must be boolean",
-	);
+	expect(() => loadLocalConfig(root)).toThrow("autoConnect must be boolean");
 });

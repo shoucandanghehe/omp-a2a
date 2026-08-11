@@ -14,6 +14,8 @@
 
 `bun run smoke` executes `bun test`, `smoke.ts`, then `smoke-hub.ts`. Docker is intentionally separate because it needs an already-running container boundary.
 
+`bun run verify` first enforces Biome and strict TypeScript checks, builds both executable entry points, then runs `bun run smoke`. CI owns the separate Compose lifecycle around `smoke:docker`.
+
 ## `smoke.ts`
 
 ### Goal
@@ -69,7 +71,7 @@ Cross the deployed process/network boundary rather than proving another in-proce
 ### Preconditions
 
 - A Hub is already reachable through normal client URL resolution.
-- For Compose, run `docker compose up -d --build` first.
+- For Compose, run `docker compose --project-name omp-a2a-boundary-smoke up -d --build` first and use the same project name for teardown.
 - `OMP_A2A_HUB_URL` may select a non-default published URL.
 
 ### Scenario

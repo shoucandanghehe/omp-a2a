@@ -212,7 +212,9 @@ export class HubStore {
 					this.#database
 						.query("DELETE FROM project_sequences WHERE project = ?")
 						.run(project);
-					this.#database.query("DELETE FROM projects WHERE name = ?").run(project);
+					this.#database
+						.query("DELETE FROM projects WHERE name = ?")
+						.run(project);
 					return true;
 				},
 			);
@@ -220,9 +222,7 @@ export class HubStore {
 				(draft: MessageDraft): MessageAppendResult => {
 					const attachments = this.#validateDraft(draft);
 					if (!this.#findProject.get(draft.project)) {
-						throw new UnknownProjectError(
-							`unknown project: ${draft.project}`,
-						);
+						throw new UnknownProjectError(`unknown project: ${draft.project}`);
 					}
 					const replyToSequence = this.#resolveReply(
 						draft.project,
@@ -313,9 +313,7 @@ export class HubStore {
 		const description = optionalString(options.description, "description");
 		const createdByCwd = optionalString(options.createdByCwd, "createdByCwd");
 		if (this.#findProject.get(options.name)) {
-			throw new ProjectConflictError(
-				`project already exists: ${options.name}`,
-			);
+			throw new ProjectConflictError(`project already exists: ${options.name}`);
 		}
 		const project: A2aProject = {
 			name: options.name,
@@ -445,9 +443,7 @@ export class HubStore {
 				this.#database.run(PROJECT_SEQUENCES_SCHEMA);
 				this.#database.run(MESSAGES_SCHEMA);
 				this.#database.run(MESSAGES_PROJECT_SENDER_INDEX_SCHEMA);
-				this.#database.run(
-					`PRAGMA user_version = ${MESSAGE_STORAGE_VERSION}`,
-				);
+				this.#database.run(`PRAGMA user_version = ${MESSAGE_STORAGE_VERSION}`);
 				return;
 			}
 			if (

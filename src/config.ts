@@ -1,5 +1,5 @@
-import { type as omptype, type OmpErrors } from "@oh-my-pi/omptype";
 import * as fs from "node:fs";
+import { type OmpErrors, type as omptype } from "@oh-my-pi/omptype";
 import { parseWithSchema } from "./config-document";
 import { localConfigCandidates } from "./paths";
 import type { A2aLocalConfig } from "./types";
