@@ -5,6 +5,8 @@ import {
 	type AcceptedMessage,
 	type ClientFrame,
 	type DeliveryEvent,
+	DELIVERY_OUTCOME_CACHE_MAX,
+	DELIVERY_OUTCOME_CACHE_TTL_MS,
 	type MessageRequestTarget,
 	type Peer,
 	type RealtimeMessage,
@@ -53,6 +55,11 @@ type PendingRequest = {
 	onAbort?: () => void;
 };
 
+type DeliveryOutcomeFrame = Extract<
+	ClientFrame,
+	{ type: "delivered" | "delivery_failed" }
+>;
+
 export class A2aConnection {
 	#socket: WebSocket;
 	#project: string;
@@ -72,6 +79,12 @@ export class A2aConnection {
 	#closeTimeoutMs: number;
 	#manualClose = false;
 	#messageQueue = Promise.resolve();
+	#deliveryInflight = new Map<string, Promise<DeliveryOutcomeFrame>>();
+	#deliveryOutcomes = new Map<
+		string,
+		{ frame: DeliveryOutcomeFrame; expiresAt: number }
+	>();
+	#transportClosed = false;
 
 	private constructor(
 		baseUrl: string,
@@ -124,6 +137,9 @@ export class A2aConnection {
 				);
 			for (const requestId of this.#pending.keys())
 				this.#rejectPending(requestId, failure);
+			this.#transportClosed = true;
+			this.#deliveryInflight.clear();
+			this.#deliveryOutcomes.clear();
 			this.#resolveGoodbyeWait?.();
 			this.#events.onClose?.({
 				manual: this.#manualClose,
@@ -338,13 +354,11 @@ export class A2aConnection {
 				this.#events.onPresenceLeft?.({ ...frame.peer }, frame.reason);
 				return;
 			case "message":
-				this.#messageQueue = this.#messageQueue.then(() =>
-					this.#deliverMessage(frame.message),
-				);
+				this.#receiveMessage(frame.message);
 				return;
 			case "delivery":
 				this.#events.onDelivery?.(
-					frame.status === "failed"
+					frame.status === "failed" || frame.status === "unknown"
 						? {
 								messageId: frame.messageId,
 								to: frame.to,
@@ -361,10 +375,18 @@ export class A2aConnection {
 			case "accepted": {
 				const pending = this.#takePending(frame.requestId);
 				if (!pending) return;
-				pending.resolve({
-					message: frame.message,
-					recipients: frame.recipients,
-				});
+				pending.resolve(
+					frame.replayed
+						? {
+								replayed: true,
+								message: frame.message,
+							}
+						: {
+								replayed: false,
+								message: frame.message,
+								recipients: frame.recipients,
+							},
+				);
 				return;
 			}
 			case "error": {
@@ -380,27 +402,86 @@ export class A2aConnection {
 		}
 	}
 
-	async #deliverMessage(message: RealtimeMessage): Promise<void> {
+	#receiveMessage(message: RealtimeMessage): void {
+		const cached = this.#deliveryOutcomes.get(message.messageId);
+		if (cached) {
+			if (cached.expiresAt > Date.now()) {
+				this.#sendDeliveryOutcome(cached.frame);
+				return;
+			}
+			this.#deliveryOutcomes.delete(message.messageId);
+		}
+		const inflight = this.#deliveryInflight.get(message.messageId);
+		if (inflight) {
+			void inflight.then((outcome) => this.#sendDeliveryOutcome(outcome));
+			return;
+		}
+
+		const outcome = this.#messageQueue.then(() =>
+			this.#deliveryOutcome(message),
+		);
+		this.#messageQueue = outcome.then(() => undefined);
+		this.#deliveryInflight.set(message.messageId, outcome);
+		void outcome.then((frame) => {
+			if (
+				this.#transportClosed ||
+				this.#deliveryInflight.get(message.messageId) !== outcome
+			) {
+				return;
+			}
+			this.#deliveryInflight.delete(message.messageId);
+			const now = Date.now();
+			for (const [messageId, retained] of this.#deliveryOutcomes) {
+				if (retained.expiresAt <= now) this.#deliveryOutcomes.delete(messageId);
+			}
+			while (this.#deliveryOutcomes.size >= DELIVERY_OUTCOME_CACHE_MAX) {
+				const oldest = this.#deliveryOutcomes.keys().next().value;
+				if (oldest === undefined) break;
+				this.#deliveryOutcomes.delete(oldest);
+			}
+			this.#deliveryOutcomes.set(message.messageId, {
+				frame,
+				expiresAt: now + DELIVERY_OUTCOME_CACHE_TTL_MS,
+			});
+			this.#sendDeliveryOutcome(frame);
+		});
+	}
+
+	async #deliveryOutcome(
+		message: RealtimeMessage,
+	): Promise<DeliveryOutcomeFrame> {
+		if (this.#transportClosed) {
+			return {
+				type: "delivery_failed",
+				messageId: message.messageId,
+				error: "receiver connection closed before message injection",
+			};
+		}
 		try {
 			await this.#events.onMessage?.(message);
-			this.#send({
+			return {
 				type: "delivered",
 				messageId: message.messageId,
-			});
+			};
 		} catch (error) {
 			const failure = error instanceof Error ? error : new Error(String(error));
-			try {
-				this.#send({
-					type: "delivery_failed",
-					messageId: message.messageId,
-					error: deliveryFailureMessage(failure),
-				});
-			} catch (sendError) {
-				this.#events.onError?.(
-					sendError instanceof Error ? sendError : new Error(String(sendError)),
-				);
-			}
 			this.#events.onError?.(failure);
+			return {
+				type: "delivery_failed",
+				messageId: message.messageId,
+				error: deliveryFailureMessage(failure),
+			};
+		}
+	}
+
+	#sendDeliveryOutcome(frame: DeliveryOutcomeFrame): void {
+		if (this.#transportClosed) return;
+		try {
+			this.#send(frame);
+		} catch (error) {
+			this.#events.onError?.(
+				error instanceof Error ? error : new Error(String(error)),
+			);
 		}
 	}
 

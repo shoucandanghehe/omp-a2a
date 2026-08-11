@@ -60,21 +60,25 @@ Handshake failure, timeout, or cancellation terminates the unpublished socket an
 
 The client sends `message` with `requestId`, opaque `messageId`, typed target, encoded text payload, ordered encoded attachments, and optional `replyTo`.
 
-- Direct target resolves the current name and freezes its `presenceId`.
-- Project target snapshots all current Presence except the sender.
-- A missing direct target fails before persistence.
-- Text, attachment structure/content, total decoded size, and causal references are validated before append.
+- A repeated, content-identical `messageId` returns the canonical stored Message as `replayed: true` without resolving or enumerating Presence and without delivery.
+- A new direct target resolves the current name and binds its `presenceId` before persistence; a missing target fails before persistence.
+- A new Project target is validated and atomically persisted before `PresenceRegistry` is enumerated exactly once into a local array excluding the sender.
+- Text, attachment structure/content, total decoded size, and causal references are validated by `MessageStore`.
 - `MessageStore.append` atomically commits one immutable Message—including attachments—and the next Project sequence.
-- The sender receives `accepted` with the canonical message and selected recipient names.
-- Each selected socket receives the canonical `message` frame.
+- New acceptance sends `accepted` with `replayed: false`, the canonical Message, and selected recipient names. Replay sends a distinct `replayed: true` shape with no recipients field.
+- The Hub loops over the local array and immediately enqueues the canonical `message` frame to each concrete socket. Recipient arrays are never persisted.
 
 The client waits 15 seconds by default for `accepted` or request-scoped `error`. A caller abort before dispatch sends no frame. After `socket.send` succeeds, caller abort, timeout, or transport close reports ordinary error text that acceptance and Delivery outcomes are unknown, removes the request, ignores late replies, and never retries.
 
 ### Delivery
 
-The Hub records selected recipients only in memory and fences each entry by sender and recipient `presenceId`. Receiver `delivered` or `delivery_failed` frames resolve the matching `(messageId, recipientPresenceId)` entry and produce one sender Delivery event. If that exact recipient Presence disconnects first, the sender receives `disconnected`; if the sender disconnects first, its entries are deleted silently. Neither case transfers state to a same-named replacement.
+The Hub owns exactly one in-memory pending record per `(messageId, recipientPresenceId)`. It stores the original sender socket, original recipient socket and Presence, attempt count, one timer, and a terminal guard. A WebSocket write callback error or delivery ACK timeout retries the same frame only while that socket still owns that Presence. The default policy permits three attempts, with a two-second ACK window and a fixed 100 ms transport-error delay.
 
-`delivered` proves attachment materialization and injection into the receiving OMP extension. `failed` proves that the accepted Message could not be materialized or injected. Neither proves model comprehension or task completion. Pending Delivery has no ACK deadline while both Presences stay connected; it remains until receiver result, either Presence leaving, or Hub shutdown.
+Receiver `A2aConnection` coalesces duplicate `messageId` frames with one in-flight Promise or a terminal outcome cache retained for 10 seconds and capped at 512 entries. Project sequence order remains serial, `onMessage` runs once, and each retry re-sends the cached `delivered` or `delivery_failed` frame. `delivery_failed` is terminal; no error-string retry classification exists.
+
+`delivered` proves attachment materialization and injection into the receiving OMP extension. `failed` records an explicit terminal receiver failure. `disconnected` means the bound recipient Presence left. `unknown` means the finite attempt budget ended without a conclusive ACK or the transport write dispatch result remained uncertain. None proves model comprehension or task completion.
+
+Receiver result, either Presence leaving, graceful goodbye, heartbeat cleanup, and Hub shutdown all cancel the one timer and terminalize the record at most once. Sender departure deletes its records silently. Recipient departure reports `disconnected` to a still-current sender. A same-named reconnect never inherits the record, and Hub restart retains history without resuming delivery.
 
 ### Presence lifetime
 
@@ -109,6 +113,8 @@ WebSocket -> Presence
 - encoded text, ordered attachment names/content, and total decoded-content bytes;
 - creation timestamp and optional same-Project causal parent sequence.
 
+Project recipient arrays, pending Delivery, retry attempts, outcome caches, and terminal events are not durable facts.
+
 Message references use `<project>:<sequence>`. Parsing rejects invalid Project names, non-positive/unsafe sequences, and cross-Project history cursors.
 
 ### History
@@ -123,7 +129,7 @@ Message references use `<project>:<sequence>`. Parsing rejects invalid Project n
 
 ### Idempotency and causality
 
-Reusing `messageId` with the same Project, sender name, target kind/name, text encoding/data/size, ordered attachment names/encoding/data/size, and causal parent returns the canonical stored Message. A difference in any compared field raises `MessageIdConflictError`.
+Reusing `messageId` with the same Project, sender name, target kind/name, text encoding/data/size, ordered attachment names/encoding/data/size, and causal parent returns the canonical stored Message with `replayed: true`. A difference in any compared field raises `MessageIdConflictError`.
 
 `replyTo` must resolve to an existing message in the same Project or `UnknownReplyTargetError` is raised.
 
@@ -166,10 +172,10 @@ Stop closes realtime clients, the HTTP server, message storage, metadata files, 
 
 ## Test coverage
 
-- `hub-realtime.test.ts`: bounded/cancellable handshake, goodbye ordering and fallback termination, concurrent close, Presence lifetime and name reuse, direct/broadcast snapshots, message request cancellation/timeout and late replies, Delivery outcomes and disconnect cleanup, attachment persistence, and restart.
+- `hub-realtime.test.ts`: bounded/cancellable handshake, goodbye ordering and fallback termination, concurrent close, Presence lifetime and name reuse, persist-before-enumerate broadcast, replay without redelivery, nonblocking batch enqueue, same-Presence transport/ACK retries, receiver deduplication, terminal delivered/failed/disconnected/unknown cleanup, attachment persistence, and restart.
 - `message-store.test.ts`: ordering, attachment-aware idempotency, causal references, filters, protocol version `2`/legacy migration, integrity, and deletion.
 - `hub-control.test.ts`: independent Hubs, Project control, active-Presence deletion rejection, and safe name reuse.
 - `payload.test.ts`: text/binary compression, attachment count, and decoded-size enforcement.
-- `operations.test.ts`: client/runtime integration, pre-dispatch cancellation, and successful/failed Delivery callbacks.
+- `operations.test.ts`: client/runtime integration, pre-dispatch cancellation, strong new/replayed acceptance, and successful/failed Delivery callbacks.
 
 See `scripts/codemap.md` for executable boundary scenarios.

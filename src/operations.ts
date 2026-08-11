@@ -17,6 +17,10 @@ export type MessageView = Omit<RealtimeMessage, "payload" | "attachments"> & {
 	text: string;
 	attachments: MessageAttachment[];
 };
+export type AcceptedMessageView =
+	| { replayed: false; message: MessageView; recipients: string[] }
+	| { replayed: true; message: MessageView };
+
 
 export type RuntimeStatus = {
 	hub: HubMeta;
@@ -134,16 +138,22 @@ export class A2aRuntime {
 			messageId?: string;
 		},
 		request: { signal?: AbortSignal } = {},
-	): Promise<{ message: MessageView; recipients: string[] }> {
+	): Promise<AcceptedMessageView> {
 		if (!this.#connection) throw new Error("A2A is not connected");
 		const accepted: AcceptedMessage = await this.#connection.send(
 			options,
 			request,
 		);
-		return {
-			message: this.#view(accepted.message),
-			recipients: accepted.recipients,
-		};
+		return accepted.replayed
+			? {
+					replayed: true,
+					message: this.#view(accepted.message),
+				}
+			: {
+					replayed: false,
+					message: this.#view(accepted.message),
+					recipients: accepted.recipients,
+				};
 	}
 
 	async history(query?: Omit<HistoryQuery, "project">): Promise<MessageView[]> {
