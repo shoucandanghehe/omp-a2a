@@ -246,7 +246,7 @@ export default function a2aExtension(pi: ExtensionAPI) {
 	let reconnectDelayMs = 500;
 	let configRevision = 0;
 
-	const refreshLocalConfig = (cwd: string) => {
+	const refreshLocalConfig = async (cwd: string) => {
 		try {
 			const config = loadLocalConfig(cwd);
 			configuredHubUrl = config?.hubUrl;
@@ -257,11 +257,16 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		} catch (error) {
 			configuredHubUrl = undefined;
 			client = null;
-			configError =
+			const failure =
 				error instanceof Error ? error : new Error(String(error));
+			configError = failure;
 			configLoaded = true;
 			configRevision += 1;
-			throw configError;
+			desiredConnection = null;
+			clearTimeout(reconnectTimer);
+			reconnectTimer = undefined;
+			await runtime.disconnect();
+			throw failure;
 		}
 	};
 	const ensureClient = async (): Promise<HubClient> => {
@@ -377,7 +382,7 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		activeContext = context;
 		let config: A2aLocalConfig | null;
 		try {
-			config = refreshLocalConfig(context.cwd);
+			config = await refreshLocalConfig(context.cwd);
 		} catch (error) {
 			context.ui.notify(
 				`A2A config error: ${error instanceof Error ? error.message : String(error)}`,
@@ -429,7 +434,19 @@ export default function a2aExtension(pi: ExtensionAPI) {
 			const { positional, flags } = parseArgs(raw);
 			const command = positional[0] ?? "help";
 			try {
-				refreshLocalConfig(context.cwd);
+				if (command === "disconnect") {
+					desiredConnection = null;
+					clearTimeout(reconnectTimer);
+					reconnectTimer = undefined;
+					context.ui.notify(
+						(await runtime.disconnect())
+							? "Disconnected"
+							: "A2A is not connected",
+						"info",
+					);
+					return;
+				}
+				await refreshLocalConfig(context.cwd);
 				if (command === "help" || command === "--help" || command === "-h") {
 					context.ui.notify(usage(), "info");
 					return;
@@ -496,18 +513,6 @@ export default function a2aExtension(pi: ExtensionAPI) {
 					}
 					desiredConnection = { project, name };
 					await connectDesired();
-					return;
-				}
-				if (command === "disconnect") {
-					desiredConnection = null;
-					clearTimeout(reconnectTimer);
-					reconnectTimer = undefined;
-					context.ui.notify(
-						(await runtime.disconnect())
-							? "Disconnected"
-							: "A2A is not connected",
-						"info",
-					);
 					return;
 				}
 				if (command === "status") {

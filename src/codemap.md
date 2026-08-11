@@ -38,7 +38,7 @@ On `session_start` and `session_switch`, the extension:
 4. reports invalid configuration to the UI and preserves that error so Hub and Project operations cannot fall back to environment, global, default, or a prior client;
 5. auto-connects only when configuration is valid, present, and `autoConnect !== false`.
 
-Commands reload the current Session configuration. A successful reload clears the invalid state; an absent configuration or a valid configuration without `hubUrl` retains environment → global → default Hub URL resolution.
+Commands reload the current Session configuration. A successful reload clears the invalid state; an absent configuration or a valid configuration without `hubUrl` retains environment → global → default Hub URL resolution. An invalid reload atomically publishes fail-closed config state, cancels reconnect intent, and closes the current Presence before reporting the path-qualified error. The local `disconnect` command remains available without reparsing invalid configuration.
 
 On `session_shutdown`, it clears the active context and desired state, cancels reconnect, and closes the socket. Unexpected socket close schedules reconnect. A `name_in_use` response is terminal for that desired connection rather than repeatedly displacing or retrying the owner.
 
@@ -144,7 +144,7 @@ OMP callbacks / slash / tools
 
 ## Tests touching this directory
 
-- `extension.test.ts`: registered surfaces, invalid Session configuration isolation, completion, and cross-session attachment snapshot/materialization/history.
+- `extension.test.ts`: registered surfaces, invalid Session configuration isolation and live-Presence fail-closed reloads, completion, and cross-session attachment snapshot/materialization/history.
 - `operations.test.ts`: runtime connect, snapshots, message and successful/failed Delivery callbacks, and disconnected errors.
 - `config.test.ts`: strict configuration parsing and migration failures.
 - `hub-client.test.ts`: strict global configuration parsing, exact fields, and authoritative candidate selection.
