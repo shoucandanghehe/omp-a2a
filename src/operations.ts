@@ -35,16 +35,39 @@ export type RuntimeStatus = {
 export type A2aRuntimeEvents = {
 	onPresenceJoined?: A2aConnectionEvents["onPresenceJoined"];
 	onPresenceLeft?: A2aConnectionEvents["onPresenceLeft"];
-	onMessage?: (message: MessageView) => void | Promise<void>;
+	onMessage?: (
+		message: MessageView,
+		signal: AbortSignal,
+	) => void | Promise<void>;
 	onDelivery?: (delivery: DeliveryEvent) => void;
 	onClose?: A2aConnectionEvents["onClose"];
 	onError?: A2aConnectionEvents["onError"];
 };
 
+type PublishedConnection = {
+	connection: A2aConnection;
+	client: HubClient;
+	lifecycle: AbortController;
+};
+type ConnectionResult = {
+	project: string;
+	name: string;
+	presenceId: string;
+	peers: Peer[];
+};
+
+type ConnectionCandidate = {
+	abort: AbortController;
+	promise: Promise<ConnectionResult>;
+};
+
 export class A2aRuntime {
 	#getClient: () => Promise<HubClient>;
 	#events: A2aRuntimeEvents;
-	#connection: A2aConnection | null = null;
+	#published: PublishedConnection | null = null;
+	#transition = 0;
+	#candidate: ConnectionCandidate | null = null;
+	#teardown: Promise<void> = Promise.resolve();
 
 	constructor(options: {
 		getClient: () => Promise<HubClient>;
@@ -55,59 +78,193 @@ export class A2aRuntime {
 	}
 
 	get connected(): boolean {
-		return this.#connection !== null;
+		return this.#published !== null;
 	}
 
 	get project(): string | null {
-		return this.#connection?.project ?? null;
+		return this.#published?.connection.project ?? null;
 	}
 
 	get name(): string | null {
-		return this.#connection?.name ?? null;
+		return this.#published?.connection.name ?? null;
 	}
 
-	async connect(
-		project: string,
-		name: string,
-	): Promise<{
+	get publishedTarget(): {
 		project: string;
 		name: string;
-		presenceId: string;
-		peers: Peer[];
-	}> {
+		client: HubClient;
+	} | null {
+		const published = this.#published;
+		return published
+			? {
+					project: published.connection.project,
+					name: published.connection.name,
+					client: published.client,
+				}
+			: null;
+	}
+
+	isPublishedConnection(token: AbortSignal): boolean {
+		return (
+			this.#published?.lifecycle.signal === token &&
+			!token.aborted
+		);
+	}
+	connectionToken(): AbortSignal {
+		const published = this.#published;
+		if (!published) throw new Error("A2A is not connected");
+		return published.lifecycle.signal;
+	}
+
+	connect(
+		project: string,
+		name: string,
+		client?: HubClient | (() => Promise<HubClient>),
+	): Promise<ConnectionResult> {
+		const transition = ++this.#transition;
+		const predecessorCandidate = this.#candidate;
+		const predecessorTeardown = Promise.all([
+			this.#teardown,
+			predecessorCandidate?.promise.catch(() => undefined),
+		]).then(() => undefined);
+		this.#teardown = predecessorTeardown;
+		predecessorCandidate?.abort.abort(
+			new Error("A2A connection transition superseded"),
+		);
+		const abort = new AbortController();
+		const promise = this.#connectCandidate({
+			project,
+			name,
+			client,
+			transition,
+			abort,
+			predecessorTeardown,
+		});
+		const candidate = { abort, promise };
+		this.#candidate = candidate;
+		const clearCandidate = () => {
+			if (this.#candidate === candidate) this.#candidate = null;
+		};
+		void promise.then(clearCandidate, clearCandidate);
+		return promise;
+	}
+
+	async #connectCandidate(options: {
+		project: string;
+		name: string;
+		client?: HubClient | (() => Promise<HubClient>);
+		transition: number;
+		abort: AbortController;
+		predecessorTeardown: Promise<void>;
+	}): Promise<ConnectionResult> {
+		const {
+			project,
+			name,
+			client: requestedClient,
+			transition,
+			abort,
+			predecessorTeardown,
+		} = options;
+		await predecessorTeardown;
+		abort.signal.throwIfAborted();
+		const client =
+			typeof requestedClient === "function"
+				? await requestedClient()
+				: (requestedClient ?? (await this.#getClient()));
+		if (transition !== this.#transition) {
+			abort.abort(new Error("A2A connection transition superseded"));
+		}
+		abort.signal.throwIfAborted();
+
+		const predecessor = this.#published;
 		if (
-			this.#connection?.project === project &&
-			this.#connection.name === name
+			predecessor?.connection.project === project &&
+			predecessor.connection.name === name &&
+			predecessor.client.baseUrl === client.baseUrl
 		) {
 			return {
 				project,
 				name,
-				presenceId: this.#connection.self.presenceId,
-				peers: this.#connection.peers(),
+				presenceId: predecessor.connection.self.presenceId,
+				peers: predecessor.connection.peers(),
 			};
 		}
-		await this.disconnect();
-		const client = await this.#getClient();
+
+		const lifecycle = new AbortController();
 		let connection: A2aConnection | null = null;
+		let candidateClosed = false;
 		connection = await A2aConnection.connect({
 			baseUrl: client.baseUrl,
 			project,
 			name,
+			signal: abort.signal,
 			events: {
-				onPresenceJoined: this.#events.onPresenceJoined,
-				onPresenceLeft: this.#events.onPresenceLeft,
-				onDelivery: this.#events.onDelivery,
-				onError: this.#events.onError,
-				onMessage: async (message) =>
-					await this.#events.onMessage?.(this.#view(message)),
+				onPresenceJoined: (peer) => {
+					if (this.#published?.connection === connection)
+						this.#events.onPresenceJoined?.(peer);
+				},
+				onPresenceLeft: (peer, reason) => {
+					if (this.#published?.connection === connection)
+						this.#events.onPresenceLeft?.(peer, reason);
+				},
+				onDelivery: (delivery) => {
+					if (this.#published?.connection === connection)
+						this.#events.onDelivery?.(delivery);
+				},
+				onError: (error) => {
+					if (this.#published?.connection === connection)
+						this.#events.onError?.(error);
+				},
+				onMessage: async (message) => {
+					if (this.#published?.connection !== connection) {
+						throw new Error(
+							"A2A message arrived on an unpublished connection",
+						);
+					}
+					const handler = this.#events.onMessage;
+					if (!handler)
+						throw new Error("A2A inbound message has no injection handler");
+					await handler(this.#view(message), lifecycle.signal);
+					if (
+						this.#published?.connection !== connection ||
+						lifecycle.signal.aborted
+					) {
+						throw new Error(
+							"A2A connection changed before message injection completed",
+						);
+					}
+				},
 				onClose: (event) => {
-					if (connection && this.#connection === connection)
-						this.#connection = null;
+					candidateClosed = true;
+					if (!connection || this.#published?.connection !== connection) return;
+					lifecycle.abort(new Error("A2A published connection closed"));
+					this.#published = null;
 					this.#events.onClose?.(event);
 				},
 			},
 		});
-		this.#connection = connection;
+		if (
+			transition !== this.#transition ||
+			abort.signal.aborted ||
+			candidateClosed
+		) {
+			await connection.close();
+			abort.signal.throwIfAborted();
+			throw new Error("A2A connection candidate closed before publication");
+		}
+		this.#published = { connection, client, lifecycle };
+		if (predecessor) {
+			predecessor.lifecycle.abort(
+				new Error("A2A published connection replaced"),
+			);
+			await predecessor.connection.close();
+		}
+		if (
+			transition !== this.#transition ||
+			this.#published?.connection !== connection
+		) {
+			throw new Error("A2A connection transition superseded");
+		}
 		return {
 			project,
 			name,
@@ -117,16 +274,31 @@ export class A2aRuntime {
 	}
 
 	async disconnect(): Promise<boolean> {
-		const connection = this.#connection;
-		if (!connection) return false;
-		this.#connection = null;
-		await connection.close();
-		return true;
+		++this.#transition;
+		const candidate = this.#candidate;
+		this.#candidate = null;
+		candidate?.abort.abort(
+			new Error("A2A connection transition disconnected"),
+		);
+		const published = this.#published;
+		this.#published = null;
+		published?.lifecycle.abort(
+			new Error("A2A published connection disconnected"),
+		);
+		const teardown = Promise.all([
+			this.#teardown,
+			candidate?.promise.catch(() => undefined),
+			published?.connection.close(),
+		]).then(() => undefined);
+		this.#teardown = teardown;
+		await teardown;
+		return published !== null;
 	}
 
 	peers(): Peer[] {
-		if (!this.#connection) throw new Error("A2A is not connected");
-		return this.#connection.peers();
+		const connection = this.#published?.connection;
+		if (!connection) throw new Error("A2A is not connected");
+		return connection.peers();
 	}
 
 	async message(
@@ -137,13 +309,19 @@ export class A2aRuntime {
 			replyTo?: string;
 			messageId?: string;
 		},
-		request: { signal?: AbortSignal } = {},
+		request: { signal?: AbortSignal; connectionToken?: AbortSignal } = {},
 	): Promise<AcceptedMessageView> {
-		if (!this.#connection) throw new Error("A2A is not connected");
-		const accepted: AcceptedMessage = await this.#connection.send(
-			options,
-			request,
-		);
+		const published = this.#published;
+		if (
+			!published ||
+			(request.connectionToken &&
+				(published.lifecycle.signal !== request.connectionToken ||
+					request.connectionToken.aborted))
+		)
+			throw new Error("A2A connection changed before message send");
+		const accepted: AcceptedMessage = await published.connection.send(options, {
+			signal: request.signal,
+		});
 		return accepted.replayed
 			? {
 					replayed: true,
@@ -160,10 +338,11 @@ export class A2aRuntime {
 		query?: Omit<HistoryQuery, "project">,
 		options?: HubRequestOptions,
 	): Promise<MessageView[]> {
-		if (!this.#connection) throw new Error("A2A is not connected");
-		const page = await (await this.#getClient()).history(
+		const published = this.#published;
+		if (!published) throw new Error("A2A is not connected");
+		const page = await published.client.history(
 			{
-				project: this.#connection.project,
+				project: published.connection.project,
 				...query,
 			},
 			options,
@@ -172,8 +351,11 @@ export class A2aRuntime {
 	}
 
 	async status(options?: HubRequestOptions): Promise<RuntimeStatus> {
-		const hub = await (await this.#getClient()).meta(options);
-		const connection = this.#connection;
+		const published = this.#published;
+		const hub = await (published?.client ?? (await this.#getClient())).meta(
+			options,
+		);
+		const connection = published?.connection ?? null;
 		return {
 			hub,
 			connection: connection

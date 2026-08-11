@@ -103,8 +103,8 @@ The Hub runs locally with `bun run hub` or in Docker Compose. Each Hub needs a u
 
 Connected model turns receive the current A2A roster name and use only `a2a_peers` results or inbound sender names to address peers; disconnected turns receive no A2A identity prompt.
 
-Inbound messages are pushed through OMP `sendMessage` in Hub-assigned Project sequence using `steer` delivery: idle sessions start a turn and busy sessions queue the Message into the active turn. Models never wait, sleep, or poll history for replies.
-The sender Extension snapshots attachment bytes before sending. Receivers and history callers materialize new URLs in their own session-local storage; the Hub never resolves `local://`.
+Inbound messages are pushed through OMP `sendMessage` in Hub-assigned Project sequence using `steer` delivery: idle sessions start a turn and busy sessions queue the Message into the active turn. Injection rechecks the published connection token and Session generation after cancellable attachment materialization; stale work reports failed delivery. Models never wait, sleep, or poll history for replies.
+The sender Extension snapshots attachment bytes before sending and fences the final send to the initiating Session and published connection. Receivers and history callers materialize new URLs in their own session-local storage; caller cancellation or Session/connection shutdown stops attachment I/O and removes every uncommitted output directory, including completed siblings of a failed batch. The Hub never resolves `local://`.
 
 ## Root asset map
 
