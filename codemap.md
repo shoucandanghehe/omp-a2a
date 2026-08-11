@@ -44,7 +44,7 @@ OMP session
 
 ### Realtime plane
 
-1. `A2aConnection` opens `/v1/connect`, sends a versioned `hello`, and waits at most 5 seconds (or until caller cancellation) for the claim.
+1. `A2aConnection` opens `/v1/connect`, sends a versioned `hello`, and waits at most 5 seconds (or until caller cancellation) for the claim. The first handshake outcome remains authoritative while the failed socket is torn down.
 2. `RealtimeHub` verifies the Project and atomically claims the name in `PresenceRegistry`.
 3. The client receives its `presenceId` and the current peer snapshot; current peers receive `presence_joined`.
 4. A message request resolves either one current Presence or the current Project Presence snapshot.
@@ -128,7 +128,7 @@ The sender Extension snapshots attachment bytes before sending. Receivers and hi
 
 ## Verification
 
-The local release gate runs Biome, `bun run smoke`, both Bun entry-point builds, and `docker compose config`. It covers Project isolation and deletion, bounded WebSocket handshake/message/close lifecycles, caller cancellation boundaries, Presence name conflicts and notifications, direct and broadcast routing, successful/failed/disconnected Delivery cleanup, attachment snapshot/materialization/history, persistent history and protocol version `2`/legacy migration, payload limits, Hub restart, extension registration, and command completion.
+The local release gate runs Biome, `bun run smoke`, both Bun entry-point builds, and `docker compose config`. It covers Project isolation and deletion, bounded WebSocket handshake/message/close lifecycles, caller cancellation boundaries and winning handshake failure preservation, nonresponsive client/Hub close termination through a transparent TCP boundary, Presence name conflicts and notifications, direct and broadcast routing, successful/failed/disconnected Delivery cleanup, attachment snapshot/materialization/history, persistent history and protocol version `2`/legacy migration, payload limits, Hub restart, extension registration, and command completion.
 
 `bun run smoke:docker` crosses the public HTTP/WebSocket process boundary of the selected running Hub, verifies persisted history, and removes its temporary Project.
 

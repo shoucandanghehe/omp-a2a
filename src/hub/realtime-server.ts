@@ -429,9 +429,10 @@ export class RealtimeHub {
 
 	#closeAfterGoodbye(socket: WebSocket): void {
 		socket.close(1000, "goodbye acknowledged");
-		const terminateTimer = setTimeout(() => {
-			if (socket.readyState !== WebSocket.CLOSED) socket.terminate();
-		}, GOODBYE_CLOSE_TIMEOUT_MS);
+		const terminateTimer = setTimeout(
+			() => socket.terminate(),
+			GOODBYE_CLOSE_TIMEOUT_MS,
+		);
 		terminateTimer.unref();
 		socket.once("close", () => clearTimeout(terminateTimer));
 	}

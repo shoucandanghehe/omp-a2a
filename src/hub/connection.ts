@@ -88,6 +88,7 @@ export class A2aConnection {
 	#messageQueue = Promise.resolve();
 	#handshakeAborted = false;
 	#handshakeAbortReason: unknown;
+	#closeFinalized = false;
 
 	private constructor(
 		baseUrl: string,
@@ -128,28 +129,9 @@ export class A2aConnection {
 			this.#events.onError?.(failure);
 			if (!this.#self) this.#rejectReady(failure);
 		});
-		this.#socket.on("close", (code, reason) => {
-			const failure = unknownMessageOutcome(
-				`the WebSocket closed (${code}: ${reason.toString() || "no reason"}) before the Hub replied`,
-			);
-			if (!this.#self)
-				this.#rejectReady(
-					this.#handshakeAborted
-						? this.#handshakeAbortReason
-						: new Error(
-								`A2A connection closed (${code}): ${reason.toString() || "no reason"}`,
-							),
-				);
-			for (const requestId of this.#pending.keys())
-				this.#rejectPending(requestId, failure);
-			this.#resolveGoodbyeWait?.();
-			this.#events.onClose?.({
-				manual: this.#manualClose,
-				code,
-				reason: reason.toString(),
-			});
-			this.#resolveClosed();
-		});
+		this.#socket.on("close", (code, reason) =>
+			this.#finalizeClose(code, reason.toString()),
+		);
 	}
 
 	static async connect(options: {
@@ -205,14 +187,12 @@ export class A2aConnection {
 		});
 		try {
 			await Promise.race([connection.#ready, failed]);
-			if (options.signal?.aborted) throw options.signal.reason;
 			return connection;
 		} catch (error) {
 			connection.#manualClose = true;
 			if (connection.#socket.readyState !== WebSocket.CLOSED)
 				connection.#socket.terminate();
-			await connection.#closed;
-			if (options.signal?.aborted) throw options.signal.reason;
+			await connection.#waitForClose();
 			throw error;
 		} finally {
 			clearTimeout(timer);
@@ -316,10 +296,11 @@ export class A2aConnection {
 	}
 
 	async #performClose(): Promise<void> {
-		if (this.#socket.readyState === WebSocket.CLOSED) return await this.#closed;
+		if (this.#socket.readyState === WebSocket.CLOSED)
+			return await this.#waitForClose();
 		if (!this.#self || this.#socket.readyState !== WebSocket.OPEN) {
-			if (this.#socket.readyState !== WebSocket.CLOSED) this.#socket.terminate();
-			return await this.#closed;
+			this.#socket.terminate();
+			return await this.#waitForClose();
 		}
 
 		try {
@@ -342,21 +323,57 @@ export class A2aConnection {
 
 		if (this.#socket.readyState === WebSocket.OPEN)
 			this.#socket.close(1000, "client disconnect");
-		if (this.#socket.readyState !== WebSocket.CLOSED) {
-			let terminateTimer: NodeJS.Timeout | undefined;
-			await Promise.race([
-				this.#closed,
-				new Promise<void>((resolve) => {
-					terminateTimer = setTimeout(() => {
+		return await this.#waitForClose();
+	}
+
+	async #waitForClose(): Promise<void> {
+		if (this.#closeFinalized) return await this.#closed;
+		let closeTimer: NodeJS.Timeout | undefined;
+		await Promise.race([
+			this.#closed,
+			new Promise<void>((resolve) => {
+				closeTimer = setTimeout(() => {
+					const reason = `WebSocket close timed out after ${this.#closeTimeoutMs}ms`;
+					try {
+						this.#finalizeClose(1006, reason);
+					} finally {
 						if (this.#socket.readyState !== WebSocket.CLOSED)
 							this.#socket.terminate();
 						resolve();
-					}, this.#closeTimeoutMs);
-				}),
-			]);
-			clearTimeout(terminateTimer);
-		}
+					}
+				}, this.#closeTimeoutMs);
+			}),
+		]);
+		clearTimeout(closeTimer);
 		return await this.#closed;
+	}
+
+	#finalizeClose(code: number, reason: string): void {
+		if (this.#closeFinalized) return;
+		this.#closeFinalized = true;
+		const failure = unknownMessageOutcome(
+			`the WebSocket closed (${code}: ${reason || "no reason"}) before the Hub replied`,
+		);
+		if (!this.#self)
+			this.#rejectReady(
+				this.#handshakeAborted
+					? this.#handshakeAbortReason
+					: new Error(
+							`A2A connection closed (${code}): ${reason || "no reason"}`,
+						),
+			);
+		for (const requestId of this.#pending.keys())
+			this.#rejectPending(requestId, failure);
+		this.#resolveGoodbyeWait?.();
+		try {
+			this.#events.onClose?.({
+				manual: this.#manualClose,
+				code,
+				reason,
+			});
+		} finally {
+			this.#resolveClosed();
+		}
 	}
 
 	#handleFrame(frame: ServerFrame): void {
