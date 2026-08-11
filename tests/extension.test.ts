@@ -6,10 +6,14 @@ import {
 	rmSync,
 	writeFileSync,
 } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { resolveLocalUrlToFile } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
+import WebSocket, { WebSocketServer } from "ws";
 import a2aExtension from "../src/extension";
+import { materializeLocalAttachments } from "../src/local-attachments";
 import { HubClient } from "../src/hub/client";
 import { A2aConnection } from "../src/hub/connection";
 import { encodeBinaryPayload } from "../src/hub/payload";
@@ -442,7 +446,6 @@ test("session switch cancels an in-flight inbound injection", async () => {
 	const hub = await startHubServer({ port: 0, dataDir });
 	const client = new HubClient(hub.meta.baseUrl);
 	const delivery = Promise.withResolvers<DeliveryEvent>();
-	const receiverError = Promise.withResolvers<void>();
 	const injected: string[] = [];
 	let sender: A2aConnection | undefined;
 	let switchPromise: Promise<void> | undefined;
@@ -496,7 +499,7 @@ test("session switch cancels an in-flight inbound injection", async () => {
 				if (event === "session_switch")
 					sessionSwitch = handler as typeof sessionSwitch;
 			},
-			logger: { warn: () => receiverError.resolve() },
+			logger: { warn() {} },
 			sendMessage(message: { content: string }) {
 				injected.push(message.content);
 			},
@@ -531,8 +534,7 @@ test("session switch cancels an in-flight inbound injection", async () => {
 			],
 			messageId: "switch-in-flight",
 		});
-		const outcome = await delivery.promise;
-		if (outcome.status === "disconnected") await receiverError.promise;
+		await delivery.promise;
 		await switchPromise;
 
 		expect(injected).toEqual([]);
@@ -540,6 +542,247 @@ test("session switch cancels an in-flight inbound injection", async () => {
 		await sender?.close();
 		if (commandHandler) await commandHandler("disconnect", switchedContext);
 		await hub.stop();
+		rmSync(dataDir, { recursive: true, force: true });
+	}
+});
+
+test("manual Project switch cancels old in-flight attachment injection", async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-extension-project-switch-"));
+	const receiverCwd = join(dataDir, "receiver");
+	const receiverArtifacts = join(dataDir, "receiver-artifacts");
+	const hub = await startHubServer({ port: 0, dataDir });
+	const client = new HubClient(hub.meta.baseUrl);
+	const delivery = Promise.withResolvers<DeliveryEvent>();
+	const materializationStarted = Promise.withResolvers<void>();
+	const releaseMaterialization = Promise.withResolvers<void>();
+	const injected: string[] = [];
+	const notifications: string[] = [];
+	let sender: A2aConnection | undefined;
+	let commandHandler:
+		| ((args: string, context: typeof receiverContext) => Promise<void>)
+		| undefined;
+	const receiverContext = {
+		cwd: receiverCwd,
+		ui: {
+			notify(message: string) {
+				notifications.push(message);
+			},
+		},
+		isIdle: () => true,
+		sessionManager: { getSessionId: () => "receiver-session" },
+		localProtocolOptions: {
+			getArtifactsDir: () => receiverArtifacts,
+			getSessionId: () => "receiver-session",
+		},
+	};
+
+	try {
+		await client.createProject({ name: "project-a" });
+		await client.createProject({ name: "project-b" });
+		mkdirSync(join(receiverCwd, ".omp"), { recursive: true });
+		writeFileSync(
+			join(receiverCwd, ".omp", "a2a.yml"),
+			`project: project-a\nname: receiver\nhubUrl: ${hub.meta.baseUrl}\nautoConnect: false\n`,
+		);
+		a2aExtension(
+			{
+				arktype(definition: unknown) {
+					return definition;
+				},
+				setLabel() {},
+				on() {},
+				logger: { warn() {} },
+				sendMessage(message: { content: string }) {
+					injected.push(message.content);
+				},
+				registerCommand(
+					_name: string,
+					command: { handler: typeof commandHandler },
+				) {
+					commandHandler = command.handler;
+				},
+				registerTool() {},
+			} as never,
+			{
+				materializeAttachments: async (attachments, options) => {
+					const materialized = await materializeLocalAttachments(
+						attachments,
+						options,
+					);
+					materializationStarted.resolve();
+					await releaseMaterialization.promise;
+					return materialized;
+				},
+			},
+		);
+		if (!commandHandler) throw new Error("a2a command was not registered");
+		await commandHandler("connect project-a --as receiver", receiverContext);
+		sender = await A2aConnection.connect({
+			baseUrl: hub.meta.baseUrl,
+			project: "project-a",
+			name: "sender",
+			events: { onDelivery: delivery.resolve },
+		});
+
+		await sender.send({
+			target: { type: "agent", name: "receiver" },
+			text: "must not cross Projects",
+			attachments: [
+				{
+					name: "project-a.txt",
+					payload: encodeBinaryPayload(Buffer.from("project A", "utf8")),
+				},
+			],
+			messageId: "project-switch-in-flight",
+		});
+		await materializationStarted.promise;
+		await commandHandler("connect project-b --as receiver", receiverContext);
+		releaseMaterialization.resolve();
+		await delivery.promise;
+		await commandHandler("status", receiverContext);
+
+		expect(injected).toEqual([]);
+		expect(notifications.at(-1)).toContain("Project: project-b");
+	} finally {
+		releaseMaterialization.resolve();
+		await sender?.close();
+		if (commandHandler) await commandHandler("disconnect", receiverContext);
+		await hub.stop();
+		rmSync(dataDir, { recursive: true, force: true });
+	}
+});
+
+test("name conflict keeps the published target as reconnect intent", async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-extension-name-conflict-"));
+	const cwd = join(dataDir, "client");
+	const server = createServer((request, response) => {
+		if (request.url !== "/v1/meta") {
+			response.writeHead(404).end();
+			return;
+		}
+		const port = (server.address() as AddressInfo).port;
+		response.setHeader("content-type", "application/json");
+		response.end(
+			JSON.stringify({
+				pid: process.pid,
+				port,
+				baseUrl: `http://127.0.0.1:${port}`,
+				dataDir,
+				startedAt: Date.now(),
+				protocolVersion: 3,
+			}),
+		);
+	});
+	const webSockets = new WebSocketServer({ noServer: true });
+	server.on("upgrade", (request, socket, head) => {
+		webSockets.handleUpgrade(request, socket, head, (webSocket) => {
+			webSockets.emit("connection", webSocket, request);
+		});
+	});
+	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+	const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+	const initialOld = Promise.withResolvers<WebSocket>();
+	const reconnectedOld = Promise.withResolvers<void>();
+	const connectionLost = Promise.withResolvers<void>();
+	const reconnectCompleted = Promise.withResolvers<void>();
+	let connectedNotifications = 0;
+	let oldClaims = 0;
+	webSockets.on("connection", (socket) => {
+		socket.on("message", (data) => {
+			const hello = JSON.parse(data.toString()) as {
+				type: string;
+				project?: string;
+				name?: string;
+			};
+			if (hello.type !== "hello" || !hello.project || !hello.name) return;
+			if (hello.project === "blocked") {
+				socket.send(
+					JSON.stringify({
+						type: "error",
+						code: "name_in_use",
+						message: "that name is already present",
+					}),
+				);
+				return;
+			}
+			oldClaims += 1;
+			socket.send(
+				JSON.stringify({
+					type: "claimed",
+					protocolVersion: 3,
+					project: hello.project,
+					self: {
+						name: hello.name,
+						presenceId: `old-presence-${oldClaims}`,
+					},
+					peers: [],
+				}),
+			);
+			if (oldClaims === 1) initialOld.resolve(socket);
+			else reconnectedOld.resolve();
+		});
+	});
+	const notifications: string[] = [];
+	let commandHandler:
+		| ((args: string, context: typeof context) => Promise<void>)
+		| undefined;
+	const context = {
+		cwd,
+		ui: {
+			notify(message: string) {
+				notifications.push(message);
+				if (message.includes("connection lost")) connectionLost.resolve();
+				if (message === "Connected to stable as worker") {
+					connectedNotifications += 1;
+					if (connectedNotifications === 2) reconnectCompleted.resolve();
+				}
+			},
+		},
+		isIdle: () => true,
+		sessionManager: { getSessionId: () => "name-conflict-session" },
+	};
+
+	try {
+		mkdirSync(join(cwd, ".omp"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".omp", "a2a.yml"),
+			`project: stable\nname: worker\nhubUrl: ${baseUrl}\nautoConnect: false\n`,
+		);
+		a2aExtension({
+			arktype(definition: unknown) {
+				return definition;
+			},
+			setLabel() {},
+			on() {},
+			logger: { warn() {} },
+			sendMessage() {},
+			registerCommand(
+				_name: string,
+				command: { handler: typeof commandHandler },
+			) {
+				commandHandler = command.handler;
+			},
+			registerTool() {},
+		} as never);
+		if (!commandHandler) throw new Error("a2a command was not registered");
+		await commandHandler("connect stable --as worker", context);
+		const oldSocket = await initialOld.promise;
+		await commandHandler("connect blocked --as worker", context);
+		expect(notifications.at(-1)).toContain("name_in_use");
+		await commandHandler("status", context);
+		expect(notifications.at(-1)).toContain("Project: stable");
+
+		oldSocket.close(1012, "unexpected close");
+		await connectionLost.promise;
+		await reconnectedOld.promise;
+		await reconnectCompleted.promise;
+		expect(oldClaims).toBe(2);
+	} finally {
+		if (commandHandler) await commandHandler("disconnect", context);
+		for (const socket of webSockets.clients) socket.terminate();
+		webSockets.close();
+		server.closeAllConnections();
+		await new Promise<void>((resolve) => server.close(() => resolve()));
 		rmSync(dataDir, { recursive: true, force: true });
 	}
 });

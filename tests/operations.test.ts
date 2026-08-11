@@ -1,7 +1,10 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
+import { createServer } from "node:http";
+import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import WebSocket, { WebSocketServer } from "ws";
 import { HubClient } from "../src/hub/client";
 import type { DeliveryEvent } from "../src/hub/realtime-types";
 import { type HubServerHandle, startHubServer } from "../src/hub/server";
@@ -9,8 +12,14 @@ import { A2aRuntime, type MessageView } from "../src/operations";
 
 const roots: string[] = [];
 const hubs: HubServerHandle[] = [];
-
+const transportStops: Array<() => Promise<void>> = [];
+type Deferred<T> = {
+	promise: Promise<T>;
+	resolve: (value: T | PromiseLike<T>) => void;
+	reject: (reason?: unknown) => void;
+};
 afterEach(async () => {
+	await Promise.all(transportStops.splice(0).map((stop) => stop()));
 	await Promise.all(hubs.splice(0).map((hub) => hub.stop()));
 	for (const root of roots.splice(0))
 		rmSync(root, { recursive: true, force: true });
@@ -208,4 +217,191 @@ test("receiver injection failure produces a terminal failed delivery", async () 
 
 	await web.disconnect();
 	await api.disconnect();
+});
+
+test("published connection keeps its Hub binding until a replacement succeeds", async () => {
+	const firstRoot = mkdtempSync(join(tmpdir(), "omp-a2a-runtime-first-hub-"));
+	const secondRoot = mkdtempSync(join(tmpdir(), "omp-a2a-runtime-second-hub-"));
+	roots.push(firstRoot, secondRoot);
+	const firstHub = await startHubServer({ port: 0, dataDir: firstRoot });
+	const secondHub = await startHubServer({ port: 0, dataDir: secondRoot });
+	hubs.push(firstHub, secondHub);
+	const firstClient = new HubClient(firstHub.meta.baseUrl);
+	const secondClient = new HubClient(secondHub.meta.baseUrl);
+	await firstClient.createProject({ name: "hub-binding" });
+	await secondClient.createProject({ name: "hub-binding" });
+
+	const firstSignal = Promise.withResolvers<AbortSignal>();
+	const secondSignal = Promise.withResolvers<AbortSignal>();
+	let signalCount = 0;
+	let selectedClient = firstClient;
+	const runtime = new A2aRuntime({
+		getClient: async () => selectedClient,
+		events: {
+			onMessage: (_message, signal) => {
+				signalCount += 1;
+				(signalCount === 1 ? firstSignal : secondSignal).resolve(signal);
+			},
+		},
+	});
+	const conflict = new A2aRuntime({
+		getClient: async () => secondClient,
+	});
+	const firstPeer = new A2aRuntime({
+		getClient: async () => firstClient,
+	});
+	const secondPeer = new A2aRuntime({
+		getClient: async () => secondClient,
+	});
+	await runtime.connect("hub-binding", "worker");
+	await conflict.connect("hub-binding", "worker");
+	await firstPeer.connect("hub-binding", "sender");
+	await firstPeer.message({
+		target: { type: "agent", name: "worker" },
+		text: "first lifecycle",
+	});
+	const oldSignal = await firstSignal.promise;
+
+	selectedClient = secondClient;
+	await expect(runtime.connect("hub-binding", "worker")).rejects.toThrow(
+		"name_in_use",
+	);
+	expect(oldSignal.aborted).toBe(false);
+	expect(await runtime.status()).toMatchObject({
+		hub: { baseUrl: firstHub.meta.baseUrl },
+		connection: { project: "hub-binding", name: "worker" },
+	});
+
+	await conflict.disconnect();
+	const replacement = await runtime.connect("hub-binding", "worker");
+	expect(replacement.presenceId).not.toBe("");
+	expect(oldSignal.aborted).toBe(true);
+	expect(await runtime.status()).toMatchObject({
+		hub: { baseUrl: secondHub.meta.baseUrl },
+		connection: { project: "hub-binding", name: "worker" },
+	});
+
+	await secondPeer.connect("hub-binding", "sender");
+	await secondPeer.message({
+		target: { type: "agent", name: "worker" },
+		text: "second lifecycle",
+	});
+	const currentSignal = await secondSignal.promise;
+	expect(currentSignal.aborted).toBe(false);
+	await runtime.disconnect();
+	expect(currentSignal.aborted).toBe(true);
+	await firstPeer.disconnect();
+	await secondPeer.disconnect();
+});
+
+test("only the latest connection transition can publish or emit events", async () => {
+	const server = createServer();
+	const webSockets = new WebSocketServer({ noServer: true });
+	server.on("upgrade", (request, socket, head) => {
+		webSockets.handleUpgrade(request, socket, head, (webSocket) => {
+			webSockets.emit("connection", webSocket, request);
+		});
+	});
+	await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+	transportStops.push(async () => {
+		for (const socket of webSockets.clients) socket.terminate();
+		webSockets.close();
+		server.closeAllConnections();
+		await new Promise<void>((resolve) => server.close(() => resolve()));
+	});
+	const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
+	const sockets = new Map<string, WebSocket>();
+	const socketWaiters = new Map<string, Deferred<WebSocket>>();
+	const closeWaiters = new Map<string, Deferred<void>>();
+	const socketFor = (name: string): Promise<WebSocket> => {
+		const socket = sockets.get(name);
+		if (socket) return Promise.resolve(socket);
+		const waiter = Promise.withResolvers<WebSocket>();
+		socketWaiters.set(name, waiter);
+		return waiter.promise;
+	};
+	const closedFor = (name: string): Promise<void> => {
+		const waiter = Promise.withResolvers<void>();
+		closeWaiters.set(name, waiter);
+		return waiter.promise;
+	};
+	const claim = (socket: WebSocket, project: string, name: string) => {
+		socket.send(
+			JSON.stringify({
+				type: "claimed",
+				protocolVersion: 3,
+				project,
+				self: { name, presenceId: `${name}-presence` },
+				peers: [],
+			}),
+		);
+	};
+	webSockets.on("connection", (socket) => {
+		let name: string | undefined;
+		socket.on("message", (data) => {
+			const frame = JSON.parse(data.toString()) as {
+				type: string;
+				project?: string;
+				name?: string;
+			};
+			if (frame.type !== "hello" || !frame.project || !frame.name) return;
+			name = frame.name;
+			sockets.set(name, socket);
+			socketWaiters.get(name)?.resolve(socket);
+			if (name === "latest") claim(socket, frame.project, name);
+		});
+		socket.on("close", () => {
+			if (name) closeWaiters.get(name)?.resolve();
+		});
+	});
+
+	const joined: string[] = [];
+	const currentJoined = Promise.withResolvers<void>();
+	const closes: Array<{ manual: boolean }> = [];
+	const runtime = new A2aRuntime({
+		getClient: async () => new HubClient(baseUrl),
+		events: {
+			onPresenceJoined: (peer) => {
+				joined.push(peer.name);
+				if (peer.name === "current-peer") currentJoined.resolve();
+			},
+			onClose: (event) => closes.push(event),
+		},
+	});
+
+	const slowConnect = runtime.connect("transitions", "slow");
+	const slowFailure = slowConnect.catch((error) => error);
+	const slowSocket = await socketFor("slow");
+	slowSocket.send(
+		JSON.stringify({
+			type: "presence_joined",
+			peer: { name: "candidate-peer", presenceId: "candidate-peer-presence" },
+		}),
+	);
+	const latest = await runtime.connect("transitions", "latest");
+	expect(latest.presenceId).toBe("latest-presence");
+	if (slowSocket.readyState === WebSocket.OPEN)
+		claim(slowSocket, "transitions", "slow");
+	expect(await slowFailure).toBeInstanceOf(Error);
+
+	const latestSocket = await socketFor("latest");
+	latestSocket.send(
+		JSON.stringify({
+			type: "presence_joined",
+			peer: { name: "current-peer", presenceId: "current-peer-presence" },
+		}),
+	);
+	await currentJoined.promise;
+	expect(runtime.name).toBe("latest");
+	expect(joined).toEqual(["current-peer"]);
+
+	const pendingConnect = runtime.connect("transitions", "never");
+	const pendingFailure = pendingConnect.catch((error) => error);
+	await socketFor("never");
+	const pendingClosed = closedFor("never");
+	expect(await runtime.disconnect()).toBe(true);
+	await pendingClosed;
+	expect(await pendingFailure).toBeInstanceOf(Error);
+	expect(runtime.connected).toBe(false);
+	expect(closes).toEqual([]);
 });

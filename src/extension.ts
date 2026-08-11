@@ -193,13 +193,16 @@ type MaterializedMessageView = Omit<MessageView, "attachments"> & {
 	attachments: LocalAttachmentReference[];
 };
 
+type AttachmentMaterializer = typeof materializeLocalAttachments;
+
 async function materializeMessage(
 	message: MessageView,
 	context: Pick<ExtensionContext, "localProtocolOptions"> | null | undefined,
+	materializeAttachments: AttachmentMaterializer,
 ): Promise<MaterializedMessageView> {
 	return {
 		...message,
-		attachments: await materializeLocalAttachments(
+		attachments: await materializeAttachments(
 			message.attachments,
 			context?.localProtocolOptions,
 		),
@@ -228,9 +231,16 @@ function formatMessages(messages: MaterializedMessageView[]): string {
 		.join("\n\n");
 }
 
-export default function a2aExtension(pi: ExtensionAPI) {
+export default function a2aExtension(
+	pi: ExtensionAPI,
+	dependencies: {
+		materializeAttachments?: AttachmentMaterializer;
+	} = {},
+) {
 	const type = pi.arktype;
 	pi.setLabel("A2A Realtime Chat");
+	const materializeAttachments =
+		dependencies.materializeAttachments ?? materializeLocalAttachments;
 
 	let client: HubClient | null = null;
 	let configuredHubUrl: string | undefined;
@@ -263,13 +273,19 @@ export default function a2aExtension(pi: ExtensionAPI) {
 				),
 			onError: (error) =>
 				pi.logger?.warn?.(`a2a realtime error: ${error.message}`),
-			onMessage: async (message) => {
+			onMessage: async (message, signal) => {
 				const context = activeContext;
 				if (!context)
 					throw new Error("A2A inbound message has no active session");
-				const materialized = await materializeMessage(message, context);
-				if (activeContext !== context)
-					throw new Error("A2A inbound message cancelled after session change");
+				const materialized = await materializeMessage(
+					message,
+					context,
+					materializeAttachments,
+				);
+				if (activeContext !== context || signal.aborted)
+					throw new Error(
+						"A2A inbound message cancelled after session or connection change",
+					);
 				const attachments = formatAttachments(materialized.attachments);
 				pi.sendMessage(
 					{
@@ -295,32 +311,42 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	const connectDesired = async (): Promise<void> => {
-		if (!desiredConnection) return;
+	const connectDesired = async (
+		target = desiredConnection,
+	): Promise<void> => {
+		if (!target || desiredConnection !== target) return;
 		try {
-			await runtime.connect(desiredConnection.project, desiredConnection.name);
+			await runtime.connect(target.project, target.name);
+			if (desiredConnection !== target) return;
+			clearTimeout(reconnectTimer);
+			reconnectTimer = undefined;
 			reconnectDelayMs = 500;
 			activeContext?.ui.notify(
-				`Connected to ${desiredConnection.project} as ${desiredConnection.name}`,
+				`Connected to ${target.project} as ${target.name}`,
 				"info",
 			);
 		} catch (error) {
+			if (desiredConnection !== target) return;
 			const message = error instanceof Error ? error.message : String(error);
 			if (message.includes("name_in_use")) {
-				desiredConnection = null;
+				const project = runtime.project;
+				const name = runtime.name;
+				desiredConnection =
+					project && name ? { project, name } : null;
+				if (desiredConnection) reconnectDelayMs = 500;
 				activeContext?.ui.notify(message, "error");
 				return;
 			}
 			activeContext?.ui.notify(`A2A connect failed: ${message}`, "warning");
-			scheduleReconnect();
+			scheduleReconnect(target);
 		}
 	};
 
-	function scheduleReconnect(): void {
-		if (reconnectTimer || !desiredConnection) return;
+	function scheduleReconnect(target = desiredConnection): void {
+		if (reconnectTimer || !target || desiredConnection !== target) return;
 		reconnectTimer = setTimeout(() => {
 			reconnectTimer = undefined;
-			void connectDesired();
+			if (desiredConnection === target) void connectDesired(target);
 		}, reconnectDelayMs);
 		reconnectDelayMs = Math.min(reconnectDelayMs * 2, 10_000);
 	}
@@ -440,6 +466,8 @@ export default function a2aExtension(pi: ExtensionAPI) {
 					) {
 						throw new Error("usage: /a2a connect <project> --as <name>");
 					}
+					clearTimeout(reconnectTimer);
+					reconnectTimer = undefined;
 					desiredConnection = { project, name };
 					await connectDesired();
 					return;
@@ -488,7 +516,13 @@ export default function a2aExtension(pi: ExtensionAPI) {
 					context.ui.notify(
 						formatMessages(
 							await Promise.all(
-								messages.map((message) => materializeMessage(message, context)),
+								messages.map((message) =>
+									materializeMessage(
+										message,
+										context,
+										materializeAttachments,
+									),
+								),
 							),
 						),
 						"info",
@@ -611,7 +645,13 @@ export default function a2aExtension(pi: ExtensionAPI) {
 			try {
 				const messages = await runtime.history(parameters);
 				const materialized = await Promise.all(
-					messages.map((message) => materializeMessage(message, context)),
+					messages.map((message) =>
+						materializeMessage(
+							message,
+							context,
+							materializeAttachments,
+						),
+					),
 				);
 				return {
 					content: [{ type: "text", text: formatMessages(materialized) }],

@@ -55,6 +55,20 @@ export class A2aConnection {
 	#manualClose = false;
 	#messageQueue = Promise.resolve();
 
+	#terminateHandshake(reason: unknown): void {
+		this.#manualClose = true;
+		const failure =
+			reason instanceof Error
+				? reason
+				: new DOMException("A2A connection handshake aborted", "AbortError");
+		this.#rejectReady(failure);
+		if (
+			this.#socket.readyState === WebSocket.CONNECTING ||
+			this.#socket.readyState === WebSocket.OPEN
+		)
+			this.#socket.terminate();
+	}
+
 	private constructor(
 		baseUrl: string,
 		project: string,
@@ -111,15 +125,36 @@ export class A2aConnection {
 		project: string;
 		name: string;
 		events?: A2aConnectionEvents;
+		signal?: AbortSignal;
 	}): Promise<A2aConnection> {
+		if (options.signal?.aborted)
+			throw options.signal.reason instanceof Error
+				? options.signal.reason
+				: new DOMException("A2A connection handshake aborted", "AbortError");
 		const connection = new A2aConnection(
 			options.baseUrl,
 			options.project,
 			options.name,
 			options.events ?? {},
 		);
-		await connection.#ready;
-		return connection;
+		const abort = () => connection.#terminateHandshake(options.signal?.reason);
+		options.signal?.addEventListener("abort", abort, { once: true });
+		try {
+			await connection.#ready;
+			if (options.signal?.aborted) {
+				abort();
+				throw options.signal.reason instanceof Error
+					? options.signal.reason
+					: new DOMException("A2A connection handshake aborted", "AbortError");
+			}
+			return connection;
+		} catch (error) {
+			connection.#terminateHandshake(error);
+			await connection.#closed;
+			throw error;
+		} finally {
+			options.signal?.removeEventListener("abort", abort);
+		}
 	}
 
 	get project(): string {
