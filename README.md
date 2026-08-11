@@ -300,10 +300,12 @@ docker compose config --quiet
 ### Docker boundary
 
 ```bash
-docker compose up -d --build --wait --wait-timeout 90
+docker compose --project-name omp-a2a-boundary-smoke up -d --build --wait --wait-timeout 90
 bun run smoke:docker
-docker compose down --volumes --remove-orphans
+docker compose --project-name omp-a2a-boundary-smoke down --volumes --remove-orphans
 ```
+
+The dedicated Compose project keeps this disposable smoke volume separate from the operator's normal Hub volume.
 
 `smoke:docker` targets the running Hub selected by `OMP_A2A_HUB_URL`, crosses the public HTTP and WebSocket boundary, verifies persisted history, and deletes its temporary Project. GitHub Actions runs source, production dependency audit, and container gates independently; pins third-party actions by commit SHA; grants read-only repository access; cancels superseded runs; and always removes container resources. Dependabot checks Bun, Actions, and Docker dependencies weekly.
 
