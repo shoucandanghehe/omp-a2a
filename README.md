@@ -292,7 +292,7 @@ Opening a protocol version `2` `messages.sqlite` adds the attachment columns in 
 bun install --frozen-lockfile
 bun run verify
 bun run audit
-docker compose config --quiet
+docker compose --project-name omp-a2a-boundary-smoke config --quiet
 ```
 
 `bun run verify` is the canonical source gate: zero-warning Biome formatting/lint/import checks, TypeScript 7 strict no-emit checking, both Bun entry-point builds, all Bun tests, and the Project Registry plus live in-process Hub smokes. `bun run audit` separately fails on high or critical production-dependency advisories.
@@ -305,7 +305,7 @@ bun run smoke:docker
 docker compose --project-name omp-a2a-boundary-smoke down --volumes --remove-orphans
 ```
 
-The dedicated Compose project keeps this disposable smoke volume separate from the operator's normal Hub volume.
+The dedicated Compose project keeps this disposable smoke volume separate from the operator's normal Hub volume. CI uses the same project name for configuration, startup, failure logs, and unconditional teardown.
 
 `smoke:docker` targets the running Hub selected by `OMP_A2A_HUB_URL`, crosses the public HTTP and WebSocket boundary, verifies persisted history, and deletes its temporary Project. GitHub Actions runs source, production dependency audit, and container gates independently; pins third-party actions by commit SHA; grants read-only repository access; cancels superseded runs; and always removes container resources. Dependabot checks Bun, Actions, and Docker dependencies weekly.
 

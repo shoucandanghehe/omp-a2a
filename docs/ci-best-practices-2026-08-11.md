@@ -36,11 +36,11 @@ CI 先执行 `bun install --frozen-lockfile`；[Bun install 文档](https://bun.
 
 Docker job 执行：
 
-1. [`docker compose config --quiet`](https://docs.docker.com/reference/cli/docker/compose/config/)；
-2. [`docker compose up --build --wait --wait-timeout 90`](https://docs.docker.com/reference/cli/docker/compose/up/)；
+1. [`docker compose --project-name omp-a2a-boundary-smoke config --quiet`](https://docs.docker.com/reference/cli/docker/compose/config/)；
+2. [`docker compose --project-name omp-a2a-boundary-smoke up --build --wait --wait-timeout 90`](https://docs.docker.com/reference/cli/docker/compose/up/)；
 3. `bun run smoke:docker`，穿过容器公开的 HTTP/WebSocket 边界并验证持久历史；
-4. 失败时输出容器日志；
-5. 无条件 [`docker compose down --volumes --remove-orphans`](https://docs.docker.com/reference/cli/docker/compose/down/)。
+4. 失败时以同一 Compose project 输出容器日志；
+5. 无条件 [`docker compose --project-name omp-a2a-boundary-smoke down --volumes --remove-orphans`](https://docs.docker.com/reference/cli/docker/compose/down/)。
 
 Source、audit、container 三个 job 并行，避免容器边界被 source job 的排队时间遮蔽；每个 job 都有明确 timeout。
 
