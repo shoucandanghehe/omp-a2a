@@ -8,7 +8,7 @@
 
 | Script | Invocation | Boundary exercised |
 | --- | --- | --- |
-| `smoke.ts` | `bun run scripts/smoke.ts` | Filesystem Project Registry in a temporary data directory. |
+| `smoke.ts` | `bun run scripts/smoke.ts` | Canonical SQLite Project store in a temporary data directory. |
 | `smoke-hub.ts` | `bun run scripts/smoke-hub.ts` | Two real in-process HTTP/WebSocket Hubs with temporary persistent storage. |
 | `smoke-docker.ts` | `bun run smoke:docker` | Public HTTP and WebSocket interfaces of an already-running selected Hub. |
 
@@ -18,16 +18,16 @@
 
 ### Goal
 
-Prove the Project Registry persists independent room metadata and that deletion is idempotent without starting a server.
+Prove Project metadata persists in the same SQLite owner used by the Hub, with deterministic listing and idempotent deletion, without starting a server.
 
 ### Scenario
 
-1. Create a unique temporary data directory.
-2. Create `billing` and `search` Projects through `createProject`.
-3. Assert `listProjects` returns deterministic name order.
-4. Delete `billing` and assert a second deletion returns false.
-5. Assert `search` remains.
-6. Remove the temporary directory in `finally`.
+1. Create a unique temporary data directory and open `HubStore`.
+2. Create `billing` and `search` Projects.
+3. Assert deterministic name order.
+4. Close and reopen the store, then prove `billing` persisted.
+5. Delete `billing`, assert a second deletion returns false, and prove `search` remains.
+6. Close the store and remove the temporary directory in `finally`.
 
 ### Failure signal
 
@@ -89,7 +89,7 @@ Cross the deployed process/network boundary rather than proving another in-proce
 
 | Behavior | Unit/behavior tests | `smoke.ts` | `smoke-hub.ts` | `smoke-docker.ts` |
 | --- | --- | --- | --- | --- |
-| Project Registry persistence | yes | yes | yes | yes |
+| SQLite Project persistence | yes | yes | yes | yes |
 | Independent Hub state | yes | no | yes | no |
 | WebSocket handshake/Presence | yes | no | yes | yes |
 | Direct realtime routing | yes | no | yes | yes |

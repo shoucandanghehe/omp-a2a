@@ -2,7 +2,7 @@
 
 Anonymous realtime Agent chat for OMP.
 
-> Project is a room. A WebSocket connection is an anonymous Agent. Its name is a temporary handle. Messages are the only persistent record.
+> Project is a persistent room. A WebSocket connection is an anonymous Agent. Its name is a temporary handle. Project metadata and Messages are durable Hub facts.
 
 ## Architecture
 
@@ -13,9 +13,8 @@ OMP Agent A / B / C
         │ HTTP Project administration + history
         ▼
 omp-a2a-hub
-  - persistent Project metadata
+  - SQLite Project metadata + message history
   - in-memory Presence registry
-  - append-only SQLite message history
 ```
 
 - **Hub:** the only owner of Projects, current Presence, message history, and realtime routing.
@@ -28,7 +27,7 @@ omp-a2a-hub
 
 ### Project
 
-A persistent chat room. Project deletion removes its complete message history and is rejected while any Presence is connected.
+A persistent chat room. Project metadata and complete message history share one SQLite owner. Deletion removes its metadata, sequence, and Messages in one transaction, and is rejected while any Presence is connected.
 
 ### Presence
 
@@ -96,7 +95,6 @@ omp-a2a is for a fully trusted private network.
 - **Custom protocol:** this repository implements a private realtime protocol, not the standard A2A protocol. Do not assume interoperability with standard A2A clients or servers.
 - **OMP runtime:** attachment transfer requires `@oh-my-pi/pi-coding-agent` `>=17.2.11`, whose public local-protocol resolver provides session-scoped `local://` access.
 - **Hub changes while connected:** an established WebSocket, connected status, and history remain bound to the Hub that accepted the Presence. Project administration intentionally uses the currently configured Hub. Disconnect and reconnect to move realtime messaging and connected history to a new `hubUrl`.
-- **Interrupted Project deletion:** Project metadata is removed from the filesystem Registry before its SQLite message history is purged. After a crash or storage failure during deletion, verify or clear the old Project state before reusing the same Project name.
 - **Hub HTTP bounds:** metadata, Project administration, and history requests have a 15-second deadline by default. Caller cancellation also covers response-body reading, and failed requests are never retried automatically.
 
 These are current implementation boundaries, not delivery guarantees. The most important deployment boundary remains the trusted-network requirement above.
@@ -171,7 +169,7 @@ OMP_A2A_HUB_DATA_DIR
 
 `OMP_A2A_HUB_PUBLIC_URL` controls the `baseUrl` reported by `/healthz` and `/v1/meta`; it does not override a client's configured Hub URL.
 
-The default data directory is `~/.omp/a2a`. Persistent history is `<data-dir>/messages.sqlite`.
+The default data directory is `~/.omp/a2a`. Project metadata and message history share `<data-dir>/messages.sqlite`.
 
 ## Point OMP at a Hub
 
@@ -288,7 +286,8 @@ Inbound messages are pushed automatically and processed serially in Hub-assigned
 - One Message accepts at most eight attachments.
 - Decoded text plus attachment content is limited to 4 MiB per Message and per history page.
 - `messageId` is an opaque idempotency key. Reusing it with different text, attachment names, attachment order, attachment content, target, or causal parent fails. Reusing it with identical content returns the prior acceptance without redelivery.
-- History uses SQLite WAL with `synchronous = FULL`.
+- Project metadata and history share one SQLite database using WAL with `synchronous = FULL`.
+- Project deletion atomically removes metadata, Project sequence, and complete history; it needs no deletion marker or reconciliation path.
 - The Hub data directory has an exclusive lock; two Hub processes cannot write the same data.
 
 On first start with an old `inbox.sqlite`, the Hub imports ordinary `message_ledger` rows into `messages.sqlite` in deterministic `(project, created_at, msg_id)` order. Old Presence, cursor, ACK, receipt, and offline-delivery state are not migrated. Pending messages become history only and are never delivered to future connections.
@@ -307,7 +306,7 @@ bun build src/hub/cli.ts --target=bun --outdir=/tmp/omp-a2a-hub-build
 docker compose config
 ```
 
-These commands check formatting, run the Bun tests plus Project Registry and live Hub/client smokes, build both executable entry points, and validate the Compose model. The behavioral coverage includes WebSocket Presence, name conflicts, Presence notifications, direct and broadcast routing, successful/failed/disconnected Delivery, cross-session attachment snapshot/materialization/history, protocol version `2` and legacy Inbox migration, payload limits, Project deletion, Hub restart semantics, and command completion.
+These commands check formatting, run the Bun tests plus SQLite Project-store and live Hub/client smokes, build both executable entry points, and validate the Compose model. The behavioral coverage includes WebSocket Presence, name conflicts, Presence notifications, direct and broadcast routing, successful/failed/disconnected Delivery, cross-session attachment snapshot/materialization/history, protocol version `2` and legacy Inbox migration, payload limits, atomic Project deletion, Hub restart semantics, and command completion.
 
 ### Docker boundary
 
@@ -324,7 +323,6 @@ bun run smoke:docker
 src/
   extension.ts             # human commands + three model tools
   operations.ts            # canonical runtime shared by both adapters
-  registry.ts              # persistent Project metadata only
   local-attachments.ts     # sender local:// snapshots + receiver materialization
   config.ts                # repository connection defaults
   hub/
@@ -332,7 +330,7 @@ src/
     realtime-server.ts     # Presence, routing, broadcast, delivery
     connection.ts          # extension WebSocket client
     presence.ts            # in-memory Presence registry
-    messages.ts            # append-only Project history + legacy migration
+    store.ts               # SQLite Project metadata, sequences, history, and existing message migration
     realtime-types.ts      # versioned protocol types
     payload.ts             # gzip and decoded-size limits
     client.ts              # HTTP Project/history client

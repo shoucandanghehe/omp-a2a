@@ -12,18 +12,6 @@ export function a2aRoot(home: string = os.homedir()): string {
 	return defaultDataDir(home);
 }
 
-export function projectsRoot(dataDir: string = defaultDataDir()): string {
-	return path.join(dataDir, "projects");
-}
-
-export function projectDir(project: string, dataDir?: string): string {
-	return path.join(projectsRoot(dataDir), project);
-}
-
-export function projectMetaPath(project: string, dataDir?: string): string {
-	return path.join(projectDir(project, dataDir), "project.json");
-}
-
 export function hubRunDir(dataDir: string = defaultDataDir()): string {
 	return path.join(dataDir, "run");
 }
@@ -44,7 +32,8 @@ export function inboxDatabasePath(dataDir: string = defaultDataDir()): string {
 	return path.join(dataDir, "inbox.sqlite");
 }
 
-export function messageDatabasePath(
+/** Canonical SQLite owner of Hub Projects and message history. */
+export function hubStoreDatabasePath(
 	dataDir: string = defaultDataDir(),
 ): string {
 	return path.join(dataDir, "messages.sqlite");

@@ -13,7 +13,7 @@ The wire protocol is private version `3`. It is not the standard A2A protocol, r
 - `src/hub/server.ts`: Express HTTP control/history surface and the HTTP server lifecycle used by the WebSocket Hub.
 - `src/hub/realtime-server.ts`: WebSocket Presence, realtime routing, delivery outcomes, heartbeat, and shutdown.
 - `src/operations.ts`: `A2aRuntime`, the extension-facing module over HTTP and WebSocket clients.
-- `scripts/smoke.ts`: persistent Project Registry smoke.
+- `scripts/smoke.ts`: persistent SQLite Project-store smoke.
 - `scripts/smoke-hub.ts`: in-process HTTP/WebSocket/persistence smoke.
 - `scripts/smoke-docker.ts`: public boundary smoke against an already-running Hub.
 
@@ -31,16 +31,15 @@ OMP session
        │ Projects/history  │ Presence/messages/delivery
        ▼                   ▼
               standalone Hub
-       ┌─────────┼──────────────┐
-       │         │              │
- filesystem   in-memory      SQLite
- Projects     Presence        append-only
- metadata     registry        message history
+       ┌───────────────┴───────────────┐
+       │                               │
+    in-memory                       SQLite
+    Presence              Project metadata + message history
 ```
 
 ### Control and history plane
 
-`HubClient` uses bounded, caller-cancellable HTTP requests for Hub metadata, Project create/list/delete, and explicit history queries. It validates successful wire responses before exposing them to the runtime and never retries automatically. Project metadata lives under `<dataDir>/projects/<name>/project.json`. Deletion is rejected while a Project has an active Presence, then removes Project metadata and its message history.
+`HubClient` uses bounded, caller-cancellable HTTP requests for Hub metadata, Project create/list/delete, and explicit history queries. It validates successful wire responses before exposing them to the runtime and never retries automatically. Project metadata, per-Project sequence, and Messages share `<dataDir>/messages.sqlite`. Deletion is rejected while a Project has an active Presence, then removes all three durable facts in one SQLite transaction.
 
 ### Realtime plane
 
@@ -48,18 +47,19 @@ OMP session
 2. `RealtimeHub` verifies the Project and atomically claims the name in `PresenceRegistry`.
 3. The client receives its `presenceId` and the current peer snapshot; current peers receive `presence_joined`.
 4. A direct request checks idempotency, resolves one current Presence, then persists. A Project broadcast persists first and, only for a new acceptance, enumerates current Project Presence once into a local array.
-5. `MessageStore` atomically appends one immutable Message—including encoded attachment content—and assigns the next Project sequence; an identical existing `messageId` returns `replayed`.
+5. `HubStore` verifies the Project and atomically appends one immutable Message—including encoded attachment content—while assigning the next Project sequence; an identical existing `messageId` returns `replayed`.
 6. The Hub synchronously enqueues the Message to the selected concrete sockets and keeps one bounded in-memory retry record per `(messageId, recipientPresenceId)`.
 7. Each receiver coalesces duplicate frames, materializes attachments, injects the Message once into OMP, then reports or re-reports `delivered` or `delivery_failed`.
 8. The sender receives one terminal in-memory `delivered`, `failed`, `disconnected`, or `unknown` outcome per selected Presence.
-9. Graceful disconnect uses an exact `goodbye` barrier: the Hub queues its acknowledgement, releases Presence and Delivery state, broadcasts `presence_left`, then bounds transport close/termination. Presence release and transport teardown are distinct; transport close and heartbeat timeout use the same idempotent release path.
+9. Graceful disconnect releases Presence and Delivery state, broadcasts `presence_left`, then acknowledges exact `goodbye` and bounds transport close/termination. Transport close and heartbeat timeout use the same idempotent release path.
 
 A message acceptance request waits at most 15 seconds and accepts caller cancellation. Cancellation before dispatch sends nothing. Abort, timeout, or close after WebSocket dispatch reports that acceptance and Delivery outcomes are unknown, removes the client request, ignores late replies, and never retries.
 
 A same-named later connection is a new Presence and never inherits pending Delivery. Transport write errors and missing ACKs retry the same Message only on the original socket while it still owns the original Presence, for at most three attempts in one Hub process; retry overrides may shorten, never extend, that protocol window. Receiver outcomes use one ordered earliest-expiry timer for their 10-second idle-cleaned cache. Receiver outcomes, either Presence leaving, and Hub shutdown cancel retry timers. Restart retains history but never resumes delivery.
 
-### Persistent message contract
+### Persistent store contract
 
+- `HubStore` is the single canonical owner of persistent Project metadata, Project sequence, and Messages.
 - Message references are `<project>:<sequence>` and sequence is monotonic per Project.
 - `messageId` is the persistent idempotency key; conflicting reuse fails and identical reuse returns the canonical Message as `replayed` without Presence enumeration or redelivery.
 - `replyTo` must resolve inside the same Project.
@@ -87,7 +87,7 @@ Repository-local connection defaults require `project` and `name`; `autoConnect`
 
 If a command reload finds the repository-local configuration invalid, the Extension closes the current Presence, clears reconnect intent, and blocks fallback Hub access until a successful reload or Session switch.
 
-The Hub runs locally with `bun run hub` or in Docker Compose. Each Hub needs a unique URL and data directory. `HubDataLock` rejects concurrent ownership of one directory. SQLite message history uses WAL and `synchronous = FULL`.
+The Hub runs locally with `bun run hub` or in Docker Compose. Each Hub needs a unique URL and data directory. `HubDataLock` rejects concurrent ownership of one directory. The shared SQLite Hub store uses WAL and `synchronous = FULL`.
 
 ## User surfaces
 
@@ -123,15 +123,15 @@ The sender Extension snapshots attachment bytes before sending and fences the fi
 
 | Directory | Responsibility | Detailed map |
 | --- | --- | --- |
-| `src/` | OMP adapter, runtime, configuration, Project metadata, and domain names. | [`src/codemap.md`](src/codemap.md) |
-| `src/hub/` | HTTP/WebSocket protocol, Presence, routing, message history, payloads, locking, and process lifecycle. | [`src/hub/codemap.md`](src/hub/codemap.md) |
-| `scripts/` | Executable Registry, Hub, and Docker smoke scenarios. | [`scripts/codemap.md`](scripts/codemap.md) |
+| `src/` | OMP adapter, runtime, configuration, Project domain names, and Hub storage paths. | [`src/codemap.md`](src/codemap.md) |
+| `src/hub/` | HTTP/WebSocket protocol, Presence, routing, canonical SQLite persistence, payloads, locking, and process lifecycle. | [`src/hub/codemap.md`](src/hub/codemap.md) |
+| `scripts/` | Executable SQLite-store, Hub, and Docker smoke scenarios. | [`scripts/codemap.md`](scripts/codemap.md) |
 | `tests/` | Bun behavior tests for configuration, payloads, message history, realtime routing, control routes, runtime, and extension registration/completion. | Tests are excluded from generated map state. |
 | `docs/` | Implemented architecture decisions and historical fixed-snapshot review material. | Documentation is excluded from generated map state. |
 
 ## Verification
 
-The local release gate runs Biome, `bun run smoke`, both Bun entry-point builds, and `docker compose config`. It covers Project isolation and deletion, bounded WebSocket handshake/message/close lifecycles, caller cancellation boundaries and winning handshake failure preservation, nonresponsive client/Hub close termination through a transparent TCP boundary, Presence name conflicts and notifications, persist-before-enumerate broadcast routing, replayed acceptance, maximum-validated same-Presence retries, receiver deduplication with ordered idle outcome expiry, delivered/failed/disconnected/unknown cleanup, attachment snapshot/materialization/history, persistent history and protocol version `2`/legacy migration, payload limits, Hub restart, extension registration, and command completion.
+The local release gate runs Biome, `bun run smoke`, both Bun entry-point builds, and `docker compose config`. It covers SQLite Project CRUD/reopen/sorting and atomic deletion, bounded WebSocket handshake/message/close lifecycles, caller cancellation and winning handshake failure preservation, Presence name conflicts and notifications, persist-before-enumerate routing, replayed acceptance, same-Presence retries, receiver deduplication, terminal Delivery cleanup, attachment ownership and history, existing storage migration, payload limits, Hub restart/cleanup, extension lifecycle, and command completion.
 
 `bun run smoke:docker` crosses the public HTTP/WebSocket process boundary of the selected running Hub, verifies persisted history, and removes its temporary Project.
 
@@ -141,6 +141,5 @@ The implemented realtime model is documented in [`docs/realtime-presence-archite
 
 - No authentication, authorization, tenant isolation, or confidentiality guarantee exists.
 - Established WebSockets do not move when `hubUrl` changes; disconnect and reconnect.
-- Project metadata deletion and SQLite history deletion are separate operations rather than one transaction.
 - Ordinary Hub metadata, Project, and history HTTP calls have a 15-second default deadline; caller cancellation covers headers and response-body reading.
 - The default Compose port publication binds all host interfaces unless the operator narrows it.

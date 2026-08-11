@@ -4,10 +4,9 @@ import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import WebSocket, { WebSocketServer } from "ws";
-import { createProject } from "../src/registry";
 import { A2aConnection } from "../src/hub/connection";
 import { HubClient } from "../src/hub/client";
-import type { MessageDraft } from "../src/hub/messages";
+import type { MessageDraft } from "../src/hub/store";
 import {
 	decodeTextPayload,
 	encodeTextPayload,
@@ -182,6 +181,11 @@ function messageFromDraft(draft: MessageDraft): RealtimeMessage {
 function acceptingLedger(appendError?: Error): MessageLedger {
 	const stored = new Map<string, RealtimeMessage>();
 	return {
+		getProject(name) {
+			return name === "room"
+				? { name, createdAt: 1 }
+				: null;
+		},
 		append(draft) {
 			if (appendError) throw appendError;
 			const replayed = stored.get(draft.messageId);
@@ -201,11 +205,8 @@ async function startRealtimeTransport(
 	messages: MessageLedger,
 	options: RealtimeHubOptions = {},
 ): Promise<{ baseUrl: string; realtime: RealtimeHub }> {
-	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-retry-policy-"));
-	roots.push(dataDir);
-	createProject({ name: "room", dataDir });
 	const server = createHttpServer();
-	const realtime = new RealtimeHub(server, messages, dataDir, options);
+	const realtime = new RealtimeHub(server, messages, options);
 	await new Promise<void>((resolve, reject) => {
 		server.once("error", reject);
 		server.listen(0, "127.0.0.1", resolve);
@@ -1429,7 +1430,7 @@ test("RealtimeHub rejects invalid delivery retry overrides exactly", () => {
 	for (const { policy, message } of cases) {
 		let thrown: unknown;
 		try {
-			new RealtimeHub(createHttpServer(), acceptingLedger(), tmpdir(), {
+			new RealtimeHub(createHttpServer(), acceptingLedger(), {
 				deliveryRetryPolicy: policy,
 			});
 		} catch (error) {

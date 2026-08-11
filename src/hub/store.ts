@@ -2,6 +2,7 @@ import { Database } from "bun:sqlite";
 import * as fs from "node:fs";
 import * as path from "node:path";
 import { ensureDir } from "../paths";
+import type { A2aProject } from "../types";
 import { AGENT_NAME_RE, PROJECT_NAME_RE } from "../types";
 import { parseEncodedAttachments, validateMessageContent } from "./payload";
 import {
@@ -18,8 +19,9 @@ import type { EncodedAttachment, EncodedTextPayload } from "./types";
 export const MAX_HISTORY_BYTES = 4 * 1024 * 1024;
 
 export class MessageIdConflictError extends Error {}
+export class ProjectConflictError extends Error {}
+export class UnknownProjectError extends Error {}
 export class UnknownReplyTargetError extends Error {}
-
 export type MessageDraft = {
 	messageId: string;
 	project: string;
@@ -53,6 +55,14 @@ type MessageRow = {
 	reply_to_sequence: number | null;
 };
 
+type ProjectRow = {
+	name: string;
+	display_name: string | null;
+	description: string | null;
+	created_at: number;
+	created_by_cwd: string | null;
+};
+
 type SequenceRow = { next_sequence: number };
 
 type LegacyMessageRow = {
@@ -67,137 +77,171 @@ type LegacyMessageRow = {
 	reply_to: string | null;
 };
 
-export class MessageStore {
+function assertProjectName(name: unknown): asserts name is string {
+	if (typeof name !== "string" || !PROJECT_NAME_RE.test(name)) {
+		throw new Error(
+			`invalid project name "${String(name)}" (use [a-zA-Z0-9._-], start alnum, max 64)`,
+		);
+	}
+}
+
+function optionalString(value: unknown, field: string): string | undefined {
+	if (value === undefined) return undefined;
+	if (typeof value !== "string")
+		throw new Error(`Project ${field} must be a string`);
+	return value;
+}
+
+function toProject(row: ProjectRow): A2aProject {
+	return {
+		name: row.name,
+		displayName: row.display_name ?? undefined,
+		description: row.description ?? undefined,
+		createdAt: row.created_at,
+		createdByCwd: row.created_by_cwd ?? undefined,
+	};
+}
+
+export class HubStore {
 	#database: Database;
 	#allocateSequence;
+	#deleteProject;
 	#findById;
 	#findByRef;
+	#findProject;
 	#insert;
+	#insertProject;
 	#append;
 
 	constructor(databasePath: string, options?: { legacyDatabasePath?: string }) {
 		ensureDir(path.dirname(databasePath));
 		this.#database = new Database(databasePath, { create: true });
-		this.#database.run("PRAGMA journal_mode = WAL");
-		this.#database.run("PRAGMA synchronous = FULL");
-		this.#database.run(`
-			CREATE TABLE IF NOT EXISTS project_sequences (
-				project TEXT PRIMARY KEY,
-				next_sequence INTEGER NOT NULL
-			)
-		`);
-		this.#database.run(`
-			CREATE TABLE IF NOT EXISTS messages (
-				project TEXT NOT NULL,
-				project_sequence INTEGER NOT NULL,
-				msg_id TEXT NOT NULL UNIQUE,
-				sender_name TEXT NOT NULL,
-				sender_presence_id TEXT,
-				target_kind TEXT NOT NULL,
-				target_name TEXT,
-				target_presence_id TEXT,
-				encoding TEXT NOT NULL,
-				data TEXT NOT NULL,
-				uncompressed_bytes INTEGER NOT NULL,
-				attachments TEXT NOT NULL DEFAULT '[]',
-				content_bytes INTEGER NOT NULL,
-				created_at INTEGER NOT NULL,
-				reply_to_sequence INTEGER,
-				PRIMARY KEY(project, project_sequence)
-			)
-		`);
-		this.#migrateSchema();
-		this.#database.run(
-			"CREATE INDEX IF NOT EXISTS messages_project_sender ON messages(project, sender_name, project_sequence)",
-		);
-		this.#allocateSequence = this.#database.query<SequenceRow, [string]>(`
-			INSERT INTO project_sequences(project, next_sequence)
-			VALUES (?, 1)
-			ON CONFLICT(project) DO UPDATE
-			SET next_sequence = next_sequence + 1
-			RETURNING next_sequence
-		`);
-		this.#findById = this.#database.query<MessageRow, [string]>(
-			"SELECT * FROM messages WHERE msg_id = ?",
-		);
-		this.#findByRef = this.#database.query<MessageRow, [string, number]>(
-			"SELECT * FROM messages WHERE project = ? AND project_sequence = ?",
-		);
-		this.#insert = this.#database.query(`
-			INSERT INTO messages(
-				project, project_sequence, msg_id, sender_name, sender_presence_id,
-				target_kind, target_name, target_presence_id, encoding, data,
-				uncompressed_bytes, attachments, content_bytes, created_at,
-				reply_to_sequence
-			) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
-		`);
-		this.#append = this.#database.transaction(
-			(draft: MessageDraft): MessageAppendResult => {
-				const { attachments, contentBytes } = this.#validateDraft(draft);
-				const replyToSequence = this.#resolveReply(
-					draft.project,
-					draft.replyTo,
-				);
-				const existing = this.#findById.get(draft.messageId);
-				if (existing) {
-					if (!this.#matches(existing, draft, attachments, replyToSequence)) {
-						throw new MessageIdConflictError(
-							`messageId already used with different content: ${draft.messageId}`,
+		try {
+			this.#database.run("PRAGMA journal_mode = WAL");
+			this.#database.run("PRAGMA synchronous = FULL");
+			this.#createSchema();
+			this.#migrateMessageSchema();
+
+			this.#allocateSequence = this.#database.query<SequenceRow, [string]>(`
+				INSERT INTO project_sequences(project, next_sequence)
+				VALUES (?, 1)
+				ON CONFLICT(project) DO UPDATE
+				SET next_sequence = next_sequence + 1
+				RETURNING next_sequence
+			`);
+			this.#findById = this.#database.query<MessageRow, [string]>(
+				"SELECT * FROM messages WHERE msg_id = ?",
+			);
+			this.#findByRef = this.#database.query<MessageRow, [string, number]>(
+				"SELECT * FROM messages WHERE project = ? AND project_sequence = ?",
+			);
+			this.#findProject = this.#database.query<ProjectRow, [string]>(
+				"SELECT * FROM projects WHERE name = ?",
+			);
+			this.#insert = this.#database.query(`
+				INSERT INTO messages(
+					project, project_sequence, msg_id, sender_name, sender_presence_id,
+					target_kind, target_name, target_presence_id, encoding, data,
+					uncompressed_bytes, attachments, content_bytes, created_at,
+					reply_to_sequence
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+			`);
+			this.#insertProject = this.#database.query(`
+				INSERT INTO projects(
+					name, display_name, description, created_at, created_by_cwd
+				) VALUES (?, ?, ?, ?, ?)
+			`);
+			this.#deleteProject = this.#database.transaction(
+				(project: string): boolean => {
+					if (!this.#findProject.get(project)) return false;
+					this.#database
+						.query("DELETE FROM messages WHERE project = ?")
+						.run(project);
+					this.#database
+						.query("DELETE FROM project_sequences WHERE project = ?")
+						.run(project);
+					this.#database.query("DELETE FROM projects WHERE name = ?").run(project);
+					return true;
+				},
+			);
+			this.#append = this.#database.transaction(
+				(
+					draft: MessageDraft,
+				): MessageAppendResult => {
+					const { attachments, contentBytes } = this.#validateDraft(draft);
+					if (!this.#findProject.get(draft.project)) {
+						throw new UnknownProjectError(
+							`unknown project: ${draft.project}`,
 						);
 					}
-					return { replayed: true, message: this.#toMessage(existing) };
-				}
-				const sequence = this.#allocateSequence.get(
-					draft.project,
-				)?.next_sequence;
-				if (!sequence)
-					throw new Error(
-						`failed to allocate message sequence for ${draft.project}`,
+					const replyToSequence = this.#resolveReply(
+						draft.project,
+						draft.replyTo,
 					);
-				this.#insert.run(
-					draft.project,
-					sequence,
-					draft.messageId,
-					draft.from.name,
-					draft.from.presenceId,
-					draft.target.type,
-					draft.target.type === "agent" ? draft.target.name : null,
-					draft.target.type === "agent"
-						? (draft.target.presenceId ?? null)
-						: null,
-					draft.payload.encoding,
-					draft.payload.data,
-					draft.payload.uncompressedBytes,
-					JSON.stringify(attachments),
-					contentBytes,
-					draft.createdAt,
-					replyToSequence,
-				);
-				return {
-					replayed: false,
-					message: {
-						messageId: draft.messageId,
-						messageRef: formatMessageRef(draft.project, sequence),
-						project: draft.project,
+					const existing = this.#findById.get(draft.messageId);
+					if (existing) {
+						if (!this.#matches(existing, draft, attachments, replyToSequence)) {
+							throw new MessageIdConflictError(
+								`messageId already used with different content: ${draft.messageId}`,
+							);
+						}
+						return { replayed: true, message: this.#toMessage(existing) };
+					}
+					const sequence = this.#allocateSequence.get(
+						draft.project,
+					)?.next_sequence;
+					if (!sequence)
+						throw new Error(
+							`failed to allocate message sequence for ${draft.project}`,
+						);
+					this.#insert.run(
+						draft.project,
 						sequence,
-						from: { ...draft.from },
-						target: { ...draft.target },
-						payload: { ...draft.payload },
-						attachments: attachments.map((attachment) => ({
-							name: attachment.name,
-							payload: { ...attachment.payload },
-						})),
-						createdAt: draft.createdAt,
-						replyTo: draft.replyTo,
-					},
-				};
-			},
-		);
-		if (
-			options?.legacyDatabasePath &&
-			fs.existsSync(options.legacyDatabasePath)
-		) {
-			this.#migrateLegacy(options.legacyDatabasePath);
+						draft.messageId,
+						draft.from.name,
+						draft.from.presenceId,
+						draft.target.type,
+						draft.target.type === "agent" ? draft.target.name : null,
+						draft.target.type === "agent"
+							? (draft.target.presenceId ?? null)
+							: null,
+						draft.payload.encoding,
+						draft.payload.data,
+						draft.payload.uncompressedBytes,
+						JSON.stringify(attachments),
+						contentBytes,
+						draft.createdAt,
+						replyToSequence,
+					);
+					return {
+						replayed: false,
+						message: {
+							messageId: draft.messageId,
+							messageRef: formatMessageRef(draft.project, sequence),
+							project: draft.project,
+							sequence,
+							from: { ...draft.from },
+							target: { ...draft.target },
+							payload: { ...draft.payload },
+							attachments: attachments.map((attachment) => ({
+								name: attachment.name,
+								payload: { ...attachment.payload },
+							})),
+							createdAt: draft.createdAt,
+							replyTo: draft.replyTo,
+						},
+					};
+				},
+			);
+			if (
+				options?.legacyDatabasePath &&
+				fs.existsSync(options.legacyDatabasePath)
+			) {
+				this.#migrateLegacyMessages(options.legacyDatabasePath);
+			}
+		} catch (error) {
+			this.#database.close();
+			throw error;
 		}
 	}
 
@@ -216,6 +260,57 @@ export class MessageStore {
 		return { replayed: true, message: this.#toMessage(existing) };
 	}
 
+	createProject(options: {
+		name: string;
+		displayName?: string;
+		description?: string;
+		createdByCwd?: string;
+	}): A2aProject {
+		assertProjectName(options.name);
+		const displayName = optionalString(options.displayName, "displayName");
+		const description = optionalString(options.description, "description");
+		const createdByCwd = optionalString(options.createdByCwd, "createdByCwd");
+		if (this.#findProject.get(options.name)) {
+			throw new ProjectConflictError(
+				`project already exists: ${options.name}`,
+			);
+		}
+		const project: A2aProject = {
+			name: options.name,
+			displayName,
+			description,
+			createdAt: Date.now(),
+			createdByCwd,
+		};
+		this.#insertProject.run(
+			project.name,
+			project.displayName ?? null,
+			project.description ?? null,
+			project.createdAt,
+			project.createdByCwd ?? null,
+		);
+		return project;
+	}
+
+	getProject(name: string): A2aProject | null {
+		assertProjectName(name);
+		const row = this.#findProject.get(name);
+		return row ? toProject(row) : null;
+	}
+
+	listProjects(): A2aProject[] {
+		return this.#database
+			.query<ProjectRow, []>("SELECT * FROM projects")
+			.all()
+			.map(toProject)
+			.sort((left, right) => left.name.localeCompare(right.name));
+	}
+
+	deleteProject(project: string): boolean {
+		assertProjectName(project);
+		return this.#deleteProject.immediate(project);
+	}
+
 	append(draft: MessageDraft): MessageAppendResult {
 		return this.#append(draft);
 	}
@@ -229,6 +324,9 @@ export class MessageStore {
 	history(query: HistoryQuery): HistoryPage {
 		if (!PROJECT_NAME_RE.test(query.project))
 			throw new Error(`invalid project: ${query.project}`);
+		if (!this.#findProject.get(query.project)) {
+			throw new UnknownProjectError(`unknown project: ${query.project}`);
+		}
 		if (query.before && query.after)
 			throw new Error("history accepts before or after, not both");
 		if (query.from !== undefined && !AGENT_NAME_RE.test(query.from))
@@ -273,17 +371,6 @@ export class MessageStore {
 		return { messages: rows.map((row) => this.#toMessage(row)) };
 	}
 
-	deleteProject(project: string): void {
-		this.#database.transaction(() => {
-			this.#database
-				.query("DELETE FROM messages WHERE project = ?")
-				.run(project);
-			this.#database
-				.query("DELETE FROM project_sequences WHERE project = ?")
-				.run(project);
-		})();
-	}
-
 	integrityCheck(): string {
 		return (
 			this.#database
@@ -296,7 +383,48 @@ export class MessageStore {
 		this.#database.close();
 	}
 
-	#migrateLegacy(legacyDatabasePath: string): void {
+	#createSchema(): void {
+		this.#database.run(`
+			CREATE TABLE IF NOT EXISTS projects (
+				name TEXT PRIMARY KEY,
+				display_name TEXT,
+				description TEXT,
+				created_at INTEGER NOT NULL,
+				created_by_cwd TEXT
+			)
+		`);
+		this.#database.run(`
+			CREATE TABLE IF NOT EXISTS project_sequences (
+				project TEXT PRIMARY KEY,
+				next_sequence INTEGER NOT NULL
+			)
+		`);
+		this.#database.run(`
+			CREATE TABLE IF NOT EXISTS messages (
+				project TEXT NOT NULL,
+				project_sequence INTEGER NOT NULL,
+				msg_id TEXT NOT NULL UNIQUE,
+				sender_name TEXT NOT NULL,
+				sender_presence_id TEXT,
+				target_kind TEXT NOT NULL,
+				target_name TEXT,
+				target_presence_id TEXT,
+				encoding TEXT NOT NULL,
+				data TEXT NOT NULL,
+				uncompressed_bytes INTEGER NOT NULL,
+				attachments TEXT NOT NULL DEFAULT '[]',
+				content_bytes INTEGER NOT NULL,
+				created_at INTEGER NOT NULL,
+				reply_to_sequence INTEGER,
+				PRIMARY KEY(project, project_sequence)
+			)
+		`);
+		this.#database.run(
+			"CREATE INDEX IF NOT EXISTS messages_project_sender ON messages(project, sender_name, project_sequence)",
+		);
+	}
+
+	#migrateLegacyMessages(legacyDatabasePath: string): void {
 		const existingCount =
 			this.#database
 				.query<{ count: number }, []>("SELECT COUNT(*) AS count FROM messages")
@@ -368,7 +496,7 @@ export class MessageStore {
 		}
 	}
 
-	#migrateSchema(): void {
+	#migrateMessageSchema(): void {
 		const columns = new Set(
 			this.#database
 				.query<{ name: string }, []>("PRAGMA table_info(messages)")

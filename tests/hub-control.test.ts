@@ -1,5 +1,6 @@
 import { afterEach, describe, expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdirSync, mkdtempSync, rmSync } from "node:fs";
+import { type AddressInfo, createServer } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HubClient } from "../src/hub/client";
@@ -13,6 +14,19 @@ function dataDir(): string {
 	const root = mkdtempSync(join(tmpdir(), "omp-a2a-control-"));
 	roots.push(root);
 	return root;
+}
+
+async function availablePort(): Promise<number> {
+	const probe = createServer();
+	await new Promise<void>((resolve, reject) => {
+		probe.once("error", reject);
+		probe.listen(0, "127.0.0.1", resolve);
+	});
+	const address = probe.address() as AddressInfo;
+	await new Promise<void>((resolve, reject) =>
+		probe.close((error) => (error ? reject(error) : resolve())),
+	);
+	return address.port;
 }
 
 afterEach(async () => {
@@ -89,13 +103,40 @@ describe("Hub Project control plane", () => {
 			project: "active",
 			name: "api",
 		});
+		const accepted = await connection.send({
+			target: { type: "project" },
+			text: "must survive rejected deletion",
+			messageId: "active-history",
+		});
+		const beforeDelete = await client.history({ project: "active" });
+		expect(beforeDelete.messages).toHaveLength(1);
+		expect(beforeDelete.messages[0]?.messageRef).toBe(
+			accepted.message.messageRef,
+		);
 
 		await expect(client.deleteProject("active")).rejects.toThrow(
 			"active Presences",
 		);
+		expect(await client.history({ project: "active" })).toEqual(beforeDelete);
 		await connection.close();
 		expect(await client.deleteProject("active")).toBe(true);
 		expect(await client.deleteProject("active")).toBe(false);
+	});
+
+	test("deletion that wins before a claim makes the Project unknown", async () => {
+		const hub = await startHubServer({ port: 0, dataDir: dataDir() });
+		hubs.push(hub);
+		const client = new HubClient(hub.meta.baseUrl);
+		await client.createProject({ name: "deleted-first" });
+		expect(await client.deleteProject("deleted-first")).toBe(true);
+
+		await expect(
+			A2aConnection.connect({
+				baseUrl: hub.meta.baseUrl,
+				project: "deleted-first",
+				name: "api",
+			}),
+		).rejects.toThrow("unknown project: deleted-first");
 	});
 });
 
@@ -124,4 +165,30 @@ test("deleting and recreating a Project does not reuse its history", async () =>
 	expect(await client.deleteProject("reused")).toBe(true);
 	await client.createProject({ name: "reused" });
 	expect(await client.history({ project: "reused" })).toEqual({ messages: [] });
+});
+
+test("startup failure releases its port, SQLite store, and data lock", async () => {
+	const root = dataDir();
+	const port = await availablePort();
+	mkdirSync(join(root, "run", "hub.json"), { recursive: true });
+
+	await expect(startHubServer({ port, dataDir: root })).rejects.toThrow();
+	rmSync(join(root, "run", "hub.json"), { recursive: true, force: true });
+	const restarted = await startHubServer({ port, dataDir: root });
+	hubs.push(restarted);
+	const client = new HubClient(restarted.meta.baseUrl);
+	expect((await client.listProjects()).length).toBe(0);
+});
+
+test("concurrent stops share and await one cleanup", async () => {
+	const root = dataDir();
+	const hub = await startHubServer({ port: 0, dataDir: root });
+	const port = hub.meta.port;
+	const firstStop = hub.stop();
+	const secondStop = hub.stop();
+
+	expect(secondStop).toBe(firstStop);
+	await Promise.all([firstStop, secondStop]);
+	const restarted = await startHubServer({ port, dataDir: root });
+	hubs.push(restarted);
 });

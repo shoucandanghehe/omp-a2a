@@ -1,14 +1,7 @@
 import type { IncomingMessage, Server } from "node:http";
 import type { Socket } from "node:net";
 import { WebSocket, WebSocketServer } from "ws";
-import { getProject } from "../registry";
-import {
-	MessageIdConflictError,
-	type MessageAppendResult,
-	type MessageDraft,
-	type MessageStore,
-	UnknownReplyTargetError,
-} from "./messages";
+
 import { PayloadTooLargeError } from "./payload";
 import { NameInUseError, type Presence, PresenceRegistry } from "./presence";
 import {
@@ -21,6 +14,13 @@ import {
 	isExactGoodbyeFrame,
 	type ServerFrame,
 } from "./realtime-types";
+import {
+	type HubStore,
+	MessageIdConflictError,
+	type MessageAppendResult,
+	type MessageDraft,
+	UnknownReplyTargetError,
+} from "./store";
 
 const MAX_FRAME_BYTES = 6 * 1024 * 1024;
 const HEARTBEAT_MS = 10_000;
@@ -112,7 +112,6 @@ function deliveryRetryPolicy(
 
 class RecipientNotPresentError extends Error {}
 
-type MessageLedger = Pick<MessageStore, "append" | "replay">;
 
 type PendingDelivery = {
 	key: string;
@@ -131,8 +130,7 @@ type PendingDelivery = {
 export class RealtimeHub {
 	#server: Server;
 	#wss: WebSocketServer;
-	#messages: MessageLedger;
-	#dataDir: string;
+	#store: Pick<HubStore, "append" | "replay" | "getProject">;
 	#presences = new PresenceRegistry();
 	#alive = new Map<WebSocket, boolean>();
 	#closeReasons = new Map<
@@ -149,16 +147,15 @@ export class RealtimeHub {
 		head: Buffer,
 	) => void;
 	#closing = false;
+	#closePromise: Promise<void> | null = null;
 
 	constructor(
 		server: Server,
-		messages: MessageLedger,
-		dataDir: string,
+		store: Pick<HubStore, "append" | "replay" | "getProject">,
 		options: RealtimeHubOptions = {},
 	) {
 		this.#server = server;
-		this.#messages = messages;
-		this.#dataDir = dataDir;
+		this.#store = store;
 		this.#deliveryRetryPolicy = deliveryRetryPolicy(
 			options.deliveryRetryPolicy,
 		);
@@ -188,18 +185,23 @@ export class RealtimeHub {
 		return this.#presences.count(project);
 	}
 
-	async close(): Promise<void> {
-		if (this.#closing) return;
+	close(): Promise<void> {
+		if (this.#closePromise) return this.#closePromise;
 		this.#closing = true;
-		clearInterval(this.#heartbeat);
-		this.#server.off("upgrade", this.#upgradeHandler);
-		for (const presence of this.#presences.close()) {
-			this.#closeReasons.set(presence.socket, "hub_shutdown");
-		}
-		for (const pending of this.#pendingDeliveries.values())
-			this.#finishDelivery(pending);
-		for (const socket of this.#wss.clients) socket.terminate();
-		this.#wss.close();
+		this.#closePromise = (async () => {
+			clearInterval(this.#heartbeat);
+			this.#server.off("upgrade", this.#upgradeHandler);
+			for (const presence of this.#presences.close()) {
+				this.#closeReasons.set(presence.socket, "hub_shutdown");
+			}
+			for (const pending of this.#pendingDeliveries.values())
+				this.#finishDelivery(pending);
+			for (const socket of this.#wss.clients) socket.terminate();
+			await new Promise<void>((resolve, reject) =>
+				this.#wss.close((error) => (error ? reject(error) : resolve())),
+			);
+		})();
+		return this.#closePromise;
 	}
 
 	#accept(socket: WebSocket): void {
@@ -315,7 +317,7 @@ export class RealtimeHub {
 			if (typeof frame.project !== "string" || typeof frame.name !== "string") {
 				throw new Error("project and name are required");
 			}
-			if (!getProject(frame.project, this.#dataDir))
+			if (!this.#store.getProject(frame.project))
 				throw new Error(`unknown project: ${frame.project}`);
 			const { self, peers } = this.#presences.claim(
 				frame.project,
@@ -394,7 +396,7 @@ export class RealtimeHub {
 			let recipients: Presence[];
 			let appended: MessageAppendResult;
 			if (draft.target.type === "agent") {
-				const replayed = this.#messages.replay(draft);
+				const replayed = this.#store.replay(draft);
 				if (replayed) {
 					this.#send(presence.socket, {
 						type: "accepted",
@@ -415,7 +417,7 @@ export class RealtimeHub {
 				}
 				if (recipient.presenceId === presence.presenceId)
 					throw new Error("cannot send to yourself");
-				appended = this.#messages.append({
+				appended = this.#store.append({
 					...draft,
 					target: {
 						type: "agent",
@@ -425,7 +427,7 @@ export class RealtimeHub {
 				});
 				recipients = [recipient];
 			} else {
-				appended = this.#messages.append(draft);
+				appended = this.#store.append(draft);
 				if (appended.replayed) {
 					this.#send(presence.socket, {
 						type: "accepted",

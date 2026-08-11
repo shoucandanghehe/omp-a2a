@@ -6,7 +6,7 @@
 
 - HTTP Project administration and explicit history;
 - WebSocket Presence, realtime messages, and delivery outcomes;
-- append-only SQLite Project history and legacy migration;
+- canonical SQLite Project metadata, sequence, and message history;
 - payload encoding limits;
 - exclusive data-directory ownership and process lifecycle.
 
@@ -15,11 +15,11 @@
 | File | Responsibility | Primary interface |
 | --- | --- | --- |
 | `cli.ts` | Parse command/environment settings, start one Hub, and shut down on signals. | executable entry |
-| `server.ts` | Express routes, HTTP server, metadata files, storage lifecycle, and WebSocket attachment. | `startHubServer`, `HubServerHandle` |
+| `server.ts` | Express routes, HTTP server, runtime metadata, canonical store lifecycle, and WebSocket attachment. | `startHubServer`, `HubServerHandle` |
 | `realtime-server.ts` | Upgrade handling, handshake, Presence events, routing, delivery tracking, heartbeat, and shutdown. | `RealtimeHub` |
-| `connection.ts` | Extension-side WebSocket protocol client and peer/request state. | `A2aConnection`, `A2aConnectionEvents` |
+| `connection.ts` | Extension-side WebSocket protocol client. | `A2aConnection`, `A2aConnectionEvents` |
 | `presence.ts` | In-memory Project/name/socket indexes. | `PresenceRegistry`, `Presence` |
-| `messages.ts` | SQLite append-only message log, history queries, idempotency, references, deletion, and migration. | `MessageStore` |
+| `store.ts` | SQLite Project metadata, Project sequences, Messages, history, atomic deletion, and existing message migrations. | `HubStore` |
 | `client.ts` | Hub URL resolution and HTTP meta/Project/history client. | `HubClient`, `connectHub`, `resolveHubUrl` |
 | `realtime-types.ts` | Versioned WebSocket frames, public realtime/history shapes, message identifiers, and canonical references. | protocol types, `A2A_PROTOCOL_VERSION`, message reference helpers |
 | `payload.ts` | Text/binary encoding, attachment validation, and bounded decoded-content accounting. | text/binary codecs, `validateMessageContent` |
@@ -34,9 +34,9 @@
 | --- | --- |
 | `GET /healthz` | Health plus current `HubMeta`. |
 | `GET /v1/meta` | Protocol, URL, process, start time, and data directory metadata. |
-| `GET /v1/projects` | Sorted persistent Project list. |
+| `GET /v1/projects` | List persistent Projects in deterministic name order. |
 | `POST /v1/projects` | Create Project metadata; duplicate returns `409`. |
-| `DELETE /v1/projects/:name` | Reject active Presence, remove Project metadata, then delete message history. |
+| `DELETE /v1/projects/:name` | Reject active Presence, then atomically remove metadata, sequence, and complete history. |
 | `GET /v1/history` | Query one existing Project by cursor, sender name, and bounded limit. |
 | `GET /v1/connect` upgrade | Hand the socket to `RealtimeHub`. |
 
@@ -63,12 +63,11 @@ The client sends `message` with `requestId`, opaque `messageId`, typed target, e
 - A repeated, content-identical `messageId` returns the canonical stored Message as `replayed: true` without resolving or enumerating Presence and without delivery.
 - A new direct target resolves the current name and binds its `presenceId` before persistence; a missing target fails before persistence.
 - A new Project target is validated and atomically persisted before `PresenceRegistry` is enumerated exactly once into a local array excluding the sender.
-- Text, attachment structure/content, total decoded size, and causal references are validated by `MessageStore`.
-- `MessageStore.append` atomically commits one immutable Message—including attachments—and the next Project sequence.
-- New acceptance sends `accepted` with `replayed: false`, the canonical Message, and selected recipient names. Replay sends a distinct `replayed: true` shape with no recipients field.
+- `HubStore` validates the Project row, payload and causal references, then atomically commits one immutable Message—including attachments—and the next Project sequence.
+- New acceptance sends `accepted` with `replayed: false`, the canonical Message, and selected recipient names. Replay sends `replayed: true` with no recipients field.
 - The Hub loops over the local array and immediately enqueues the canonical `message` frame to each concrete socket. Recipient arrays are never persisted.
 
-The client waits 15 seconds by default for `accepted` or request-scoped `error`; a timeout override must be finite, positive, and no greater than 15 seconds or it rejects before dispatch. A caller abort before dispatch sends no frame. After `socket.send` succeeds, caller abort, timeout, or transport close reports ordinary error text that acceptance and Delivery outcomes are unknown, removes the request, ignores late replies, and never retries.
+The client waits 15 seconds by default for `accepted` or request-scoped `error`; a timeout override must be finite, positive, and no greater than 15 seconds or it rejects before dispatch. Caller abort before dispatch sends no frame. After dispatch, abort, timeout, or transport close reports that acceptance and Delivery outcomes are unknown, removes the request, ignores late replies, and never retries.
 
 ### Delivery
 
@@ -86,7 +85,7 @@ Graceful client close sends one exact `goodbye`. The Hub queues its acknowledgem
 
 Legacy transport close and heartbeat timeout enter the same idempotent Hub release path, so a later close callback cannot repeat Presence or Delivery events. Hub shutdown clears all remaining Presence and Delivery state with the distinct `hub_shutdown` reason.
 
-Presence events are realtime-only and never enter `MessageStore`.
+Presence and Delivery events are realtime-only and never enter `HubStore`.
 
 ## PresenceRegistry invariants
 
@@ -99,12 +98,13 @@ WebSocket -> Presence
 
 `claim`, `remove`, and `close` are the only state transitions. A `Presence` contains Project, temporary name, random `presenceId`, socket, and connection timestamp. No member file, offline state, stale state, lease, or cursor exists.
 
-## MessageStore invariants
+## HubStore invariants
 
-`MessageStore` owns `<dataDir>/messages.sqlite` with WAL and `synchronous = FULL`.
+`HubStore` owns `<dataDir>/messages.sqlite` with WAL and `synchronous = FULL`. It is the only production owner of durable Project metadata, Project sequences, and Messages.
 
 ### Durable facts
 
+- one Project row containing `name`, optional display metadata, creation time, and optional creator cwd;
 - one monotonically increasing sequence per Project;
 - one immutable message row per accepted message;
 - globally idempotent `messageId` content comparison;
@@ -116,6 +116,12 @@ WebSocket -> Presence
 Project recipient arrays, pending Delivery, retry attempts, outcome caches, and terminal events are not durable facts.
 
 Message references use `<project>:<sequence>`. Parsing rejects invalid Project names, non-positive/unsafe sequences, and cross-Project history cursors.
+
+### Project lifecycle
+
+Project create/get/list/delete are synchronous store operations. Listing preserves name sorting. `deleteProject` uses one `BEGIN IMMEDIATE` transaction to delete Messages, Project sequence, and metadata, returning whether the Project existed. A failure in any delete statement rolls back all three. Recreating the name therefore starts with sequence `1` and empty history.
+
+`server.ts` rejects deletion while `RealtimeHub` reports an active Presence. Both claim and delete consult this store fact synchronously without a second blocked/deleted set: claim-first rejects deletion, and delete-first rejects claim as an unknown Project.
 
 ### History
 
@@ -155,7 +161,7 @@ Migration runs in the new database transaction and validates imported row count 
 
 `resolveHubUrl` precedence is explicit argument, environment, first existing global config, then loopback default. That resolved URL remains authoritative for HTTP and WebSocket connections; Hub metadata validates protocol compatibility without replacing it. Existing malformed global configuration fails immediately. `probeHub` uses a 1.5-second metadata deadline: only a classified `HubTransportError` means unavailable, while expiry propagates the named deadline error.
 
-`HubClient` gives metadata, Project CRUD, and history requests a 15-second default deadline, composes caller cancellation with that deadline, and keeps the bound active through response-body reading. Fetch and response-body network failures become `HubTransportError` only after caller cancellation and deadline expiry are ruled out. One request/JSON seam preserves non-2xx status and URL details, then operation-specific decoders require exact fixed-protocol response shapes. History snapshots its query before dispatch so URL construction and response validation use the same requested Project; it additionally verifies strict sequence ordering, canonical references, and causal references to earlier messages. Requests are not retried. Realtime operations belong to `A2aConnection`.
+`HubClient` gives metadata, Project CRUD, and history requests a 15-second default deadline, composes caller cancellation with that deadline, and keeps the bound active through response-body reading. Fetch and body network failures become `HubTransportError` only after cancellation and deadline expiry are ruled out. One request/JSON seam preserves non-2xx status and URL details, then operation-specific decoders require exact response shapes. History snapshots its query before dispatch and verifies ordering, canonical references, and causal references. Requests are not retried. Realtime operations belong to `A2aConnection`; server routes and realtime claims use the same `HubStore`.
 
 ## Data-directory lifecycle
 
@@ -163,18 +169,18 @@ Migration runs in the new database transaction and validates imported row count 
 
 1. resolves and creates the data directory;
 2. acquires `HubDataLock` through an exclusive SQLite transaction;
-3. opens `MessageStore`, optionally migrating legacy Inbox history;
+3. opens `HubStore`;
 4. starts Express and attaches `RealtimeHub` to the same HTTP server;
 5. writes `run/hub.json` and `run/hub.pid` atomically;
-6. returns an idempotent `stop` closure.
+6. returns the shared cleanup function as `stop`.
 
-Stop closes realtime clients, the HTTP server, message storage, metadata files, and the directory lock. Startup failures unwind already-opened resources.
+Startup failure and every concurrent `stop` call reuse one cleanup Promise. Cleanup attempts each acquired resource in reverse order, retains the first error, and consistently releases runtime metadata, realtime sockets, the HTTP listener, `HubStore`, and the directory lock.
 
 ## Test coverage
 
-- `hub-realtime.test.ts`: bounded/cancellable handshake with winning-failure preservation, maximum-validated lifecycle and retry overrides, exact goodbye frames and ordering, separately bounded client/server teardown against normal and TCP-proxied nonresponsive peers, concurrent close, Presence release and name reuse before transport teardown, message request cancellation/timeout and late replies, rejected encoding failures, persist-before-enumerate broadcast routing, replay without redelivery, nonblocking batch enqueue, same-Presence ACK retries, receiver in-flight and retained-outcome deduplication, ordered idle outcome expiry and socket-close timer cleanup, terminal delivered/failed/disconnected/unknown cleanup, attachment persistence, and restart.
-- `message-store.test.ts`: ordering, attachment-aware idempotency, causal references, filters, protocol version `2`/legacy migration, integrity, and deletion.
-- `hub-control.test.ts`: independent Hubs, Project control, active-Presence deletion rejection, and safe name reuse.
+- `hub-realtime.test.ts`: bounded/cancellable handshake and teardown, exact goodbye ordering, Project claims, persist-before-enumerate routing, replay without redelivery, same-Presence retries, receiver deduplication, terminal Delivery cleanup, attachment persistence, and restart.
+- `message-store.test.ts`: Project CRUD/reopen/sorting, atomic delete rollback, ordering, idempotency, causality, filters, existing migrations, integrity, and deletion.
+- `hub-control.test.ts`: independent Hubs, claim/delete ordering, active-Presence rejection with unchanged history, startup cleanup, and concurrent stop.
 - `payload.test.ts`: text/binary compression, attachment count, and decoded-size enforcement.
 - `operations.test.ts`: client/runtime integration, HTTP caller cancellation, pre-dispatch message cancellation, strong new/replayed acceptance, and successful/failed Delivery callbacks.
 - `hub-client.test.ts`: HTTP header/body deadlines, caller cancellation, error preservation, successful-response decoding, probe classification, and history wire validation.

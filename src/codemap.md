@@ -2,7 +2,7 @@
 
 ## Responsibility
 
-`src/` contains the OMP-facing extension, its runtime module, strict local configuration, persistent Project metadata, and the `src/hub/` transport/persistence modules.
+`src/` contains the OMP-facing extension, its runtime module, strict local configuration, Project domain names, Hub storage paths, and the `src/hub/` transport/persistence modules.
 
 The central seam is `A2aRuntime`: extension callbacks and commands depend on one stateful interface rather than coordinating HTTP and WebSocket clients independently.
 
@@ -15,10 +15,9 @@ The central seam is `A2aRuntime`: extension callbacks and commands depend on one
 | `operations.ts` | Connected runtime over one WebSocket plus HTTP Project/history operations. | `A2aRuntime`, `MessageView`, `RuntimeStatus` |
 | `config.ts` | Strict repository-local YAML/JSON connection defaults. | `loadLocalConfig` |
 | `config-document.ts` | Read YAML/JSON documents, apply an owner-supplied omptype schema, and report path-qualified errors. | `parseWithSchema` |
-| `paths.ts` | Hub storage paths and local config candidates. | path functions |
-| `registry.ts` | Filesystem-backed persistent Project metadata. | `createProject`, `getProject`, `listProjects`, `deleteProject` |
+| `paths.ts` | Hub SQLite/runtime storage paths and local config candidates. | path functions |
 | `types.ts` | Project/config domain shapes and name validation regexes. | `A2aProject`, `A2aLocalConfig` |
-| `hub/` | HTTP/WebSocket clients and Hub implementation. | [`hub/codemap.md`](hub/codemap.md) |
+| `hub/` | HTTP/WebSocket clients plus the Hub's canonical Project/message store. | [`hub/codemap.md`](hub/codemap.md) |
 
 ## Extension lifecycle
 
@@ -104,15 +103,9 @@ Global client configuration uses the same authoritative candidate order under `~
 
 ## Project metadata
 
-`registry.ts` is the sole owner of persistent Project JSON:
+`hub/store.ts` is the sole owner of persistent Project metadata. The same `<dataDir>/messages.sqlite` database owns Project rows, per-Project sequence, and immutable Messages. Project deletion uses one `BEGIN IMMEDIATE` transaction to remove history, sequence, and metadata; no filesystem CRUD, dual write, deletion marker, or reconciliation path exists.
 
-```text
-<dataDir>/projects/<project>/project.json
-```
-
-Creation validates the Project name, rejects an existing metadata file, and atomically renames a mode-`0600` temporary JSON file. Listing scans valid Project directories and sorts by name. Deletion recursively removes one Project directory and is idempotent for a missing Project.
-
-The Hub, not the extension, calls these functions in normal operation.
+`server.ts` and `realtime-server.ts` query the same synchronous `HubStore` fact. Because Presence claim and Project deletion perform their store checks without yielding the Node event loop, a claim that wins first makes deletion reject on active Presence, while a deletion that wins first makes claim reject the unknown Project.
 
 ## Naming contract
 
@@ -143,7 +136,8 @@ OMP callbacks / slash / tools
 - `extension.test.ts`: registered surfaces, strict invalid-configuration isolation, help and ArkType contracts, completion, attachment ownership, Session/Project-switch cancellation, outbound send fencing, stale UI suppression, and reconnect intent.
 - `operations.test.ts`: published Hub bindings, shared transition teardown, peer snapshots, HTTP and realtime cancellation, new/replayed acceptance, ordered injection, Delivery outcomes, and disconnected errors.
 - `config.test.ts`: strict configuration parsing and migration failures.
-- `hub-client.test.ts`: strict global configuration parsing, exact fields, and authoritative candidate selection.
-- `hub-control.test.ts`: public Project control behavior reached through `HubClient`.
+- `hub-client.test.ts`: strict global configuration parsing, exact fields, authoritative candidate selection, HTTP cancellation, and wire validation.
+- `hub-control.test.ts`: public Project control, active-Presence deletion ordering, startup cleanup, and concurrent stop behavior.
+- `message-store.test.ts`: Project SQLite CRUD/reopen/sorting, transaction rollback, sequence/history behavior, idempotency, and existing message migration coverage.
 
 See the repository root `codemap.md` for deployment and verification contracts.
