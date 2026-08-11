@@ -6,6 +6,19 @@ export const DELIVERY_ACKNOWLEDGE_TIMEOUT_MS = 2_000;
 export const DELIVERY_RETRY_DELAY_MS = 100;
 export const DELIVERY_OUTCOME_CACHE_TTL_MS = 10_000;
 
+export function isExactGoodbyeFrame(
+	value: unknown,
+): value is { type: "goodbye" } {
+	return (
+		typeof value === "object" &&
+		value !== null &&
+		!Array.isArray(value) &&
+		Object.keys(value).length === 1 &&
+		"type" in value &&
+		value.type === "goodbye"
+	);
+}
+
 export type Peer = {
 	name: string;
 	presenceId: string;

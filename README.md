@@ -36,7 +36,7 @@ A Presence starts when the Hub accepts `hello` and ends through one Hub-owned re
 
 - A connection claims one name in one Project.
 - Names are unique among current connections in that Project.
-- Graceful disconnect sends `goodbye`; the Hub releases Presence, Delivery state, and the name before acknowledging it. If either peer does not complete that exchange, bounded WebSocket close and termination fallbacks still end the transport.
+- Graceful disconnect sends an exact `goodbye`; the Hub queues the acknowledgement, releases Presence, Delivery state, and the name, then starts a bounded WebSocket close/termination sequence. Presence can therefore be absent while transport teardown is still in progress.
 - Transport close and heartbeat timeout use the same idempotent release path for older clients and failed connections.
 - Reusing the same name later creates a different Presence.
 - There is no `offline`, `stale`, durable member record, or offline delivery.

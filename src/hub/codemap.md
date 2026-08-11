@@ -54,7 +54,7 @@ The public `baseUrl` reported in Hub metadata can differ from the listen host. C
 4. The claimant receives `claimed` with a new `presenceId` and current peer snapshot.
 5. Existing peers receive `presence_joined`.
 
-Handshake failure, timeout, or cancellation terminates the unpublished socket and waits for its close before returning. One socket can claim one name. One name can be held by one current socket inside a Project. A duplicate fails with `name_in_use`; it never replaces the owner.
+Handshake failure, timeout, or cancellation terminates the unpublished socket and waits for its close before returning. Caller cancellation preserves the caller's exact abort reason even when transport close races it. Lifecycle timeout overrides must be finite, positive, and no greater than the 5-second handshake, 1-second goodbye, and 2-second close bounds; invalid or over-limit options reject before opening a socket. One socket can claim one name. One name can be held by one current socket inside a Project. A duplicate fails with `name_in_use`; it never replaces the owner.
 
 ### Message request
 
@@ -68,7 +68,7 @@ The client sends `message` with `requestId`, opaque `messageId`, typed target, e
 - New acceptance sends `accepted` with `replayed: false`, the canonical Message, and selected recipient names. Replay sends a distinct `replayed: true` shape with no recipients field.
 - The Hub loops over the local array and immediately enqueues the canonical `message` frame to each concrete socket. Recipient arrays are never persisted.
 
-The client waits 15 seconds by default for `accepted` or request-scoped `error`. A caller abort before dispatch sends no frame. After `socket.send` succeeds, caller abort, timeout, or transport close reports ordinary error text that acceptance and Delivery outcomes are unknown, removes the request, ignores late replies, and never retries.
+The client waits 15 seconds by default for `accepted` or request-scoped `error`; a timeout override must be finite, positive, and no greater than 15 seconds or it rejects before dispatch. A caller abort before dispatch sends no frame. After `socket.send` succeeds, caller abort, timeout, or transport close reports ordinary error text that acceptance and Delivery outcomes are unknown, removes the request, ignores late replies, and never retries.
 
 ### Delivery
 
@@ -82,7 +82,7 @@ Receiver result, either Presence leaving, graceful goodbye, heartbeat cleanup, a
 
 ### Presence lifetime
 
-Graceful client close sends one `goodbye`. The Hub atomically removes the Presence, cleans related Delivery entries, broadcasts one `presence_left`, and only then acknowledges `goodbye`. The client waits at most 1 second for that acknowledgement, begins WebSocket close, and terminates after another 2 seconds if close stalls. Concurrent close calls share this one flow. An unpublished socket terminates directly.
+Graceful client close sends one exact `goodbye`. The Hub queues its acknowledgement, atomically removes the Presence, cleans related Delivery entries, broadcasts one `presence_left`, and then starts its own bounded transport close/termination. The client waits at most 1 second for the acknowledgement, begins WebSocket close, and terminates after at most another 2 seconds if close stalls. Presence release is distinct from transport teardown, so the name can be reused while the old socket is still closing. Concurrent close calls share this one flow. An unpublished socket terminates directly.
 
 Legacy transport close and heartbeat timeout enter the same idempotent Hub release path, so a later close callback cannot repeat Presence or Delivery events. Hub shutdown clears all remaining Presence and Delivery state with the distinct `hub_shutdown` reason.
 
@@ -172,7 +172,7 @@ Stop closes realtime clients, the HTTP server, message storage, metadata files, 
 
 ## Test coverage
 
-- `hub-realtime.test.ts`: bounded/cancellable handshake, goodbye ordering and fallback termination, concurrent close, Presence lifetime and name reuse, persist-before-enumerate broadcast, replay without redelivery, nonblocking batch enqueue, same-Presence transport/ACK retries, receiver deduplication, terminal delivered/failed/disconnected/unknown cleanup, attachment persistence, and restart.
+- `hub-realtime.test.ts`: bounded/cancellable handshake, maximum-validated timeout overrides, exact goodbye frames and ordering, separately bounded client/server teardown, concurrent close, Presence release and name reuse before transport teardown, message request cancellation/timeout and late replies, rejected encoding failures, persist-before-enumerate broadcast, replay without redelivery, nonblocking batch enqueue, same-Presence transport/ACK retries, receiver deduplication, terminal delivered/failed/disconnected/unknown cleanup, attachment persistence, and restart.
 - `message-store.test.ts`: ordering, attachment-aware idempotency, causal references, filters, protocol version `2`/legacy migration, integrity, and deletion.
 - `hub-control.test.ts`: independent Hubs, Project control, active-Presence deletion rejection, and safe name reuse.
 - `payload.test.ts`: text/binary compression, attachment count, and decoded-size enforcement.

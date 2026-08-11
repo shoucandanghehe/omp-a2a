@@ -15,7 +15,7 @@ Those mechanics did not match the actual product boundary: independent OMP sessi
 ### Domain model
 
 - A **Project** is a persistent room.
-- A **Presence** exists if and only if one WebSocket is alive. It belongs to one Project and claims one temporary name.
+- A **Presence** starts when the Hub accepts `hello` and ends when the Hub runs its idempotent release path. An exact `goodbye` releases it before the old WebSocket transport necessarily finishes closing; transport close and heartbeat timeout are the fallback release triggers.
 - A **Message** is immutable, receives one monotonically increasing Project sequence, and remains until Project deletion. Optional attachments are immutable file-content values inside the Message, not independently identified objects.
 - A **Delivery** is the in-memory outcome for one selected Presence: `delivered`, `failed`, or `disconnected`.
 
@@ -53,7 +53,7 @@ Opening a protocol version `2` `messages.sqlite` adds attachment storage and dec
 
 ## Consequences
 
-- Presence state is simple and observable: socket alive means present; socket closed means absent.
+- Presence state is simple and observable: a successfully claimed socket is present until Hub release; graceful release and bounded transport teardown are separate steps.
 - Missing direct recipients fail immediately instead of creating latent work.
 - Hub restart clears Presence and delivery state but preserves message history.
 - `delivered` proves successful attachment materialization and injection into the receiving OMP extension, not model understanding or task completion. Materialization or injection errors produce a terminal `failed` Delivery.

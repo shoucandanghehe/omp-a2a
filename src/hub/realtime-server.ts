@@ -17,6 +17,7 @@ import {
 	DELIVERY_ACKNOWLEDGE_TIMEOUT_MS,
 	DELIVERY_MAX_ATTEMPTS,
 	DELIVERY_RETRY_DELAY_MS,
+	isExactGoodbyeFrame,
 	type ServerFrame,
 } from "./realtime-types";
 
@@ -24,6 +25,7 @@ const MAX_FRAME_BYTES = 6 * 1024 * 1024;
 const HEARTBEAT_MS = 10_000;
 const HELLO_TIMEOUT_MS = 5_000;
 const MAX_DELIVERY_ERROR_BYTES = 512;
+const GOODBYE_CLOSE_TIMEOUT_MS = 2_000;
 
 const DEFAULT_DELIVERY_RETRY_POLICY: DeliveryRetryPolicy = {
 	maxAttempts: DELIVERY_MAX_ATTEMPTS,
@@ -217,9 +219,12 @@ export class RealtimeHub {
 			return;
 		}
 		if (value.type === "goodbye") {
+			if (!isExactGoodbyeFrame(value))
+				throw new Error("goodbye frame must contain only type");
+			this.#send(socket, { type: "goodbye" });
 			this.#departed.add(socket);
 			this.#release(socket, "connection_closed");
-			this.#send(socket, { type: "goodbye" });
+			this.#closeAfterGoodbye(socket);
 			return;
 		}
 		if (value.type === "message") {
@@ -660,6 +665,15 @@ export class RealtimeHub {
 			if (presence.presenceId !== excludedPresenceId)
 				this.#send(presence.socket, frame);
 		}
+	}
+
+	#closeAfterGoodbye(socket: WebSocket): void {
+		socket.close(1000, "goodbye acknowledged");
+		const terminateTimer = setTimeout(() => {
+			if (socket.readyState !== WebSocket.CLOSED) socket.terminate();
+		}, GOODBYE_CLOSE_TIMEOUT_MS);
+		terminateTimer.unref();
+		socket.once("close", () => clearTimeout(terminateTimer));
 	}
 
 	#send(socket: WebSocket, frame: ServerFrame): void {

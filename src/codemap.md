@@ -35,7 +35,7 @@ On `session_start` and `session_switch`, the extension:
 3. activates the new context and resolves its repository-local configuration;
 4. clears prior desired connection state and auto-connects only when configuration exists and `autoConnect !== false`.
 
-On `session_shutdown`, it clears the active context and desired state, cancels reconnect, and performs the shared graceful close. The close sends one `goodbye`, waits up to 1 second for the Hub to release Presence, starts the WebSocket close, and terminates after another 2 seconds if needed. Unexpected socket close schedules reconnect. A `name_in_use` response is terminal for that desired connection rather than repeatedly displacing or retrying the owner.
+On `session_shutdown`, it clears the active context and desired state, cancels reconnect, and performs the shared graceful close. The close sends one exact `goodbye`, waits at most 1 second for its acknowledgement, starts the WebSocket close, and terminates after at most another 2 seconds if needed. The Hub releases Presence before completing its separately bounded transport teardown. Unexpected socket close schedules reconnect. A `name_in_use` response is terminal for that desired connection rather than repeatedly displacing or retrying the owner.
 
 ### Inbound events
 
