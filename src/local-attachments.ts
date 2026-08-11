@@ -12,18 +12,13 @@ import {
 	resolveLocalUrlToFile,
 	resolveLocalUrlToPath,
 } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
-import {
-	encodeBinaryPayload,
-	MAX_ATTACHMENT_COUNT,
-	MAX_MESSAGE_CONTENT_BYTES,
-} from "./hub/payload";
+import { encodeBinaryPayload, validateAttachmentName } from "./hub/payload";
 import type { EncodedAttachment } from "./hub/types";
 import type { MessageAttachment } from "./operations";
 
 export type LocalAttachmentReference = {
 	name: string;
 	url: string;
-	uncompressedBytes: number;
 };
 
 export type MaterializedLocalAttachments = {
@@ -34,7 +29,6 @@ export type MaterializedLocalAttachments = {
 
 async function readStableFile(
 	filePath: string,
-	maxBytes: number,
 	source: string,
 	signal?: AbortSignal,
 ): Promise<Buffer> {
@@ -46,9 +40,7 @@ async function readStableFile(
 		signal?.throwIfAborted();
 		if (!before.isFile())
 			throw new Error(`attachment source must be a regular file: ${source}`);
-		if (before.size > maxBytes)
-			throw new Error(`attachments exceed ${MAX_MESSAGE_CONTENT_BYTES} bytes`);
-		const buffer = Buffer.allocUnsafe(before.size + 1);
+		const buffer = Buffer.allocUnsafe(before.size);
 		let offset = 0;
 		while (offset < buffer.byteLength) {
 			signal?.throwIfAborted();
@@ -66,7 +58,7 @@ async function readStableFile(
 		signal?.throwIfAborted();
 		if (offset !== before.size || after.size !== before.size)
 			throw new Error(`attachment changed while being read: ${source}`);
-		return buffer.subarray(0, offset);
+		return buffer;
 	} finally {
 		await file.close();
 	}
@@ -81,13 +73,9 @@ export async function snapshotLocalAttachments(
 	if (sources.length === 0) return [];
 	if (!localProtocolOptions)
 		throw new Error("current OMP session does not expose local:// storage");
-	if (sources.length > MAX_ATTACHMENT_COUNT)
-		throw new Error(
-			`message has more than ${MAX_ATTACHMENT_COUNT} attachments`,
-		);
 
 	const attachments: EncodedAttachment[] = [];
-	let totalBytes = 0;
+	const names = new Set<string>();
 	for (const source of sources) {
 		if (!source.startsWith("local://"))
 			throw new Error(`attachment source must use local://: ${source}`);
@@ -98,16 +86,11 @@ export async function snapshotLocalAttachments(
 		signal?.throwIfAborted();
 		if (!resolved)
 			throw new Error(`attachment source must be a regular file: ${source}`);
-		const bytes = await readStableFile(
-			resolved.path,
-			MAX_MESSAGE_CONTENT_BYTES - totalBytes,
-			source,
-			signal,
-		);
-		totalBytes += bytes.byteLength;
+		const bytes = await readStableFile(resolved.path, source, signal);
 		signal?.throwIfAborted();
+		const name = validateAttachmentName(path.basename(resolved.path), names);
 		attachments.push({
-			name: path.basename(resolved.path),
+			name,
 			payload: encodeBinaryPayload(bytes),
 		});
 	}
@@ -127,6 +110,9 @@ export async function materializeLocalAttachments(
 			async dispose() {},
 		};
 	}
+	const names = new Set<string>();
+	for (const attachment of attachments)
+		validateAttachmentName(attachment.name, names);
 	if (!localProtocolOptions)
 		throw new Error("current OMP session does not expose local:// storage");
 
@@ -154,7 +140,6 @@ export async function materializeLocalAttachments(
 			references.push({
 				name: attachment.name,
 				url: `local://${encodeURIComponent(path.basename(outputDirectory))}/${encodeURIComponent(attachment.name)}`,
-				uncompressedBytes: attachment.bytes.byteLength,
 			});
 		}
 

@@ -276,6 +276,169 @@ test("model tools stay push-driven and forward history cancellation", async () =
 	}
 });
 
+test("idle Presence changes collapse to the roster delta before the next message", async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-extension-presence-"));
+	const project = "presence-model-events";
+	const cwd = join(dataDir, "receiver");
+	const hub = await startHubServer({ port: 0, dataDir });
+	const client = new HubClient(hub.meta.baseUrl);
+	const rosterSettled = Promise.withResolvers<void>();
+	const newcomerJoined = Promise.withResolvers<void>();
+	const inboundInjected = Promise.withResolvers<void>();
+	const delivery = Promise.withResolvers<DeliveryEvent>();
+	const injected: Array<{
+		message: {
+			customType?: string;
+			content?: string;
+			display?: boolean;
+		};
+		options?: {
+			deliverAs?: "steer" | "followUp";
+			triggerTurn?: boolean;
+		};
+	}> = [];
+	let commandHandler:
+		| ((args: string, context: typeof context) => Promise<void>)
+		| undefined;
+	let beforeAgentStart:
+		| (() =>
+				| {
+						message?: {
+							customType?: string;
+							content?: string;
+							display?: boolean;
+						};
+						systemPrompt?: string[];
+				  }
+				| undefined)
+		| undefined;
+	let agentEnd:
+		| ((event: {
+				type: "agent_end";
+				messages: [];
+				willContinue?: boolean;
+		  }) => void)
+		| undefined;
+	let departing: A2aConnection | undefined;
+	let transient: A2aConnection | undefined;
+	let worker: A2aConnection | undefined;
+	let newcomer: A2aConnection | undefined;
+	const context = {
+		cwd,
+		isIdle: () => true,
+		ui: {
+			notify(message: string) {
+				if (message === "[a2a] departing left") rosterSettled.resolve();
+				if (message === "[a2a] newcomer joined") newcomerJoined.resolve();
+			},
+		},
+	};
+
+	try {
+		await client.createProject({ name: project });
+		mkdirSync(join(cwd, ".omp"), { recursive: true });
+		writeFileSync(
+			join(cwd, ".omp", "a2a.yml"),
+			`project: ${project}\nname: receiver\nhubUrl: ${hub.meta.baseUrl}\nautoConnect: false\n`,
+		);
+		departing = await A2aConnection.connect({
+			baseUrl: hub.meta.baseUrl,
+			project,
+			name: "departing",
+		});
+		a2aExtension({
+			arktype(definition: unknown) {
+				return definition;
+			},
+			setLabel() {},
+			on(event: string, handler: unknown) {
+				if (event === "before_agent_start")
+					beforeAgentStart = handler as typeof beforeAgentStart;
+				if (event === "agent_end") agentEnd = handler as typeof agentEnd;
+			},
+			logger: { warn() {} },
+			sendMessage(message, options) {
+				injected.push({ message, options });
+				if (message.customType === "a2a-inbound") inboundInjected.resolve();
+			},
+			registerCommand(
+				_name: string,
+				command: { handler: typeof commandHandler },
+			) {
+				commandHandler = command.handler;
+			},
+			registerTool() {},
+		} as never);
+
+		if (!commandHandler) throw new Error("a2a command was not registered");
+		await commandHandler(`connect ${project} --as receiver`, context);
+		if (!agentEnd) throw new Error("agent_end handler was not registered");
+		if (!beforeAgentStart)
+			throw new Error("before_agent_start handler was not registered");
+		await agentEnd({ type: "agent_end", messages: [] });
+
+		worker = await A2aConnection.connect({
+			baseUrl: hub.meta.baseUrl,
+			project,
+			name: "worker",
+			events: { onDelivery: delivery.resolve },
+		});
+		transient = await A2aConnection.connect({
+			baseUrl: hub.meta.baseUrl,
+			project,
+			name: "transient",
+		});
+		await transient.close();
+		await departing.close();
+		await rosterSettled.promise;
+
+		await worker.send({
+			target: { type: "agent", name: "receiver" },
+			text: "start the handoff",
+		});
+		expect((await delivery.promise).status).toBe("delivered");
+		await inboundInjected.promise;
+
+		expect(injected).toHaveLength(2);
+		expect(injected[0]).toEqual({
+			message: {
+				customType: "a2a-presence",
+				content: "[a2a presence] joined=worker left=departing",
+				display: false,
+			},
+			options: { deliverAs: "steer", triggerTurn: false },
+		});
+		expect(injected[1]?.message.customType).toBe("a2a-inbound");
+		expect(injected[1]?.message.content).toContain("\nstart the handoff");
+
+		await agentEnd({ type: "agent_end", messages: [] });
+		newcomer = await A2aConnection.connect({
+			baseUrl: hub.meta.baseUrl,
+			project,
+			name: "newcomer",
+		});
+		await newcomerJoined.promise;
+		expect(beforeAgentStart()).toEqual({
+			message: {
+				customType: "a2a-presence",
+				content: "[a2a presence] joined=newcomer",
+				display: false,
+			},
+			systemPrompt: [
+				"Your A2A roster name is receiver. Address peers only by exact names returned by a2a_peers or by sender names in inbound A2A messages.",
+			],
+		});
+	} finally {
+		await newcomer?.close();
+		await worker?.close();
+		await transient?.close();
+		await departing?.close();
+		if (commandHandler) await commandHandler("disconnect", context);
+		await hub.stop();
+		rmSync(dataDir, { recursive: true, force: true });
+	}
+});
+
 test("a2a_message snapshots a sender local file into the receiver session and history", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-extension-attachment-"));
 	const project = "attachment-contract";
@@ -299,7 +462,7 @@ test("a2a_message snapshots a sender local file into the receiver session and hi
 	let receiverCommand: typeof senderCommand;
 	const inbound = Promise.withResolvers<{
 		content: string;
-		details: unknown;
+		details?: unknown;
 	}>();
 	let inboundDelivery:
 		| { deliverAs?: "steer" | "followUp"; triggerTurn?: boolean }
@@ -347,7 +510,11 @@ test("a2a_message snapshots a sender local file into the receiver session and hi
 			tools: Map<string, RegisteredTool>,
 			setCommand: (handler: NonNullable<typeof senderCommand>) => void,
 			sendMessage: (
-				message: { content: string; details: unknown },
+				message: {
+					customType?: string;
+					content: string;
+					details?: unknown;
+				},
 				options?: {
 					deliverAs?: "steer" | "followUp";
 					triggerTurn?: boolean;
@@ -386,6 +553,7 @@ test("a2a_message snapshots a sender local file into the receiver session and hi
 				receiverCommand = handler;
 			},
 			(message, options) => {
+				if (message.customType !== "a2a-inbound") return;
 				inboundDelivery = options;
 				inbound.resolve(message);
 			},
@@ -918,8 +1086,9 @@ test("session switch cancels an in-flight inbound injection", async () => {
 					sessionSwitch = handler as typeof sessionSwitch;
 			},
 			logger: { warn() {} },
-			sendMessage(message: { content: string }) {
-				injected.push(message.content);
+			sendMessage(message: { customType?: string; content: string }) {
+				if (message.customType === "a2a-inbound")
+					injected.push(message.content);
 			},
 			registerCommand(
 				_name: string,
@@ -1015,8 +1184,9 @@ test("manual Project switch cancels old in-flight attachment injection", async (
 				setLabel() {},
 				on() {},
 				logger: { warn() {} },
-				sendMessage(message: { content: string }) {
-					injected.push(message.content);
+				sendMessage(message: { customType?: string; content: string }) {
+					if (message.customType === "a2a-inbound")
+						injected.push(message.content);
 				},
 				registerCommand(
 					_name: string,
@@ -1120,8 +1290,9 @@ test("ordinary command contexts do not cancel same-session inbound injection", a
 				setLabel() {},
 				on() {},
 				logger: { warn() {} },
-				sendMessage(message: { content: string }) {
-					injected.push(message.content);
+				sendMessage(message: { customType?: string; content: string }) {
+					if (message.customType === "a2a-inbound")
+						injected.push(message.content);
 				},
 				registerCommand(
 					_name: string,

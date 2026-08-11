@@ -9,7 +9,10 @@ import {
 	type A2aProject,
 	PROJECT_NAME_RE,
 } from "../types";
-import { validateMessageContent } from "./payload";
+import {
+	decodeTextPayload as validateEncodedText,
+	parseEncodedAttachments,
+} from "./payload";
 import {
 	A2A_PROTOCOL_VERSION,
 	formatMessageRef,
@@ -95,7 +98,7 @@ const PROJECT_KEYS = [
 const PEER_KEYS = ["name", "presenceId"] as const;
 const PROJECT_TARGET_KEYS = ["type"] as const;
 const AGENT_TARGET_KEYS = ["type", "name", "presenceId"] as const;
-const PAYLOAD_KEYS = ["encoding", "data", "uncompressedBytes"] as const;
+const PAYLOAD_KEYS = ["encoding", "data"] as const;
 const ATTACHMENT_KEYS = ["name", "payload"] as const;
 const MESSAGE_KEYS = [
 	"messageId",
@@ -260,17 +263,11 @@ function decodeTextPayload(value: unknown): EncodedTextPayload {
 	const payload = exactRecord(value, "message.payload", PAYLOAD_KEYS);
 	const encoding = stringField(payload, "encoding", "message.payload");
 	const data = stringField(payload, "data", "message.payload");
-	const uncompressedBytes = safeIntegerField(
-		payload,
-		"uncompressedBytes",
-		"message.payload",
-		0,
-	);
-	if (encoding === "identity")
-		return { encoding, data, uncompressedBytes };
-	if (encoding === "gzip+base64")
-		return { encoding, data, uncompressedBytes };
-	throw new Error("message.payload.encoding is invalid");
+	if (encoding !== "identity" && encoding !== "gzip+base64")
+		throw new Error("message.payload.encoding is invalid");
+	const decoded: EncodedTextPayload = { encoding, data };
+	validateEncodedText(decoded);
+	return decoded;
 }
 
 function decodeRealtimeMessage(value: unknown): RealtimeMessage {
@@ -285,7 +282,7 @@ function decodeRealtimeMessage(value: unknown): RealtimeMessage {
 		throw new Error("message.messageRef is not canonical");
 	const payload = decodeTextPayload(message.payload);
 	assertExactAttachmentKeys(message.attachments);
-	const { attachments } = validateMessageContent(payload, message.attachments);
+	const attachments = parseEncodedAttachments(message.attachments);
 	const replyTo = optionalStringField(message, "replyTo", "message");
 	if (replyTo !== undefined) {
 		const reply = parseMessageRef(replyTo);

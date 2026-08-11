@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { ensureDir } from "../paths";
 import type { A2aProject } from "../types";
 import { AGENT_NAME_RE, PROJECT_NAME_RE } from "../types";
-import { parseEncodedAttachments, validateMessageContent } from "./payload";
+import { decodeTextPayload, parseEncodedAttachments } from "./payload";
 import {
 	formatMessageRef,
 	type HistoryPage,
@@ -19,7 +19,6 @@ import type { EncodedAttachment, EncodedTextPayload } from "./types";
 export const MESSAGE_STORAGE_VERSION = 1;
 const UNSUPPORTED_STORAGE_MESSAGE =
 	"unsupported pre-release storage; start with an empty data directory";
-export const MAX_HISTORY_BYTES = 4 * 1024 * 1024;
 
 export class MessageIdConflictError extends Error {}
 export class ProjectConflictError extends Error {}
@@ -51,9 +50,7 @@ type MessageRow = {
 	target_presence_id: string | null;
 	encoding: string;
 	data: string;
-	uncompressed_bytes: number;
 	attachments: string;
-	content_bytes: number;
 	created_at: number;
 	reply_to_sequence: number | null;
 };
@@ -97,9 +94,7 @@ const MESSAGES_SCHEMA = `
 		target_presence_id TEXT,
 		encoding TEXT NOT NULL,
 		data TEXT NOT NULL,
-		uncompressed_bytes INTEGER NOT NULL,
 		attachments TEXT NOT NULL,
-		content_bytes INTEGER NOT NULL,
 		created_at INTEGER NOT NULL,
 		reply_to_sequence INTEGER,
 		PRIMARY KEY(project, project_sequence)
@@ -200,9 +195,8 @@ export class HubStore {
 				INSERT INTO messages(
 					project, project_sequence, msg_id, sender_name, sender_presence_id,
 					target_kind, target_name, target_presence_id, encoding, data,
-					uncompressed_bytes, attachments, content_bytes, created_at,
-					reply_to_sequence
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+					attachments, created_at, reply_to_sequence
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			`);
 			this.#insertProject = this.#database.query(`
 				INSERT INTO projects(
@@ -224,7 +218,7 @@ export class HubStore {
 			);
 			this.#append = this.#database.transaction(
 				(draft: MessageDraft): MessageAppendResult => {
-					const { attachments, contentBytes } = this.#validateDraft(draft);
+					const attachments = this.#validateDraft(draft);
 					if (!this.#findProject.get(draft.project)) {
 						throw new UnknownProjectError(
 							`unknown project: ${draft.project}`,
@@ -263,9 +257,7 @@ export class HubStore {
 							: null,
 						draft.payload.encoding,
 						draft.payload.data,
-						draft.payload.uncompressedBytes,
 						JSON.stringify(attachments),
-						contentBytes,
 						draft.createdAt,
 						replyToSequence,
 					);
@@ -300,7 +292,7 @@ export class HubStore {
 	): Extract<MessageAppendResult, { replayed: true }> | null {
 		const existing = this.#findById.get(draft.messageId);
 		if (!existing) return null;
-		const { attachments } = this.#validateDraft(draft);
+		const attachments = this.#validateDraft(draft);
 		const replyToSequence = this.#resolveReply(draft.project, draft.replyTo);
 		if (!this.#matches(existing, draft, attachments, replyToSequence)) {
 			throw new MessageIdConflictError(
@@ -381,7 +373,9 @@ export class HubStore {
 			throw new Error("history accepts before or after, not both");
 		if (query.from !== undefined && !AGENT_NAME_RE.test(query.from))
 			throw new Error(`invalid name: ${query.from}`);
-		const limit = Math.min(Math.max(Math.trunc(query.limit ?? 50), 1), 500);
+		const limit = query.limit ?? 50;
+		if (!Number.isSafeInteger(limit) || limit <= 0)
+			throw new Error("history limit must be a positive integer");
 		const params: Array<string | number> = [query.project];
 		const predicates = ["project = ?"];
 		let ascending = false;
@@ -404,15 +398,11 @@ export class HubStore {
 			params.push(query.from);
 		}
 		const order = ascending ? "ASC" : "DESC";
-		params.push(MAX_HISTORY_BYTES, limit);
+		params.push(limit);
 		const rows = this.#database
-			.query<MessageRow & { cumulative_bytes: number }, Array<string | number>>(
-				`SELECT * FROM (
-					SELECT messages.*, SUM(content_bytes) OVER (ORDER BY project_sequence ${order}) AS cumulative_bytes
-					FROM messages
-					WHERE ${predicates.join(" AND ")}
-				)
-				WHERE cumulative_bytes <= ?
+			.query<MessageRow, Array<string | number>>(
+				`SELECT * FROM messages
+				WHERE ${predicates.join(" AND ")}
 				ORDER BY project_sequence ${order}
 				LIMIT ?`,
 			)
@@ -479,10 +469,7 @@ export class HubStore {
 		return parsed.sequence;
 	}
 
-	#validateDraft(draft: MessageDraft): {
-		attachments: EncodedAttachment[];
-		contentBytes: number;
-	} {
+	#validateDraft(draft: MessageDraft): EncodedAttachment[] {
 		if (!MESSAGE_ID_RE.test(draft.messageId))
 			throw new Error(`invalid messageId: ${draft.messageId}`);
 		if (!PROJECT_NAME_RE.test(draft.project))
@@ -499,7 +486,9 @@ export class HubStore {
 		}
 		if (!Number.isSafeInteger(draft.createdAt) || draft.createdAt < 0)
 			throw new Error("invalid createdAt");
-		return validateMessageContent(draft.payload, draft.attachments);
+		if (decodeTextPayload(draft.payload).trim().length === 0)
+			throw new Error("message text required");
+		return parseEncodedAttachments(draft.attachments);
 	}
 
 	#matches(
@@ -516,7 +505,6 @@ export class HubStore {
 				(draft.target.type === "agent" ? draft.target.name : null) &&
 			row.encoding === draft.payload.encoding &&
 			row.data === draft.payload.data &&
-			row.uncompressed_bytes === draft.payload.uncompressedBytes &&
 			row.attachments === JSON.stringify(attachments) &&
 			row.reply_to_sequence === replyToSequence
 		);
@@ -537,17 +525,8 @@ export class HubStore {
 		const payload: EncodedTextPayload = {
 			encoding: row.encoding as EncodedTextPayload["encoding"],
 			data: row.data,
-			uncompressedBytes: row.uncompressed_bytes,
 		};
 		const attachments = parseEncodedAttachments(JSON.parse(row.attachments));
-		const contentBytes =
-			payload.uncompressedBytes +
-			attachments.reduce(
-				(total, attachment) => total + attachment.payload.uncompressedBytes,
-				0,
-			);
-		if (contentBytes !== row.content_bytes)
-			throw new Error("stored message content size does not match metadata");
 		return {
 			messageId: row.msg_id,
 			messageRef: formatMessageRef(row.project, row.project_sequence),

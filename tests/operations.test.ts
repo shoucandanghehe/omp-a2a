@@ -607,7 +607,6 @@ test("only the latest connection transition can publish or emit events", async (
 				payload: {
 					encoding: "identity",
 					data: "must not be falsely acknowledged",
-					uncompressedBytes: 32,
 				},
 				attachments: [],
 				createdAt: 1,

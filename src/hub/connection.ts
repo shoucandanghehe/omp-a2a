@@ -1,5 +1,9 @@
 import WebSocket from "ws";
-import { encodeTextPayload } from "./payload";
+import {
+	decodeTextPayload,
+	encodeTextPayload,
+	parseEncodedAttachments,
+} from "./payload";
 import {
 	A2A_PROTOCOL_VERSION,
 	type AcceptedMessage,
@@ -47,12 +51,7 @@ function boundedTimeout(
 
 function deliveryFailureMessage(error: unknown): string {
 	const message = error instanceof Error ? error.message : String(error);
-	if (Buffer.byteLength(message, "utf8") <= 512)
-		return message || "receiver failed to inject message";
-	return Buffer.from(message, "utf8")
-		.subarray(0, 512)
-		.toString("utf8")
-		.replace(/\uFFFD$/, "");
+	return message || "receiver failed to inject message";
 }
 
 function unknownMessageOutcome(reason: string): Error {
@@ -103,12 +102,9 @@ function isEncodedTextPayload(
 ): value is RealtimeMessage["payload"] {
 	return (
 		isJsonObject(value) &&
-		hasExactKeys(value, ["encoding", "data", "uncompressedBytes"]) &&
+		hasExactKeys(value, ["encoding", "data"]) &&
 		(value.encoding === "identity" || value.encoding === "gzip+base64") &&
-		typeof value.data === "string" &&
-		typeof value.uncompressedBytes === "number" &&
-		Number.isSafeInteger(value.uncompressedBytes) &&
-		value.uncompressedBytes >= 0
+		typeof value.data === "string"
 	);
 }
 
@@ -124,13 +120,10 @@ function isEncodedAttachment(
 		return false;
 	}
 	return (
-		hasExactKeys(value.payload, ["encoding", "data", "uncompressedBytes"]) &&
+		hasExactKeys(value.payload, ["encoding", "data"]) &&
 		(value.payload.encoding === "base64" ||
 			value.payload.encoding === "gzip+base64") &&
-		typeof value.payload.data === "string" &&
-		typeof value.payload.uncompressedBytes === "number" &&
-		Number.isSafeInteger(value.payload.uncompressedBytes) &&
-		value.payload.uncompressedBytes >= 0
+		typeof value.payload.data === "string"
 	);
 }
 
@@ -161,7 +154,7 @@ function isRealtimeMessage(value: unknown): value is RealtimeMessage {
 					"attachments",
 					"createdAt",
 				];
-	return (
+	const structurallyValid =
 		hasExactKeys(value, expectedKeys) &&
 		typeof value.messageId === "string" &&
 		typeof value.messageRef === "string" &&
@@ -176,8 +169,15 @@ function isRealtimeMessage(value: unknown): value is RealtimeMessage {
 		value.attachments.every(isEncodedAttachment) &&
 		typeof value.createdAt === "number" &&
 		Number.isFinite(value.createdAt) &&
-		(!("replyTo" in value) || typeof value.replyTo === "string")
-	);
+		(!("replyTo" in value) || typeof value.replyTo === "string");
+	if (!structurallyValid) return false;
+	try {
+		decodeTextPayload(value.payload as RealtimeMessage["payload"]);
+		parseEncodedAttachments(value.attachments);
+		return true;
+	} catch {
+		return false;
+	}
 }
 
 function decodeAcceptedFrame(frame: unknown): AcceptedMessage {
@@ -309,6 +309,7 @@ export class A2aConnection {
 		});
 		this.#socket = new WebSocket(
 			`${baseUrl.replace(/^http/, "ws").replace(/\/+$/, "")}/v1/connect`,
+			{ maxPayload: 0 },
 		);
 		this.#socket.on("open", () =>
 			this.#send({

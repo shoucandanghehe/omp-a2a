@@ -32,7 +32,7 @@ Private protocol version `3` reuses the Hub HTTP server:
 - SQLite `messages.sqlite`, owned by the canonical `HubStore`, stores Project metadata, each Project's sequence, and append-only message history with WAL and `synchronous = FULL`.
 - in-memory indexes store Presence and pending delivery.
 
-Text below 32 KiB stays identity encoded; larger text uses gzip plus Base64. Attachment bytes use Base64 and use gzip first when smaller. One Message accepts at most eight attachments, with a 4 MiB decoded-content limit shared by text and attachment content. Decompression is bounded.
+Text below 32 KiB stays identity encoded. Larger text uses gzip plus Base64 only when compression is smaller; attachment bytes use Base64 and the same compression rule. Payload and attachment objects have exact wire shapes, Base64 is canonical, and attachment names are unique safe basenames. Matching Hub and Extension versions are trusted for resource use, so Messages, attachments, transport frames, and history responses have no application resource cap or derived byte metadata. Malformed payloads fail loudly; deployment memory and container limits provide resource isolation.
 
 ### Public interfaces
 
@@ -54,12 +54,13 @@ Repository configuration uses `name` and `autoConnect`. Removed `agentId` and `a
 - `delivered` proves successful attachment materialization and injection into the receiving OMP extension, not model understanding or task completion. Materialization or injection errors produce a terminal `failed` Delivery.
 - Receiver terminal outcomes live for 10 seconds behind one ordered earliest-expiry timer, so retries cannot reinject during the Hub's bounded retry window and idle connections do not retain expired outcomes. Socket close cancels the timer and clears the cache.
 - Direct routing is not confidential history. Without accounts and authorization, any trusted current Agent can query Project history.
-- Hub and extension must upgrade together because the private wire protocol requires an exact version match.
+- Hub and extension must upgrade together because private protocol version `3` requires an exact match and has no compatibility path for version `2` Message frames.
+- Matching-version clients are trusted to produce valid internal payloads. Removing application payload and history resource caps keeps the path linear, while deployment resource isolation contains failures.
 - Project deletion is rejected while that Project has an active Presence, then removes its metadata, sequence, and message history in one SQLite transaction.
 
 ## Verification
 
-The behavior suite and executable smoke scenarios cover duplicate names, immediate Presence removal, direct-target failure, broadcast snapshots, causal replies, retries and deduplication, bounded teardown, attachment ownership and history, failed Delivery, restart persistence, exact current storage guards, the model and human surfaces, and the Docker HTTP/WebSocket boundary.
+The behavior suite and executable smoke scenarios cover duplicate names, immediate Presence removal, direct-target failure, broadcast snapshots, causal replies, retries and deduplication, non-persistent Presence events, bounded teardown, attachment ownership and history, uncapped trusted payload and history paths, failed Delivery, restart persistence, exact current storage guards, the model and human surfaces, and the Docker HTTP/WebSocket boundary.
 
 ## Deployment
 

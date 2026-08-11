@@ -7,7 +7,7 @@
 - HTTP Project administration and explicit history;
 - WebSocket Presence, realtime messages, and delivery outcomes;
 - versioned SQLite Project metadata, sequence, and append-only message history;
-- payload encoding limits;
+- functional payload encoding, decoding, and structural validation without application resource caps;
 - exclusive data-directory ownership and process lifecycle.
 
 ## Module map
@@ -22,13 +22,13 @@
 | `store.ts` | Versioned SQLite Project metadata, sequences, Messages, history, atomic deletion, idempotency, and fail-closed schema guard. | `HubStore` |
 | `client.ts` | Hub URL resolution and HTTP meta/Project/history client. | `HubClient`, `connectHub`, `resolveHubUrl` |
 | `realtime-types.ts` | Versioned WebSocket frames, public realtime/history shapes, message identifiers, and canonical references. | protocol types, `A2A_PROTOCOL_VERSION`, message reference helpers |
-| `payload.ts` | Text/binary encoding, attachment validation, and bounded decoded-content accounting. | text/binary codecs, `validateMessageContent` |
+| `payload.ts` | Exact payload/attachment wire parsing, canonical Base64 decoding, structural attachment-name validation, and text/binary codecs. | codecs, `parseEncodedAttachments`, `validateAttachmentName` |
 | `data-lock.ts` | Exclusive ownership of one Hub data directory. | `HubDataLock` |
 | `types.ts` | Hub metadata plus encoded text, binary, and attachment values. | `HubMeta`, encoded payload types |
 
 ## HTTP surface
 
-`server.ts` creates one Express app with a 6 MiB JSON body cap.
+`server.ts` configures Express JSON parsing without an application byte limit; deployment memory and container limits own resource isolation.
 
 | Method and path | Behavior |
 | --- | --- |
@@ -37,7 +37,7 @@
 | `GET /v1/projects` | List persistent Projects in deterministic name order. |
 | `POST /v1/projects` | Create Project metadata; duplicate returns `409`. |
 | `DELETE /v1/projects/:name` | Reject active Presence, then atomically remove metadata, sequence, and complete history. |
-| `GET /v1/history` | Query one existing Project by cursor, sender name, and bounded limit. |
+| `GET /v1/history` | Query one existing Project by cursor, sender name, and any explicit positive integer limit. |
 | `GET /v1/connect` upgrade | Hand the socket to `RealtimeHub`. |
 
 The public `baseUrl` reported in Hub metadata can differ from the listen host. Clients retain their resolved configuration URL as the authoritative HTTP and WebSocket route.
@@ -63,7 +63,7 @@ The client sends `message` with `requestId`, opaque `messageId`, typed target, e
 - A repeated, content-identical `messageId` returns the canonical stored Message as `replayed: true` without resolving or enumerating Presence and without delivery.
 - A new direct target resolves the current name and binds its `presenceId` before persistence; a missing target fails before persistence.
 - A new Project target is validated and atomically persisted before `PresenceRegistry` is enumerated exactly once into a local array excluding the sender.
-- `HubStore` validates the Project row, payload and causal references, then atomically commits one immutable Message—including attachments—and the next Project sequence.
+- `HubStore` validates the Project row, exact text and attachment wire shapes, canonical Base64, valid unique attachment basenames, decoded gzip data, and causal references, then atomically commits one immutable Message—including attachments—and the next Project sequence.
 - New acceptance sends `accepted` with `replayed: false`, the canonical Message, and selected recipient names. Replay sends `replayed: true` with no recipients field.
 - The Hub loops over the local array and immediately enqueues the canonical `message` frame to each concrete socket. Recipient arrays are never persisted.
 
@@ -110,7 +110,7 @@ WebSocket -> Presence
 - globally idempotent `messageId` content comparison;
 - sender name and accepting `presenceId`;
 - direct/Project target, including resolved target Presence for direct messages;
-- encoded text, ordered attachment names/content, and total decoded-content bytes;
+- canonical encoded text and ordered attachment names/content;
 - creation timestamp and optional same-Project causal parent sequence.
 
 Project recipient arrays, pending Delivery, retry attempts, outcome caches, and terminal events are not durable facts.
@@ -129,13 +129,12 @@ Project create/get/list/delete are synchronous store operations. Listing preserv
 
 - `before` or `after`, never both;
 - optional exact sender-name filter;
-- positive bounded item limit;
-- deterministic Project-sequence ordering;
-- a 4 MiB cumulative decoded-content budget, including attachments, per history page.
+- a default 50-item page or any explicit positive integer limit;
+- deterministic Project-sequence ordering.
 
 ### Idempotency and causality
 
-Reusing `messageId` with the same Project, sender name, target kind/name, text encoding/data/size, ordered attachment names/encoding/data/size, and causal parent returns the canonical stored Message with `replayed: true`. A difference in any compared field raises `MessageIdConflictError`.
+Reusing `messageId` with the same Project, sender name, target kind/name, text encoding/data, ordered attachment names/encoding/data, and causal parent returns the canonical stored Message with `replayed: true`. A difference in any compared field raises `MessageIdConflictError`.
 
 `replyTo` must resolve to an existing message in the same Project or `UnknownReplyTargetError` is raised.
 
@@ -147,13 +146,12 @@ Opening an existing database requires the exact current storage version and the 
 
 ## Payload codec
 
-- Text `< 32 KiB`: `{ encoding: "identity", data, uncompressedBytes }`.
-- Larger text: gzip bytes encoded as Base64.
-- Attachment bytes: Base64, optionally gzip-compressed first when smaller.
-- At most eight attachments per Message.
-- Text plus attachments `> 4 MiB`: rejected before persistence.
-- gzip decode uses `maxOutputLength`, and decoded byte counts must match their metadata.
-- The WebSocket server caps a complete frame at 6 MiB.
+- Text `< 32 KiB`: `{ encoding: "identity", data }`.
+- Larger text: gzip plus Base64 only when smaller, otherwise identity.
+- Attachment bytes: Base64, optionally gzip-compressed only when smaller.
+- Payloads carry no derived byte metadata or application resource bounds; Base64 decoding rejects invalid and noncanonical input by canonical re-encoding.
+- Express JSON parsing and both WebSocket endpoints are configured without an application payload cap.
+- Matching private-protocol clients are trusted for resource use, not structural validity; malformed payloads fail loudly and deployment limits own resource isolation.
 
 ## HTTP client
 
@@ -176,10 +174,10 @@ Startup failure and every concurrent `stop` call reuse one cleanup Promise. Clea
 
 ## Test coverage
 
-- `hub-realtime.test.ts`: bounded/cancellable handshake and teardown, exact goodbye ordering, Project claims, persist-before-enumerate routing, replay without redelivery, same-Presence retries, receiver deduplication, terminal Delivery cleanup, attachment persistence, and restart.
-- `message-store.test.ts`: Project CRUD/reopen/sorting, atomic delete rollback, ordering, idempotency, causality, filters, current schema creation/reopen, fail-closed guards, integrity, and deletion.
-- `hub-control.test.ts`: independent Hubs, claim/delete ordering, active-Presence rejection with unchanged history, storage startup rejection, cleanup, and concurrent stop.
-- `payload.test.ts`: text/binary compression, attachment count, and decoded-size enforcement.
+- `hub-realtime.test.ts`: bounded/cancellable handshake and teardown, exact goodbye ordering, Project claims, persist-before-enumerate routing, replay without redelivery, same-Presence retries, receiver deduplication, terminal Delivery cleanup, attachment persistence, large same-version payload/attachment-count paths, and restart.
+- `message-store.test.ts`: Project CRUD/reopen/sorting, atomic delete rollback, ordering, idempotency, causality, cursor/filter/default/explicit-limit behavior, current schema creation/reopen, fail-closed guards, integrity, and deletion.
+- `hub-control.test.ts`: independent Hubs, uncapped HTTP request bodies, claim/delete ordering, active-Presence rejection with unchanged history, storage startup rejection, cleanup, and concurrent stop.
+- `payload.test.ts`: identity/gzip/Base64 round trips, compression choice, uncapped attachment parsing, exact wire shapes, safe unique names, and malformed codec failures.
 - `operations.test.ts`: client/runtime integration, HTTP caller cancellation, pre-dispatch message cancellation, strong new/replayed acceptance, and successful/failed Delivery callbacks.
 - `hub-client.test.ts`: HTTP header/body deadlines, caller cancellation, error preservation, successful-response decoding, probe classification, and history wire validation.
 

@@ -305,7 +305,7 @@ test("history rejects invalid sequences, references, and attachments", async () 
 		sequence: 1,
 		from: { name: "api", presenceId: "presence-api" },
 		target: { type: "project" },
-		payload: { encoding: "identity", data: "hello", uncompressedBytes: 5 },
+		payload: { encoding: "identity", data: "hello" },
 		attachments: [],
 		createdAt: 1,
 	};
@@ -330,7 +330,6 @@ test("history rejects invalid sequences, references, and attachments", async () 
 					payload: {
 						encoding: "base64",
 						data: "not canonical base64",
-						uncompressedBytes: 1,
 					},
 				},
 			],
@@ -378,7 +377,6 @@ const validAttachment = {
 	payload: {
 		encoding: "base64",
 		data: "ZQ==",
-		uncompressedBytes: 1,
 	},
 };
 
@@ -393,7 +391,7 @@ function historyMessage(
 		sequence,
 		from: { name: "api", presenceId: "presence-api" },
 		target: { type: "project" },
-		payload: { encoding: "identity", data: "hello", uncompressedBytes: 5 },
+		payload: { encoding: "identity", data: "hello" },
 		attachments: [],
 		createdAt: sequence,
 		...overrides,
@@ -489,7 +487,6 @@ const exactKeyScenarios: ExactKeyScenario[] = [
 					payload: {
 						encoding: "identity",
 						data: "hello",
-						uncompressedBytes: 5,
 						unexpected: true,
 					},
 				}),

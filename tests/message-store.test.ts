@@ -5,7 +5,6 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
 	HubStore,
-	MAX_HISTORY_BYTES,
 	MESSAGE_STORAGE_VERSION,
 	MessageIdConflictError,
 	ProjectConflictError,
@@ -42,7 +41,8 @@ afterEach(() => {
 test("messages form one immutable sequence per Project", () => {
 	const root = mkdtempSync(join(tmpdir(), "omp-a2a-messages-"));
 	roots.push(root);
-	const store = new HubStore(join(root, "messages.sqlite"));
+	const databasePath = join(root, "messages.sqlite");
+	const store = new HubStore(databasePath);
 	store.createProject({ name: "billing" });
 
 	const first = store.append({
@@ -102,6 +102,14 @@ test("messages form one immutable sequence per Project", () => {
 	).toThrow(MessageIdConflictError);
 
 	store.close();
+	const database = new Database(databasePath);
+	const columns = database
+		.query<{ name: string }, []>("PRAGMA table_info(messages)")
+		.all()
+		.map((column) => column.name);
+	expect(columns).not.toContain("uncompressed_bytes");
+	expect(columns).not.toContain("content_bytes");
+	database.close();
 });
 
 test("current storage schema is versioned and reopens", () => {
@@ -179,28 +187,34 @@ test("history uses stable Project cursors and sender filters", () => {
 	store.close();
 });
 
-test("history response has an explicit decoded-byte bound", () => {
+test("history keeps its default page and accepts explicit large limits", () => {
 	const root = mkdtempSync(join(tmpdir(), "omp-a2a-messages-"));
 	roots.push(root);
 	const store = new HubStore(join(root, "messages.sqlite"));
-	store.createProject({ name: "bounded" });
-	const text = "x".repeat(MAX_HISTORY_BYTES / 2);
-	for (let index = 1; index <= 3; index++) {
+	store.createProject({ name: "large-limit" });
+	for (let index = 1; index <= 501; index++) {
 		store.append({
-			messageId: `bounded-${index}`,
-			project: "bounded",
+			messageId: `large-limit-${index}`,
+			project: "large-limit",
 			from: { name: "api", presenceId: "presence-api" },
 			target: { type: "project" },
-			payload: encodeTextPayload(text),
+			payload: encodeTextPayload(`message ${index}`),
 			attachments: [],
 			createdAt: index,
 		});
 	}
+	const defaultPage = store.history({ project: "large-limit" }).messages;
+	expect(defaultPage).toHaveLength(50);
+	expect(defaultPage[0]?.messageRef).toBe("large-limit:452");
 	expect(
-		store
-			.history({ project: "bounded", limit: 10 })
-			.messages.map((message) => message.messageRef),
-	).toEqual(["bounded:2", "bounded:3"]);
+		store.history({ project: "large-limit", limit: 501 }).messages,
+	).toHaveLength(501);
+	expect(() => store.history({ project: "large-limit", limit: 0 })).toThrow(
+		"positive integer",
+	);
+	expect(() => store.history({ project: "large-limit", limit: 1.5 })).toThrow(
+		"positive integer",
+	);
 	store.close();
 });
 
@@ -318,7 +332,6 @@ test("current storage version rejects unexpected schema objects", () => {
 	]);
 
 });
-
 test("attachment content participates in messageId idempotency", () => {
 	const root = mkdtempSync(join(tmpdir(), "omp-a2a-attachment-idempotency-"));
 	roots.push(root);

@@ -11,7 +11,7 @@ The central seam is `A2aRuntime`: extension callbacks and commands depend on one
 | File | Responsibility | Primary interface |
 | --- | --- | --- |
 | `extension.ts` | OMP registration, session lifecycle, UI notifications, reconnect policy, slash commands, completions, and model tools. | default extension factory |
-| `local-attachments.ts` | Cancellable snapshot of sender-session `local://` files and leak-free materialization of received/history attachment bytes into the calling session. | `snapshotLocalAttachments`, `materializeLocalAttachments` |
+| `local-attachments.ts` | Cancellable snapshot of uncapped sender-session `local://` file bytes and leak-free materialization of validated attachment basenames into the calling session. | `snapshotLocalAttachments`, `materializeLocalAttachments` |
 | `operations.ts` | Connected runtime over one WebSocket plus HTTP Project/history operations. | `A2aRuntime`, `MessageView`, `RuntimeStatus` |
 | `config.ts` | Strict repository-local YAML/JSON connection defaults. | `loadLocalConfig` |
 | `config-document.ts` | Read YAML/JSON documents, apply an owner-supplied omptype schema, and report path-qualified errors. | `parseWithSchema` |
@@ -38,10 +38,10 @@ On `session_shutdown`, the extension aborts Session work, clears active and reco
 ### Inbound events
 
 - Only events from the currently published connection reach the Extension; candidate and retired connection events are discarded.
-- `presence_joined` and `presence_left` update the UI only.
+- `presence_joined` and `presence_left` always update the UI. Busy sessions receive each change as a hidden-display `a2a-presence` custom message through `steer`. Idle changes are collapsed into at most one joined/left roster delta between the last terminal `agent_end` snapshot and the current Presence; net-zero churn is discarded, and the delta is injected before the next inbound Message or returned by `before_agent_start` for the next model turn.
 - `delivery` reports the selected peer name and terminal `delivered`/`failed`/`disconnected`/`unknown` outcome; failures and unknown outcomes include their error.
-- duplicate `message` frames for one `messageId` share one in-flight callback or a 10-second terminal outcome cache, so retries reuse one result. Distinct Messages still run serially in Hub-assigned Project sequence. Each callback captures the Session generation and Runtime-owned published-connection token, carries both lifecycle signals through attachment materialization, then verifies both before injection. Session changes, connection replacement, disconnect, or socket close cancel injection and dispose every uncommitted attachment directory. Candidate and retired sockets fail delivery rather than acknowledging work that never reached the active OMP Session.
-- socket/protocol errors from the published connection are written to the extension logger.
+- Duplicate `message` frames for one `messageId` share one in-flight callback or a 10-second terminal outcome cache, so retries reuse one result. Distinct Messages still run serially in Hub-assigned Project sequence. Each callback captures the Session generation and Runtime-owned published-connection token, carries both lifecycle signals through attachment materialization, then verifies both before injecting an `a2a-inbound` OMP custom message through `steer`. Idle sessions start a turn and busy sessions queue the Message into the active turn. Session changes, connection replacement, disconnect, or socket close cancel injection and dispose every uncommitted attachment directory. Candidate and retired sockets fail delivery rather than acknowledging work that never reached the active OMP Session.
+- Socket/protocol errors from the published connection are written to the extension logger.
 
 ## Human command surface
 
@@ -85,7 +85,7 @@ Connected model turns receive the current A2A roster name and use only `a2a_peer
 
 Attachment snapshot and materialization combine caller, Session, and published-connection signals. Materialization returns explicit disposable/commit ownership so cancellation, a final fence failure, injection failure, or a failed history sibling removes every uncommitted output directory.
 
-`MessageView` is the persistent realtime Message shape with decoded text and attachment bytes replacing encoded wire payloads.
+`MessageView` is the persistent realtime Message shape with decoded text and attachment bytes replacing encoded wire payloads. Matching private-protocol clients are trusted; codecs fail loudly on malformed data and do not enforce application resource caps.
 
 ## Configuration contract
 
@@ -133,7 +133,8 @@ OMP callbacks / slash / tools
 
 ## Tests touching this directory
 
-- `extension.test.ts`: registered surfaces, strict invalid-configuration isolation, help and ArkType contracts, completion, attachment ownership, Session/Project-switch cancellation, outbound send fencing, stale UI suppression, and reconnect intent.
+- `extension.test.ts`: registered surfaces, strict invalid-configuration isolation, help and ArkType contracts, multi-level completion, Presence notifications, attachment ownership, Session/Project-switch cancellation, outbound send fencing, stale UI suppression, and reconnect intent.
+- `local-attachments.test.ts`: materialization rejects unsafe or duplicate attachment names before writing files.
 - `operations.test.ts`: published Hub bindings, shared transition teardown, peer snapshots, HTTP and realtime cancellation, new/replayed acceptance, ordered injection, Delivery outcomes, and disconnected errors.
 - `config.test.ts`: strict configuration parsing and migration failures.
 - `hub-client.test.ts`: strict global configuration parsing, exact fields, authoritative candidate selection, HTTP cancellation, and wire validation.

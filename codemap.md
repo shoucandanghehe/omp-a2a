@@ -70,7 +70,7 @@ A same-named later connection is a new Presence and never inherits pending Deliv
 
 ### Payload contract
 
-Text smaller than 32 KiB remains identity encoded. Larger text uses gzip plus Base64. Attachment bytes use Base64 and use gzip when smaller. Encoding and decoding enforce a 4 MiB total decoded-content limit across text and at most eight attachments, including bounded decompression.
+Text below 32 KiB remains identity encoded. Larger text and attachment bytes use gzip plus Base64 only when compression is smaller; other attachment bytes use Base64. Payloads and attachments have exact wire shapes, Base64 is canonical, and attachment names are unique safe basenames. Matching Hub and Extension versions are trusted, so payloads and history have no application-level resource cap or derived byte metadata. Malformed internal payloads fail loudly, while deployment memory and container limits own resource isolation.
 
 ## Configuration and deployment
 
@@ -103,7 +103,7 @@ The Hub runs locally with `bun run hub` or in Docker Compose. Each Hub needs a u
 
 Connected model turns receive the current A2A roster name and use only `a2a_peers` results or inbound sender names to address peers; disconnected turns receive no A2A identity prompt.
 
-Inbound messages are pushed through OMP `sendMessage` in Hub-assigned Project sequence using `steer` delivery: idle sessions start a turn and busy sessions queue the Message into the active turn. Injection rechecks the published connection token and Session generation after cancellable attachment materialization; stale work reports failed delivery. Models never wait, sleep, or poll history for replies.
+Idle Presence churn is collapsed by comparing the roster at the last terminal `agent_end` with the current roster; at most one hidden `a2a-presence` delta enters model context before the next inbound Message or model turn, and net-zero churn disappears. Busy sessions receive each Presence change through `steer`. Inbound Messages are pushed through OMP `sendMessage` in Hub-assigned Project sequence using `steer` delivery: idle sessions start a turn and busy sessions queue the Message into the active turn. Injection rechecks the published connection token and Session generation after cancellable attachment materialization; stale work reports failed delivery. Models never wait, sleep, or poll history for replies.
 The sender Extension snapshots attachment bytes before sending and fences the final send to the initiating Session and published connection. Receivers and history callers materialize new URLs in their own session-local storage; caller cancellation or Session/connection shutdown stops attachment I/O and removes every uncommitted output directory, including completed siblings of a failed batch. The Hub never resolves `local://`.
 
 ## Root asset map
@@ -126,12 +126,12 @@ The sender Extension snapshots attachment bytes before sending and fences the fi
 | `src/` | OMP adapter, runtime, configuration, Project domain names, and Hub storage paths. | [`src/codemap.md`](src/codemap.md) |
 | `src/hub/` | HTTP/WebSocket protocol, Presence, routing, canonical SQLite persistence, payloads, locking, and process lifecycle. | [`src/hub/codemap.md`](src/hub/codemap.md) |
 | `scripts/` | Executable SQLite-store, Hub, and Docker smoke scenarios. | [`scripts/codemap.md`](scripts/codemap.md) |
-| `tests/` | Bun behavior tests for configuration, payloads, message history, realtime routing, control routes, runtime, and extension registration/completion. | Tests are excluded from generated map state. |
+| `tests/` | Bun behavior tests for configuration, payload codecs and structural validation, local attachment materialization, message history, realtime routing, control routes, runtime, and extension registration/completion. | Tests are excluded from generated map state. |
 | `docs/` | Implemented architecture decisions and historical fixed-snapshot review material. | Documentation is excluded from generated map state. |
 
 ## Verification
 
-The local release gate runs Biome, `bun run smoke`, both Bun entry-point builds, and `docker compose config`. It covers SQLite Project CRUD/reopen/sorting and atomic deletion, current storage creation/reopen and fail-closed schema guards, bounded WebSocket lifecycles, caller cancellation, Presence routing, replay and retries, receiver deduplication, terminal Delivery cleanup, attachment ownership and history, payload limits, Hub restart/cleanup, extension lifecycle, and command completion.
+The local release gate runs Biome, `bun run smoke`, both Bun entry-point builds, and `docker compose config`. It covers SQLite Project CRUD/reopen/sorting and atomic deletion, current storage creation/reopen and fail-closed schema guards, bounded WebSocket lifecycles, caller cancellation, Presence notifications and routing, replay and retries, receiver deduplication, terminal Delivery cleanup, attachment ownership and history, uncapped trusted payload and history behavior, Hub restart/cleanup, extension lifecycle, and command completion.
 
 `bun run smoke:docker` crosses the public HTTP/WebSocket process boundary of the selected running Hub, verifies persisted history, and removes its temporary Project.
 

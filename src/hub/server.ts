@@ -117,7 +117,7 @@ export async function startHubServer(options?: {
 		store = hubStore;
 
 		const app = express();
-		app.use(express.json({ limit: "6mb" }));
+		app.use(express.json({ limit: Number.POSITIVE_INFINITY }));
 		let meta: HubMeta;
 
 		app.get("/healthz", (_request, response) =>
