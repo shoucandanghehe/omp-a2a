@@ -77,7 +77,7 @@ Connected model turns receive the current A2A roster name and use only `a2a_peer
 
 `A2aRuntime` owns at most one `A2aConnection`.
 
-- `connect(project, name)` cleanly closes any old connection, obtains the current Hub client, and returns self plus peer snapshot after the WebSocket claim. The underlying handshake has a 5-second default deadline and supports caller cancellation at the `A2aConnection` seam.
+- `connect(project, name)` cleanly closes any old connection, obtains the current Hub client, and returns self plus peer snapshot after the WebSocket claim. The underlying handshake has a 5-second default deadline and supports caller cancellation at the `A2aConnection` seam. Whichever timeout, protocol, transport, cancellation, or successful claim outcome settles first remains authoritative through teardown.
 - `disconnect()` is idempotent and clears the stored connection before awaiting close; the underlying `A2aConnection.close()` shares one goodbye/close Promise across concurrent callers.
 - `peers()` returns the current client-side Presence map.
 - `message()` requires a live connection, sends through it, forwards an optional caller signal, and decodes a strong accepted-result union: a new acceptance has `replayed: false` plus recipients, while a prior acceptance has `replayed: true` and no recipient field. The request has a 15-second default deadline; pre-dispatch abort sends nothing, while abort/timeout/close after dispatch reports unknown acceptance and Delivery outcomes without caller retry.

@@ -1,6 +1,6 @@
-import { afterEach, expect, jest, test } from "bun:test";
+import { afterEach, expect, jest, spyOn, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
-import { createServer } from "node:http";
+import { createServer as createHttpServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import WebSocket, { WebSocketServer } from "ws";
@@ -80,7 +80,7 @@ async function startTestTransport(): Promise<{
 	socket: Promise<WebSocket>;
 	frames: FrameQueue<ClientFrame>;
 }> {
-	const server = createServer();
+	const server = createHttpServer();
 	const websocketServer = new WebSocketServer({ server });
 	const connected = Promise.withResolvers<WebSocket>();
 	const frames = new FrameQueue<ClientFrame>();
@@ -204,7 +204,7 @@ async function startRealtimeTransport(
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-retry-policy-"));
 	roots.push(dataDir);
 	createProject({ name: "room", dataDir });
-	const server = createServer();
+	const server = createHttpServer();
 	const realtime = new RealtimeHub(server, messages, dataDir, options);
 	await new Promise<void>((resolve, reject) => {
 		server.once("error", reject);
@@ -616,6 +616,47 @@ test("caller abort leaves no socket or Presence", async () => {
 	expect(await client.deleteProject("abort-room")).toBe(true);
 });
 
+test("a later handshake abort cannot replace the failure that won", async () => {
+	for (const scenario of ["timeout", "protocol", "transport"] as const) {
+		const transport = await startTestTransport();
+		const controller = new AbortController();
+		const lateAbort = new Error(`late abort after ${scenario} failure`);
+		const connecting = A2aConnection.connect({
+			baseUrl: transport.baseUrl,
+			project: "room",
+			name: scenario,
+			signal: controller.signal,
+			timeoutMs: scenario === "timeout" ? 20 : 5_000,
+			events: {
+				onClose: () => controller.abort(lateAbort),
+			},
+		});
+		const socket = await transport.socket;
+		expect(await transport.frames.next()).toMatchObject({ type: "hello" });
+
+		if (scenario === "protocol") {
+			socket.send(
+				JSON.stringify({
+					type: "error",
+					code: "protocol_mismatch",
+					message: "wrong protocol",
+				}),
+			);
+		} else if (scenario === "transport") {
+			socket.close(1011, "upstream failed");
+		}
+
+		const expected =
+			scenario === "timeout"
+				? "handshake timed out"
+				: scenario === "protocol"
+					? "protocol_mismatch: wrong protocol"
+					: "A2A connection closed (1011): upstream failed";
+		await expect(connecting).rejects.toThrow(expected);
+		expect(controller.signal.aborted).toBe(true);
+	}
+});
+
 test("connection lifecycle timeout overrides reject invalid and over-limit values", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-invalid-timeouts-"));
 	roots.push(dataDir);
@@ -731,6 +772,52 @@ test("the Hub closes transport after acknowledging goodbye", async () => {
 	await observerClosed.promise;
 });
 
+test("the Hub terminates a transport whose close frames cannot reach the peer", async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-server-terminate-"));
+	roots.push(dataDir);
+	const hub = await startHubServer({ port: 0, dataDir });
+	hubs.push(hub);
+	const client = new HubClient(hub.meta.baseUrl);
+	await client.createProject({ name: "server-terminate" });
+	const observer = await connect(
+		hub.meta.baseUrl,
+		"server-terminate",
+		"observer",
+	);
+	await observer.frames.next();
+	const api = await connect(hub.meta.baseUrl, "server-terminate", "api");
+	const closed = Promise.withResolvers<void>();
+	api.socket.once("close", () => closed.resolve());
+	expect(await api.frames.next()).toMatchObject({ type: "claimed" });
+	await observer.frames.next();
+
+	const closeSpy = spyOn(WebSocket.prototype, "close").mockImplementation(
+		() => {},
+	);
+	try {
+		jest.useFakeTimers();
+		api.socket.send(JSON.stringify({ type: "goodbye" }));
+		expect(await api.frames.next()).toEqual({ type: "goodbye" });
+		expect(await observer.frames.next()).toMatchObject({
+			type: "presence_left",
+			peer: { name: "api" },
+		});
+		jest.advanceTimersByTime(2_001);
+		await closed.promise;
+	} finally {
+		closeSpy.mockRestore();
+	}
+
+	const replacement = await connect(
+		hub.meta.baseUrl,
+		"server-terminate",
+		"api",
+	);
+	expect(await replacement.frames.next()).toMatchObject({ type: "claimed" });
+	replacement.socket.terminate();
+	observer.socket.terminate();
+});
+
 test("client reports a non-exact goodbye acknowledgement", async () => {
 	const transport = await startTestTransport();
 	const protocolError = Promise.withResolvers<Error>();
@@ -806,7 +893,7 @@ test("close shares one goodbye barrier and releases the name before resolving", 
 	expect(await client.deleteProject("goodbye-room")).toBe(true);
 });
 
-test("close falls back to bounded socket teardown without a goodbye acknowledgement", async () => {
+test("close completes normally when the peer omits its goodbye acknowledgement", async () => {
 	const transport = await startTestTransport();
 	const closed = Promise.withResolvers<{ code: number }>();
 	const connecting = A2aConnection.connect({
@@ -826,6 +913,64 @@ test("close falls back to bounded socket teardown without a goodbye acknowledgem
 	await closing;
 	expect((await closed.promise).code).toBe(1000);
 });
+
+test("client termination bounds a close whose frames cannot reach the Hub", async () => {
+	const transport = await startTestTransport();
+	const closeEvents: Array<{
+		manual: boolean;
+		code: number;
+		reason: string;
+	}> = [];
+	const connection = await (async () => {
+		const connecting = A2aConnection.connect({
+			baseUrl: transport.baseUrl,
+			project: "room",
+			name: "api",
+			goodbyeTimeoutMs: 25,
+			closeTimeoutMs: 25,
+			events: { onClose: (event) => closeEvents.push(event) },
+		});
+		const socket = await transport.socket;
+		await transport.frames.next();
+		socket.send(JSON.stringify(claimedFrame("api")));
+		return await connecting;
+	})();
+	const pendingOutcome = connection
+		.send(
+			{ target: { type: "project" }, text: "never receives an outcome" },
+			{ timeoutMs: 500 },
+		)
+		.catch((error: unknown) => error);
+	await transport.frames.next();
+
+	const closeSpy = spyOn(WebSocket.prototype, "close").mockImplementation(
+		() => {},
+	);
+	try {
+		jest.useFakeTimers();
+		const closing = connection.close();
+		expect(await transport.frames.next()).toEqual({ type: "goodbye" });
+		jest.advanceTimersByTime(26);
+		await Promise.resolve();
+		jest.advanceTimersByTime(26);
+		await closing;
+	} finally {
+		closeSpy.mockRestore();
+	}
+	const pendingFailure = await pendingOutcome;
+	expect(pendingFailure).toBeInstanceOf(Error);
+	expect((pendingFailure as Error).message).toContain(
+		"the WebSocket closed (1006: WebSocket close timed out after 25ms)",
+	);
+	expect(closeEvents).toEqual([
+		{
+			manual: true,
+			code: 1006,
+			reason: "WebSocket close timed out after 25ms",
+		},
+	]);
+});
+
 test("aborted and timed out message requests ignore late acceptance and errors", async () => {
 	const transport = await startTestTransport();
 	const unexpectedErrors: Error[] = [];
@@ -1284,7 +1429,7 @@ test("RealtimeHub rejects invalid delivery retry overrides exactly", () => {
 	for (const { policy, message } of cases) {
 		let thrown: unknown;
 		try {
-			new RealtimeHub(createServer(), acceptingLedger(), tmpdir(), {
+			new RealtimeHub(createHttpServer(), acceptingLedger(), tmpdir(), {
 				deliveryRetryPolicy: policy,
 			});
 		} catch (error) {

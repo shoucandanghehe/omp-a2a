@@ -27,7 +27,7 @@ Direct messaging resolves one current name and binds the target `presenceId`. Pr
 
 Private protocol version `3` reuses the Hub HTTP server:
 
-- WebSocket `/v1/connect` carries handshake, Presence events, Messages with inline attachment content, acknowledgments, and Delivery outcomes.
+- WebSocket `/v1/connect` carries handshake, Presence events, Messages with inline attachment content, acknowledgments, and Delivery outcomes. Failed handshake teardown preserves whichever timeout, protocol, transport, or caller-cancellation outcome settled first.
 - HTTP carries Hub metadata, Project administration, and explicit history queries.
 - filesystem JSON stores Project metadata;
 - in-memory indexes store Presence and pending delivery;
@@ -64,7 +64,7 @@ Opening a protocol version `2` `messages.sqlite` adds attachment storage and dec
 
 ## Verification
 
-The behavior suite and executable smoke scenarios cover duplicate names, immediate Presence removal, direct-target failure, broadcast snapshots, causal replies, non-persistent Presence events, bounded same-Presence retry configuration, in-flight and retained-outcome deduplication, ordered idle cache expiry, attachment snapshot/materialization/history, failed Delivery, restart persistence, protocol version `2` database migration, legacy Inbox migration, the three-tool model surface, the reduced human command surface, and the Docker HTTP/WebSocket boundary.
+The behavior suite and executable smoke scenarios cover duplicate names, immediate Presence removal, direct-target failure, broadcast snapshots, causal replies, non-persistent Presence events, bounded close termination against TCP-proxied nonresponsive peers, handshake failure precedence during teardown, bounded same-Presence retry configuration, in-flight and retained-outcome deduplication, ordered idle cache expiry, attachment snapshot/materialization/history, failed Delivery, restart persistence, protocol version `2` database migration, legacy Inbox migration, the three-tool model surface, the reduced human command surface, and the Docker HTTP/WebSocket boundary.
 
 ## Deployment and rollback
 
