@@ -52,6 +52,17 @@ export class HubDeadlineError extends Error {
 	}
 }
 
+export class HubTransportError extends Error {
+	constructor(
+		readonly operation: string,
+		readonly url: string,
+		cause: unknown,
+	) {
+		super(`${operation} failed to reach ${url}`, { cause });
+		this.name = "HubTransportError";
+	}
+}
+
 export class HubResponseError extends Error {
 	constructor(
 		readonly responseName: string,
@@ -64,10 +75,65 @@ export class HubResponseError extends Error {
 
 type Decoder<T> = (value: unknown) => T;
 
+const HUB_META_KEYS = [
+	"pid",
+	"port",
+	"baseUrl",
+	"dataDir",
+	"startedAt",
+	"protocolVersion",
+] as const;
+const PROJECT_KEYS = [
+	"name",
+	"displayName",
+	"description",
+	"createdAt",
+	"createdByCwd",
+] as const;
+const PEER_KEYS = ["name", "presenceId"] as const;
+const PROJECT_TARGET_KEYS = ["type"] as const;
+const AGENT_TARGET_KEYS = ["type", "name", "presenceId"] as const;
+const PAYLOAD_KEYS = ["encoding", "data", "uncompressedBytes"] as const;
+const ATTACHMENT_KEYS = ["name", "payload"] as const;
+const MESSAGE_KEYS = [
+	"messageId",
+	"messageRef",
+	"project",
+	"sequence",
+	"from",
+	"target",
+	"payload",
+	"attachments",
+	"createdAt",
+	"replyTo",
+] as const;
+
 function record(value: unknown, label: string): Record<string, unknown> {
 	if (!value || typeof value !== "object" || Array.isArray(value))
 		throw new Error(`${label} must be an object`);
 	return value as Record<string, unknown>;
+}
+
+function exactRecord(
+	value: unknown,
+	label: string,
+	expectedKeys: readonly string[],
+): Record<string, unknown> {
+	const candidate = record(value, label);
+	for (const key of Object.keys(candidate)) {
+		if (!expectedKeys.includes(key))
+			throw new Error(`${label}.${key} is not allowed`);
+	}
+	return candidate;
+}
+
+function assertExactAttachmentKeys(value: unknown): void {
+	if (!Array.isArray(value)) return;
+	for (const [index, candidate] of value.entries()) {
+		const label = `message.attachments[${index}]`;
+		const attachment = exactRecord(candidate, label, ATTACHMENT_KEYS);
+		exactRecord(attachment.payload, `${label}.payload`, PAYLOAD_KEYS);
+	}
 }
 
 function stringField(
@@ -109,7 +175,7 @@ function safeIntegerField(
 }
 
 function decodeHubMeta(value: unknown): HubMeta {
-	const meta = record(value, "metadata");
+	const meta = exactRecord(value, "metadata", HUB_META_KEYS);
 	const pid = safeIntegerField(meta, "pid", "metadata", 1);
 	const port = safeIntegerField(meta, "port", "metadata", 1);
 	if (port > 65_535) throw new Error("metadata.port must be <= 65535");
@@ -140,7 +206,7 @@ function decodeHubMeta(value: unknown): HubMeta {
 }
 
 function decodeProject(value: unknown): A2aProject {
-	const project = record(value, "project");
+	const project = exactRecord(value, "project", PROJECT_KEYS);
 	const name = stringField(project, "name", "project");
 	if (!PROJECT_NAME_RE.test(name)) throw new Error("project.name is invalid");
 	const decoded: A2aProject = {
@@ -157,7 +223,7 @@ function decodeProject(value: unknown): A2aProject {
 }
 
 function decodePeer(value: unknown): Peer {
-	const peer = record(value, "message.from");
+	const peer = exactRecord(value, "message.from", PEER_KEYS);
 	const name = stringField(peer, "name", "message.from");
 	if (!AGENT_NAME_RE.test(name)) throw new Error("message.from.name is invalid");
 	const presenceId = stringField(peer, "presenceId", "message.from");
@@ -166,8 +232,13 @@ function decodePeer(value: unknown): Peer {
 }
 
 function decodeTarget(value: unknown): MessageTarget {
-	const target = record(value, "message.target");
-	const type = stringField(target, "type", "message.target");
+	const candidate = record(value, "message.target");
+	const type = stringField(candidate, "type", "message.target");
+	const target = exactRecord(
+		candidate,
+		"message.target",
+		type === "project" ? PROJECT_TARGET_KEYS : AGENT_TARGET_KEYS,
+	);
 	if (type === "project") return { type };
 	if (type !== "agent") throw new Error("message.target.type is invalid");
 	const name = stringField(target, "name", "message.target");
@@ -184,7 +255,7 @@ function decodeTarget(value: unknown): MessageTarget {
 }
 
 function decodeTextPayload(value: unknown): EncodedTextPayload {
-	const payload = record(value, "message.payload");
+	const payload = exactRecord(value, "message.payload", PAYLOAD_KEYS);
 	const encoding = stringField(payload, "encoding", "message.payload");
 	const data = stringField(payload, "data", "message.payload");
 	const uncompressedBytes = safeIntegerField(
@@ -201,7 +272,7 @@ function decodeTextPayload(value: unknown): EncodedTextPayload {
 }
 
 function decodeRealtimeMessage(value: unknown): RealtimeMessage {
-	const message = record(value, "message");
+	const message = exactRecord(value, "message", MESSAGE_KEYS);
 	const messageId = stringField(message, "messageId", "message");
 	if (!MESSAGE_ID_RE.test(messageId)) throw new Error("message.messageId is invalid");
 	const project = stringField(message, "project", "message");
@@ -211,10 +282,16 @@ function decodeRealtimeMessage(value: unknown): RealtimeMessage {
 	if (messageRef !== formatMessageRef(project, sequence))
 		throw new Error("message.messageRef is not canonical");
 	const payload = decodeTextPayload(message.payload);
+	assertExactAttachmentKeys(message.attachments);
 	const { attachments } = validateMessageContent(payload, message.attachments);
 	const replyTo = optionalStringField(message, "replyTo", "message");
-	if (replyTo !== undefined && parseMessageRef(replyTo).project !== project)
-		throw new Error("message.replyTo belongs to another project");
+	if (replyTo !== undefined) {
+		const reply = parseMessageRef(replyTo);
+		if (reply.project !== project)
+			throw new Error("message.replyTo belongs to another project");
+		if (reply.sequence >= sequence)
+			throw new Error("message.replyTo must precede the message");
+	}
 	const decoded: RealtimeMessage = {
 		messageId,
 		messageRef,
@@ -231,14 +308,22 @@ function decodeRealtimeMessage(value: unknown): RealtimeMessage {
 }
 
 function decodeProjectList(value: unknown): A2aProject[] {
-	const projects = record(value, "Project list response").projects;
+	const projects = exactRecord(
+		value,
+		"Project list response",
+		["projects"],
+	).projects;
 	if (!Array.isArray(projects))
 		throw new Error("Project list response.projects must be an array");
 	return projects.map(decodeProject);
 }
 
 function decodeProjectDeletion(value: unknown): boolean {
-	const response = record(value, "Project deletion response");
+	const response = exactRecord(
+		value,
+		"Project deletion response",
+		["ok", "deleted"],
+	);
 	if (response.ok !== true)
 		throw new Error("Project deletion response.ok must be true");
 	if (typeof response.deleted !== "boolean")
@@ -246,11 +331,20 @@ function decodeProjectDeletion(value: unknown): boolean {
 	return response.deleted;
 }
 
-function decodeHistoryPage(value: unknown): HistoryPage {
-	const messages = record(value, "history response").messages;
-	if (!Array.isArray(messages))
+function decodeHistoryPage(value: unknown, project: string): HistoryPage {
+	const response = exactRecord(value, "history response", ["messages"]);
+	if (!Array.isArray(response.messages))
 		throw new Error("history response.messages must be an array");
-	return { messages: messages.map(decodeRealtimeMessage) };
+	const messages = response.messages.map(decodeRealtimeMessage);
+	let previousSequence = 0;
+	for (const message of messages) {
+		if (message.project !== project)
+			throw new Error("history response contains another Project");
+		if (message.sequence <= previousSequence)
+			throw new Error("history response sequences must be strictly increasing");
+		previousSequence = message.sequence;
+	}
+	return { messages };
 }
 
 function throwIfRequestAborted(
@@ -289,47 +383,52 @@ async function requestJson<T>(options: {
 	const signal = AbortSignal.any(
 		callerSignal ? [callerSignal, timeoutSignal] : [timeoutSignal],
 	);
+	let response: Response;
+	let body: string;
 	try {
-		const response = await fetch(options.url, { ...options.init, signal });
-		const body = await response.text();
-		throwIfRequestAborted(
-			callerSignal,
-			timeoutSignal,
-			options.operation,
-			options.timeoutMs,
-		);
-		if (!response.ok)
-			throw new HubHttpError(
-				response.status,
-				options.url,
-				decodeHttpError(body),
-			);
-		let value: unknown;
-		try {
-			value = JSON.parse(body);
-		} catch {
-			throw new HubResponseError(
-				options.responseName,
-				"response body is not valid JSON",
-			);
-		}
-		throwIfRequestAborted(
-			callerSignal,
-			timeoutSignal,
-			options.operation,
-			options.timeoutMs,
-		);
-		try {
-			return options.decode(value);
-		} catch (error) {
-			const detail = error instanceof Error ? error.message : String(error);
-			throw new HubResponseError(options.responseName, detail);
-		}
+		response = await fetch(options.url, { ...options.init, signal });
+		body = await response.text();
 	} catch (error) {
-		if (callerSignal?.aborted) throw callerSignal.reason;
-		if (timeoutSignal.aborted)
-			throw new HubDeadlineError(options.operation, options.timeoutMs);
-		throw error;
+		throwIfRequestAborted(
+			callerSignal,
+			timeoutSignal,
+			options.operation,
+			options.timeoutMs,
+		);
+		throw new HubTransportError(options.operation, options.url, error);
+	}
+	throwIfRequestAborted(
+		callerSignal,
+		timeoutSignal,
+		options.operation,
+		options.timeoutMs,
+	);
+	if (!response.ok)
+		throw new HubHttpError(
+			response.status,
+			options.url,
+			decodeHttpError(body),
+		);
+	let value: unknown;
+	try {
+		value = JSON.parse(body);
+	} catch {
+		throw new HubResponseError(
+			options.responseName,
+			"response body is not valid JSON",
+		);
+	}
+	throwIfRequestAborted(
+		callerSignal,
+		timeoutSignal,
+		options.operation,
+		options.timeoutMs,
+	);
+	try {
+		return options.decode(value);
+	} catch (error) {
+		const detail = error instanceof Error ? error.message : String(error);
+		throw new HubResponseError(options.responseName, detail);
 	}
 }
 
@@ -385,7 +484,7 @@ export async function probeHub(baseUrl: string): Promise<HubMeta | null> {
 			requestTimeoutMs: PROBE_TIMEOUT_MS,
 		}).meta();
 	} catch (error) {
-		if (error instanceof HubDeadlineError || error instanceof TypeError) return null;
+		if (error instanceof HubTransportError) return null;
 		throw error;
 	}
 }
@@ -467,7 +566,11 @@ export class HubClient {
 			"Project creation response",
 			"/v1/projects",
 			(value) => {
-				const response = record(value, "Project creation response");
+				const response = exactRecord(
+					value,
+					"Project creation response",
+					["project"],
+				);
 				return decodeProject(response.project);
 			},
 			options,
@@ -507,16 +610,23 @@ export class HubClient {
 		query: HistoryQuery,
 		options?: HubRequestOptions,
 	): Promise<HistoryPage> {
-		const parameters = new URLSearchParams({ project: query.project });
-		if (query.before) parameters.set("before", query.before);
-		if (query.after) parameters.set("after", query.after);
-		if (query.from) parameters.set("from", query.from);
-		if (query.limit !== undefined) parameters.set("limit", String(query.limit));
+		const {
+			project: requestedProject,
+			before,
+			after,
+			from,
+			limit,
+		} = query;
+		const parameters = new URLSearchParams({ project: requestedProject });
+		if (before) parameters.set("before", before);
+		if (after) parameters.set("after", after);
+		if (from) parameters.set("from", from);
+		if (limit !== undefined) parameters.set("limit", String(limit));
 		return await this.#request(
 			"History request",
 			"history response",
 			`/v1/history?${parameters}`,
-			decodeHistoryPage,
+			(value) => decodeHistoryPage(value, requestedProject),
 			options,
 		);
 	}

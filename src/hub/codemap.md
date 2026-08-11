@@ -143,9 +143,9 @@ Migration runs in the new database transaction and validates imported row count 
 
 ## HTTP client
 
-`resolveHubUrl` precedence is explicit argument, environment, first existing global config, then loopback default. That resolved URL remains authoritative for HTTP and WebSocket connections; Hub metadata validates protocol compatibility without replacing it. Existing malformed global configuration fails immediately. `probeHub` uses a 1.5-second timeout and treats only transport failures or that timeout as unavailable.
+`resolveHubUrl` precedence is explicit argument, environment, first existing global config, then loopback default. That resolved URL remains authoritative for HTTP and WebSocket connections; Hub metadata validates protocol compatibility without replacing it. Existing malformed global configuration fails immediately. `probeHub` uses a 1.5-second metadata deadline: only a classified `HubTransportError` means unavailable, while expiry propagates the named deadline error.
 
-`HubClient` gives metadata, Project CRUD, and history requests a 15-second default deadline, composes caller cancellation with that deadline, and keeps the bound active through response-body reading. One request/JSON seam preserves non-2xx status and URL details, then operation-specific decoders validate every successful fixed-protocol response. Requests are not retried. Realtime operations belong to `A2aConnection`.
+`HubClient` gives metadata, Project CRUD, and history requests a 15-second default deadline, composes caller cancellation with that deadline, and keeps the bound active through response-body reading. Fetch and response-body network failures become `HubTransportError` only after caller cancellation and deadline expiry are ruled out. One request/JSON seam preserves non-2xx status and URL details, then operation-specific decoders require exact fixed-protocol response shapes. History snapshots its query before dispatch so URL construction and response validation use the same requested Project; it additionally verifies strict sequence ordering, canonical references, and causal references to earlier messages. Requests are not retried. Realtime operations belong to `A2aConnection`.
 
 ## Data-directory lifecycle
 
