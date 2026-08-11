@@ -14,7 +14,7 @@ The central seam is `A2aRuntime`: extension callbacks and commands depend on one
 | `local-attachments.ts` | Snapshot sender-session `local://` files and materialize received/history attachment bytes into the calling session. | `snapshotLocalAttachments`, `materializeLocalAttachments` |
 | `operations.ts` | Connected runtime over one WebSocket plus HTTP Project/history operations. | `A2aRuntime`, `MessageView`, `RuntimeStatus` |
 | `config.ts` | Strict repository-local YAML/JSON connection defaults. | `loadLocalConfig` |
-| `paths.ts` | Hub storage paths and local config candidates. | path functions |
+| `paths.ts` | Persistent Project/database paths, the Hub data lock path, and local config candidates. | path functions |
 | `registry.ts` | Filesystem-backed persistent Project metadata. | `createProject`, `getProject`, `listProjects`, `deleteProject` |
 | `types.ts` | Project/config domain shapes and name validation regexes. | `A2aProject`, `A2aLocalConfig` |
 | `hub/` | HTTP/WebSocket clients and Hub implementation. | [`hub/codemap.md`](hub/codemap.md) |
@@ -82,7 +82,7 @@ Connected model turns receive the current A2A roster name and use only `a2a_peer
 - `peers()` returns the current client-side Presence map.
 - `message()` requires a live connection, sends through it, and decodes the accepted persistent message for callers.
 - `history()` requires a connected Project but uses HTTP through the current Hub client.
-- `status()` combines Hub metadata with connected Presence state.
+- `status()` reports the bound `HubClient.baseUrl`, protocol compatibility metadata, and connected Presence state; the URL never comes from Hub metadata.
 - Project create/list/delete are thin HTTP operations and do not require a Presence.
 
 `MessageView` is the persistent realtime Message shape with decoded text and attachment bytes replacing encoded wire payloads.

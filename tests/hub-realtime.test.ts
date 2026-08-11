@@ -65,12 +65,16 @@ afterEach(async () => {
 test("WebSocket lifetime is the complete Presence lifetime", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-realtime-"));
 	roots.push(dataDir);
-	const hub = await startHubServer({ port: 0, dataDir });
+	const hub = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir,
+	});
 	hubs.push(hub);
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "room" });
 
-	const api = await connect(hub.meta.baseUrl, "room", "api");
+	const api = await connect(hub.listenUrl, "room", "api");
 	const apiClaimed = await api.frames.next();
 	expect(apiClaimed).toMatchObject({
 		type: "claimed",
@@ -79,14 +83,14 @@ test("WebSocket lifetime is the complete Presence lifetime", async () => {
 		peers: [],
 	});
 
-	const duplicate = await connect(hub.meta.baseUrl, "room", "api");
+	const duplicate = await connect(hub.listenUrl, "room", "api");
 	expect(await duplicate.frames.next()).toMatchObject({
 		type: "error",
 		code: "name_in_use",
 	});
 	duplicate.socket.terminate();
 
-	const web = await connect(hub.meta.baseUrl, "room", "web");
+	const web = await connect(hub.listenUrl, "room", "web");
 	const webClaimed = await web.frames.next();
 	expect(webClaimed).toMatchObject({
 		type: "claimed",
@@ -104,7 +108,7 @@ test("WebSocket lifetime is the complete Presence lifetime", async () => {
 		peer: { name: "web" },
 	});
 
-	const replacement = await connect(hub.meta.baseUrl, "room", "web");
+	const replacement = await connect(hub.listenUrl, "room", "web");
 	const replacementClaimed = await replacement.frames.next();
 	expect(replacementClaimed).toMatchObject({
 		type: "claimed",
@@ -123,17 +127,21 @@ test("WebSocket lifetime is the complete Presence lifetime", async () => {
 test("direct messages and broadcasts target the current Presence snapshot", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-realtime-"));
 	roots.push(dataDir);
-	const hub = await startHubServer({ port: 0, dataDir });
+	const hub = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir,
+	});
 	hubs.push(hub);
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "chat" });
 
-	const api = await connect(hub.meta.baseUrl, "chat", "api");
+	const api = await connect(hub.listenUrl, "chat", "api");
 	await api.frames.next();
-	const web = await connect(hub.meta.baseUrl, "chat", "web");
+	const web = await connect(hub.listenUrl, "chat", "web");
 	await web.frames.next();
 	await api.frames.next();
-	const testPeer = await connect(hub.meta.baseUrl, "chat", "test");
+	const testPeer = await connect(hub.listenUrl, "chat", "test");
 	await testPeer.frames.next();
 	await api.frames.next();
 	await web.frames.next();
@@ -243,7 +251,7 @@ test("direct messages and broadcasts target the current Presence snapshot", asyn
 		type: "presence_left",
 		peer: { name: "web" },
 	});
-	const replacement = await connect(hub.meta.baseUrl, "chat", "web");
+	const replacement = await connect(hub.listenUrl, "chat", "web");
 	const replacementClaimed = await replacement.frames.next();
 	if (replacementClaimed.type !== "claimed")
 		throw new Error("expected replacement claim");
@@ -266,13 +274,17 @@ test("direct messages and broadcasts target the current Presence snapshot", asyn
 test("message history survives Hub restart while Presence does not", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-realtime-"));
 	roots.push(dataDir);
-	const first = await startHubServer({ port: 0, dataDir });
+	const first = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir,
+	});
 	hubs.push(first);
-	const firstClient = new HubClient(first.meta.baseUrl);
+	const firstClient = new HubClient(first.listenUrl);
 	await firstClient.createProject({ name: "durable-chat" });
-	const api = await connect(first.meta.baseUrl, "durable-chat", "api");
+	const api = await connect(first.listenUrl, "durable-chat", "api");
 	await api.frames.next();
-	const web = await connect(first.meta.baseUrl, "durable-chat", "web");
+	const web = await connect(first.listenUrl, "durable-chat", "web");
 	await web.frames.next();
 	await api.frames.next();
 	const attachmentBytes = Buffer.from("# Training handoff\nseed=20\n", "utf8");
@@ -302,9 +314,13 @@ test("message history survives Hub restart while Presence does not", async () =>
 	await api.frames.next();
 	await first.stop();
 
-	const second = await startHubServer({ port: 0, dataDir });
+	const second = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir,
+	});
 	hubs.push(second);
-	const secondClient = new HubClient(second.meta.baseUrl);
+	const secondClient = new HubClient(second.listenUrl);
 	const history = await secondClient.history({
 		project: "durable-chat",
 		limit: 10,
@@ -321,7 +337,7 @@ test("message history survives Hub restart while Presence does not", async () =>
 		"attachments" in persisted ? persisted.attachments : undefined,
 	).toEqual([attachment]);
 
-	const replacement = await connect(second.meta.baseUrl, "durable-chat", "web");
+	const replacement = await connect(second.listenUrl, "durable-chat", "web");
 	expect(await replacement.frames.next()).toMatchObject({
 		type: "claimed",
 		peers: [],

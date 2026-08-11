@@ -3,7 +3,10 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { HubClient } from "../src/hub/client";
-import type { DeliveryEvent } from "../src/hub/realtime-types";
+import {
+	A2A_PROTOCOL_VERSION,
+	type DeliveryEvent,
+} from "../src/hub/realtime-types";
 import { type HubServerHandle, startHubServer } from "../src/hub/server";
 import { A2aRuntime, type MessageView } from "../src/operations";
 
@@ -19,9 +22,13 @@ afterEach(async () => {
 test("one runtime path serves discovery, messaging, delivery, and history", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-runtime-"));
 	roots.push(dataDir);
-	const hub = await startHubServer({ port: 0, dataDir });
+	const hub = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir,
+	});
 	hubs.push(hub);
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "runtime" });
 
 	let resolveMessage!: (message: MessageView) => void;
@@ -46,6 +53,13 @@ test("one runtime path serves discovery, messaging, delivery, and history", asyn
 	const web = new A2aRuntime({
 		getClient: async () => client,
 		events: { onMessage: resolveMessage },
+	});
+	expect(await api.status()).toEqual({
+		hub: {
+			baseUrl: hub.listenUrl,
+			protocolVersion: A2A_PROTOCOL_VERSION,
+		},
+		connection: null,
 	});
 
 	await api.connect("runtime", "api");
@@ -91,9 +105,13 @@ test("one runtime path serves discovery, messaging, delivery, and history", asyn
 test("receiver injection completes in Hub message order", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-runtime-order-"));
 	roots.push(dataDir);
-	const hub = await startHubServer({ port: 0, dataDir });
+	const hub = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir,
+	});
 	hubs.push(hub);
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "runtime-order" });
 
 	const firstStarted = Promise.withResolvers<void>();
@@ -166,9 +184,13 @@ test("receiver injection completes in Hub message order", async () => {
 test("receiver injection failure produces a terminal failed delivery", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-runtime-failure-"));
 	roots.push(dataDir);
-	const hub = await startHubServer({ port: 0, dataDir });
+	const hub = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir,
+	});
 	hubs.push(hub);
-	const client = new HubClient(hub.meta.baseUrl);
+	const client = new HubClient(hub.listenUrl);
 	await client.createProject({ name: "runtime-failure" });
 	const delivery = Promise.withResolvers<DeliveryEvent>();
 	const api = new A2aRuntime({

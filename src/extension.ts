@@ -383,7 +383,7 @@ export default function a2aExtension(pi: ExtensionAPI) {
 				if (command === "hub") {
 					const status = await runtime.status();
 					context.ui.notify(
-						`Hub ${status.hub.baseUrl} protocol=${status.hub.protocolVersion} data=${status.hub.dataDir}`,
+						`Hub ${status.hub.baseUrl} protocol=${status.hub.protocolVersion}`,
 						"info",
 					);
 					return;

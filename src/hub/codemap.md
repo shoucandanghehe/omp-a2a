@@ -15,7 +15,7 @@
 | File | Responsibility | Primary interface |
 | --- | --- | --- |
 | `cli.ts` | Parse command/environment settings, start one Hub, and shut down on signals. | executable entry |
-| `server.ts` | Express routes, HTTP server, metadata files, storage lifecycle, and WebSocket attachment. | `startHubServer`, `HubServerHandle` |
+| `server.ts` | Express routes, explicit HTTP listener lifecycle, storage ownership, and WebSocket attachment. | `startHubServer`, `HubServerHandle` |
 | `realtime-server.ts` | Upgrade handling, handshake, Presence events, routing, delivery tracking, heartbeat, and shutdown. | `RealtimeHub` |
 | `connection.ts` | Extension-side WebSocket protocol client and peer/request state. | `A2aConnection`, `A2aConnectionEvents` |
 | `presence.ts` | In-memory Project/name/socket indexes. | `PresenceRegistry`, `Presence` |
@@ -24,7 +24,7 @@
 | `realtime-types.ts` | Versioned WebSocket frames and public realtime/history shapes. | protocol types, `A2A_PROTOCOL_VERSION` |
 | `payload.ts` | Text/binary encoding, attachment validation, and bounded decoded-content accounting. | text/binary codecs, `validateMessageContent` |
 | `data-lock.ts` | Exclusive ownership of one Hub data directory. | `HubDataLock` |
-| `types.ts` | Hub metadata plus encoded text, binary, and attachment values. | `HubMeta`, encoded payload types |
+| `types.ts` | Minimal Hub protocol metadata plus encoded text, binary, and attachment values. | `HubMeta`, encoded payload types |
 
 ## HTTP surface
 
@@ -32,15 +32,15 @@
 
 | Method and path | Behavior |
 | --- | --- |
-| `GET /healthz` | Health plus current `HubMeta`. |
-| `GET /v1/meta` | Protocol, URL, process, start time, and data directory metadata. |
+| `GET /healthz` | Exactly `{ok:true,service:"omp-a2a-hub"}`. |
+| `GET /v1/meta` | Exactly `{protocolVersion}` for compatibility checks. |
 | `GET /v1/projects` | Sorted persistent Project list. |
 | `POST /v1/projects` | Create Project metadata; duplicate returns `409`. |
 | `DELETE /v1/projects/:name` | Reject active Presence, remove Project metadata, then delete message history. |
 | `GET /v1/history` | Query one existing Project by cursor, sender name, and bounded limit. |
 | `GET /v1/connect` upgrade | Hand the socket to `RealtimeHub`. |
 
-The public `baseUrl` reported in Hub metadata can differ from the listen host. Clients retain their resolved configuration URL as the authoritative HTTP and WebSocket route.
+Neither public response contains a route, PID, port, start time, or data-directory detail. Clients retain their resolved configuration URL as the authoritative HTTP and WebSocket route.
 
 ## WebSocket protocol
 
@@ -143,28 +143,27 @@ Migration runs in the new database transaction and validates imported row count 
 
 ## HTTP client
 
-`resolveHubUrl` precedence is explicit argument, environment, first existing global config, then loopback default. That resolved URL remains authoritative for HTTP and WebSocket connections; Hub metadata validates protocol compatibility without replacing it. Existing malformed global configuration fails immediately. `probeHub` uses a 1.5-second timeout; ordinary `HubClient` operations currently have no default deadline.
+`resolveHubUrl` precedence is explicit argument, environment, first existing global config, then loopback default. That resolved URL remains authoritative for HTTP and WebSocket connections; `HubClient` decodes only `protocolVersion` from metadata and never replaces its `baseUrl`. Existing malformed global configuration fails immediately. `probeHub` uses a 1.5-second timeout; ordinary `HubClient` operations currently have no default deadline.
 
-`HubClient` exposes only metadata, Project CRUD, and history. Realtime operations belong to `A2aConnection`.
+`HubClient` exposes only metadata, Project CRUD, and history. Realtime operations belong to `A2aConnection`. `cli.ts` alone resolves `--host`, `--port`, and `--data-dir` with flag → environment → default precedence; direct `startHubServer` calls supply all three explicitly and never read the environment.
 
 ## Data-directory lifecycle
 
 `startHubServer`:
 
-1. resolves and creates the data directory;
+1. validates its explicit host, port, and data directory;
 2. acquires `HubDataLock` through an exclusive SQLite transaction;
 3. opens `MessageStore`, optionally migrating legacy Inbox history;
 4. starts Express and attaches `RealtimeHub` to the same HTTP server;
-5. writes `run/hub.json` and `run/hub.pid` atomically;
-6. returns an idempotent `stop` closure.
+5. returns the actual in-process `listenUrl`, using loopback for wildcard listeners, the protocol version, and an idempotent `stop`.
 
-Stop closes realtime clients, the HTTP server, message storage, metadata files, and the directory lock. Startup failures unwind already-opened resources.
+`HubDataLock` is the only runtime ownership record. No Hub JSON or PID metadata files are written. Stop closes realtime clients, the HTTP server, message storage, and the directory lock. Startup failures unwind already-opened resources.
 
 ## Test coverage
 
 - `hub-realtime.test.ts`: Presence lifetime, duplicate names, direct/broadcast snapshots, Delivery outcomes, attachment persistence, and restart.
 - `message-store.test.ts`: ordering, attachment-aware idempotency, causal references, filters, protocol version `2`/legacy migration, integrity, and deletion.
-- `hub-control.test.ts`: independent Hubs, Project control, active-Presence deletion rejection, and safe name reuse.
+- `hub-control.test.ts`: minimal metadata/health, authoritative configured URLs, explicit/wildcard listeners, CLI parsing/executability, deployment limits, independent Hubs, Project control, active-Presence deletion rejection, and safe name reuse.
 - `payload.test.ts`: text/binary compression, attachment count, and decoded-size enforcement.
 - `operations.test.ts`: client/runtime integration plus successful and failed Delivery callbacks.
 

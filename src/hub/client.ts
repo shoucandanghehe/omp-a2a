@@ -39,6 +39,19 @@ function stripTrailingSlash(url: string): string {
 	return url.replace(/\/+$/, "");
 }
 
+function decodeHubMeta(value: unknown): HubMeta {
+	if (
+		typeof value !== "object" ||
+		value === null ||
+		!("protocolVersion" in value) ||
+		typeof value.protocolVersion !== "number" ||
+		!Number.isInteger(value.protocolVersion)
+	) {
+		throw new Error("invalid Hub metadata");
+	}
+	return { protocolVersion: value.protocolVersion };
+}
+
 /** Resolve Hub URL without starting a process. */
 export function resolveHubUrl(options?: {
 	hubUrl?: string;
@@ -83,9 +96,11 @@ export function resolveHubUrl(options?: {
 
 export async function probeHub(baseUrl: string): Promise<HubMeta | null> {
 	try {
-		return await fetchJson<HubMeta>(`${stripTrailingSlash(baseUrl)}/v1/meta`, {
-			signal: AbortSignal.timeout(1_500),
-		});
+		return decodeHubMeta(
+			await fetchJson<unknown>(`${stripTrailingSlash(baseUrl)}/v1/meta`, {
+				signal: AbortSignal.timeout(1_500),
+			}),
+		);
 	} catch {
 		return null;
 	}
@@ -94,7 +109,7 @@ export async function probeHub(baseUrl: string): Promise<HubMeta | null> {
 export async function connectHub(options?: {
 	hubUrl?: string;
 	home?: string;
-}): Promise<HubMeta> {
+}): Promise<string> {
 	const baseUrl = resolveHubUrl(options);
 	const meta = await probeHub(baseUrl);
 	if (!meta) {
@@ -104,10 +119,10 @@ export async function connectHub(options?: {
 	}
 	if (meta.protocolVersion !== A2A_PROTOCOL_VERSION) {
 		throw new Error(
-			`A2A protocol mismatch: extension=${A2A_PROTOCOL_VERSION}, Hub=${meta.protocolVersion ?? "legacy"}`,
+			`A2A protocol mismatch: extension=${A2A_PROTOCOL_VERSION}, Hub=${meta.protocolVersion}`,
 		);
 	}
-	return { ...meta, baseUrl };
+	return baseUrl;
 }
 
 export class HubClient {
@@ -121,8 +136,8 @@ export class HubClient {
 		hubUrl?: string;
 		home?: string;
 	}): Promise<HubClient> {
-		const meta = await connectHub(options);
-		return new HubClient(meta.baseUrl);
+		const baseUrl = await connectHub(options);
+		return new HubClient(baseUrl);
 	}
 
 	get baseUrl(): string {
@@ -130,7 +145,9 @@ export class HubClient {
 	}
 
 	async meta(): Promise<HubMeta> {
-		return await fetchJson<HubMeta>(`${this.#baseUrl}/v1/meta`);
+		return decodeHubMeta(
+			await fetchJson<unknown>(`${this.#baseUrl}/v1/meta`),
+		);
 	}
 
 	async createProject(body: {

@@ -42,18 +42,19 @@ Exercise the actual HTTP server, WebSocket protocol, realtime Presence, message 
 ### Setup
 
 - Create two temporary Hub data directories.
-- Start two `HubServerHandle` instances on ephemeral ports.
-- Track every handle for asynchronous `finally` shutdown.
+- Start two explicit loopback listeners on ephemeral ports and use each handle's `listenUrl`.
+- Track every handle for asynchronous idempotent `finally` shutdown.
 - Use `AsyncQueue` to await concrete Presence, message, and delivery events instead of sleeping.
 
 ### Covered scenario
 
-1. **Independent Hubs**: create a Project on the first Hub and prove the second Hub does not see it.
-2. **Realtime Presence**: connect named `api` and `web` sockets and observe peer snapshot plus join notification.
-3. **Direct message**: send from `api` to current `web`, observe accepted Project sequence, realtime payload, and sender delivery result.
-4. **Project broadcast**: connect another peer, freeze the recipient snapshot, and observe one message plus delivery outcome per selected Presence.
-5. **Persistent history**: query accepted messages through HTTP and prove history survives Hub stop/restart while Presence does not.
-6. **Safe Project deletion**: close Presence, delete the Project and its history, and verify name reuse starts empty.
+1. **Minimal control responses**: assert metadata contains only `protocolVersion` and health contains only `ok` plus the service name.
+2. **Independent Hubs**: create a Project on the first Hub and prove the second Hub does not see it.
+3. **Realtime Presence**: connect named `api` and `web` sockets and observe peer snapshot plus join notification.
+4. **Direct message**: send from `api` to current `web`, observe accepted Project sequence, realtime payload, and sender delivery result.
+5. **Project broadcast**: connect another peer, freeze the recipient snapshot, and observe one message plus delivery outcome per selected Presence.
+6. **Persistent history**: query accepted messages through HTTP and prove history survives Hub stop/restart while Presence does not.
+7. **Safe Project deletion**: close Presence, delete the Project and its history, and verify name reuse starts empty.
 
 ### Cleanup
 
@@ -73,7 +74,7 @@ Cross the deployed process/network boundary rather than proving another in-proce
 
 ### Scenario
 
-1. Connect an HTTP `HubClient`.
+1. Decode exact minimal metadata and health responses through the configured client URL.
 2. Create a timestamped temporary Project.
 3. Open `api` and `web` WebSocket Presences.
 4. Send one direct Message with an explicit `messageId` and binary-safe attachment.

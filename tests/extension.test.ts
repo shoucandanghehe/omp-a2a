@@ -143,8 +143,12 @@ test("model tool contract makes replies push-driven instead of history-polled", 
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-extension-prompt-"));
 	const project = "prompt-contract";
 	const cwd = join(dataDir, "client");
-	const hub = await startHubServer({ port: 0, dataDir });
-	const client = new HubClient(hub.meta.baseUrl);
+	const hub = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir,
+	});
+	const client = new HubClient(hub.listenUrl);
 	const tools = new Map<string, RegisteredTool>();
 	let commandHandler:
 		| ((
@@ -156,17 +160,21 @@ test("model tool contract makes replies push-driven instead of history-polled", 
 		| (() => { systemPrompt?: string[] } | undefined)
 		| undefined;
 	let worker: A2aConnection | null = null;
-	const context = { cwd, ui: { notify() {} } };
+	const notifications: string[] = [];
+	const context = {
+		cwd,
+		ui: { notify: (message: string) => notifications.push(message) },
+	};
 
 	try {
 		await client.createProject({ name: project });
 		mkdirSync(join(cwd, ".omp"), { recursive: true });
 		writeFileSync(
 			join(cwd, ".omp", "a2a.yml"),
-			`project: ${project}\nname: api\nhubUrl: ${hub.meta.baseUrl}\nautoConnect: false\n`,
+			`project: ${project}\nname: api\nhubUrl: ${hub.listenUrl}\nautoConnect: false\n`,
 		);
 		worker = await A2aConnection.connect({
-			baseUrl: hub.meta.baseUrl,
+			baseUrl: hub.listenUrl,
 			project,
 			name: "worker",
 		});
@@ -193,6 +201,10 @@ test("model tool contract makes replies push-driven instead of history-polled", 
 		} as never);
 
 		if (!commandHandler) throw new Error("a2a command was not registered");
+		await commandHandler("hub", context);
+		expect(notifications.at(-1)).toBe(
+			`Hub ${hub.listenUrl} protocol=${hub.protocolVersion}`,
+		);
 		await commandHandler(`connect ${project} --as api`, context);
 		if (!beforeAgentStart)
 			throw new Error("A2A identity system prompt was not registered");
@@ -239,8 +251,12 @@ test("a2a_message snapshots a sender local file into the receiver session and hi
 	const receiverCwd = join(dataDir, "receiver");
 	const senderArtifacts = join(dataDir, "sender-artifacts");
 	const receiverArtifacts = join(dataDir, "receiver-artifacts");
-	const hub = await startHubServer({ port: 0, dataDir });
-	const client = new HubClient(hub.meta.baseUrl);
+	const hub = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir,
+	});
+	const client = new HubClient(hub.listenUrl);
 	const senderTools = new Map<string, RegisteredTool>();
 	const receiverTools = new Map<string, RegisteredTool>();
 	let senderCommand:
@@ -290,7 +306,7 @@ test("a2a_message snapshots a sender local file into the receiver session and hi
 			mkdirSync(join(cwd, ".omp"), { recursive: true });
 			writeFileSync(
 				join(cwd, ".omp", "a2a.yml"),
-				`project: ${project}\nname: ${name}\nhubUrl: ${hub.meta.baseUrl}\nautoConnect: false\n`,
+				`project: ${project}\nname: ${name}\nhubUrl: ${hub.listenUrl}\nautoConnect: false\n`,
 			);
 		}
 		mkdirSync(join(senderArtifacts, "local"), { recursive: true });
@@ -439,8 +455,12 @@ test("session switch cancels an in-flight inbound injection", async () => {
 	const switchedCwd = join(dataDir, "switched");
 	const receiverArtifacts = join(dataDir, "receiver-artifacts");
 	const switchedArtifacts = join(dataDir, "switched-artifacts");
-	const hub = await startHubServer({ port: 0, dataDir });
-	const client = new HubClient(hub.meta.baseUrl);
+	const hub = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir,
+	});
+	const client = new HubClient(hub.listenUrl);
 	const delivery = Promise.withResolvers<DeliveryEvent>();
 	const receiverError = Promise.withResolvers<void>();
 	const injected: string[] = [];
@@ -485,7 +505,7 @@ test("session switch cancels an in-flight inbound injection", async () => {
 		mkdirSync(join(receiverCwd, ".omp"), { recursive: true });
 		writeFileSync(
 			join(receiverCwd, ".omp", "a2a.yml"),
-			`project: session-switch\nname: receiver\nhubUrl: ${hub.meta.baseUrl}\nautoConnect: false\n`,
+			`project: session-switch\nname: receiver\nhubUrl: ${hub.listenUrl}\nautoConnect: false\n`,
 		);
 		a2aExtension({
 			arktype(definition: unknown) {
@@ -514,7 +534,7 @@ test("session switch cancels an in-flight inbound injection", async () => {
 			receiverContext,
 		);
 		sender = await A2aConnection.connect({
-			baseUrl: hub.meta.baseUrl,
+			baseUrl: hub.listenUrl,
 			project: "session-switch",
 			name: "sender",
 			events: { onDelivery: delivery.resolve },
