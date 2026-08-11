@@ -209,3 +209,28 @@ test("receiver injection failure produces a terminal failed delivery", async () 
 	await web.disconnect();
 	await api.disconnect();
 });
+
+test("runtime HTTP operations preserve caller cancellation", async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-runtime-cancel-"));
+	roots.push(dataDir);
+	const hub = await startHubServer({ port: 0, dataDir });
+	hubs.push(hub);
+	const client = new HubClient(hub.meta.baseUrl);
+	await client.createProject({ name: "runtime-cancel" });
+	const api = new A2aRuntime({ getClient: async () => client });
+	await api.connect("runtime-cancel", "api");
+	const controller = new AbortController();
+	const reason = new Error("caller cancelled runtime HTTP work");
+	controller.abort(reason);
+	const options = { signal: controller.signal };
+
+	await expect(api.history({}, options)).rejects.toBe(reason);
+	await expect(api.status(options)).rejects.toBe(reason);
+	await expect(
+		api.createProject({ name: "should-not-exist" }, options),
+	).rejects.toBe(reason);
+	await expect(api.listProjects(options)).rejects.toBe(reason);
+	await expect(api.deleteProject("runtime-cancel", options)).rejects.toBe(reason);
+
+	await api.disconnect();
+});

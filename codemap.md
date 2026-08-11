@@ -40,7 +40,7 @@ OMP session
 
 ### Control and history plane
 
-`HubClient` uses HTTP for Hub metadata, Project create/list/delete, and explicit history queries. Project metadata lives under `<dataDir>/projects/<name>/project.json`. Deletion is rejected while a Project has an active Presence, then removes Project metadata and its message history.
+`HubClient` uses bounded, caller-cancellable HTTP requests for Hub metadata, Project create/list/delete, and explicit history queries. It validates successful wire responses before exposing them to the runtime and never retries automatically. Project metadata lives under `<dataDir>/projects/<name>/project.json`. Deletion is rejected while a Project has an active Presence, then removes Project metadata and its message history.
 
 ### Realtime plane
 
@@ -139,5 +139,5 @@ The implemented realtime model is documented in [`docs/realtime-presence-archite
 - No authentication, authorization, tenant isolation, or confidentiality guarantee exists.
 - Established WebSockets do not move when `hubUrl` changes; disconnect and reconnect.
 - Project metadata deletion and SQLite history deletion are separate operations rather than one transaction.
-- Ordinary HTTP Project/history calls have no default deadline.
+- Ordinary Hub metadata, Project, and history HTTP calls have a 15-second default deadline; caller cancellation covers headers and response-body reading.
 - The default Compose port publication binds all host interfaces unless the operator narrows it.

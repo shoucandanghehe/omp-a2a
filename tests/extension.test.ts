@@ -142,7 +142,7 @@ test("human commands and model tools expose separate A2A surfaces", async () => 
 	expect(commandCompletions("history --limit ")).toBeNull();
 });
 
-test("model tool contract makes replies push-driven instead of history-polled", async () => {
+test("model tools stay push-driven and forward history cancellation", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-extension-prompt-"));
 	const project = "prompt-contract";
 	const cwd = join(dataDir, "client");
@@ -227,6 +227,25 @@ test("model tool contract makes replies push-driven instead of history-polled", 
 		expect(result.content[0]?.text).toContain(
 			"Never wait, sleep, or poll a2a_history for a reply.",
 		);
+
+		const originalHistory = HubClient.prototype.history;
+		let observedHistorySignal: AbortSignal | undefined;
+		try {
+			HubClient.prototype.history = async (_query, options) => {
+				observedHistorySignal = options?.signal;
+				return { messages: [] };
+			};
+			const historySignal = new AbortController().signal;
+			const historyResult = await historyTool.execute(
+				"history-signal",
+				{} as never,
+				historySignal,
+			);
+			expect(historyResult.isError).toBeUndefined();
+			expect(observedHistorySignal).toBe(historySignal);
+		} finally {
+			HubClient.prototype.history = originalHistory;
+		}
 	} finally {
 		if (commandHandler) await commandHandler("disconnect", context);
 		await worker?.close();

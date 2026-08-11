@@ -666,9 +666,9 @@ export default function a2aExtension(pi: ExtensionAPI) {
 			"limit?": "number",
 			"from?": "string",
 		}),
-		async execute(_id, parameters, _signal, _onUpdate, context) {
+		async execute(_id, parameters, signal, _onUpdate, context) {
 			try {
-				const messages = await runtime.history(parameters);
+				const messages = await runtime.history(parameters, { signal });
 				const materialized = await Promise.all(
 					messages.map((message) => materializeMessage(message, context)),
 				);
