@@ -53,6 +53,102 @@ test("attachment parsing has no application count limit", () => {
 	expect(parseEncodedAttachments(attachments)).toEqual(attachments);
 });
 
+test("attachment parsing rejects unsafe and duplicate names", () => {
+	const payload = encodeBinaryPayload(Buffer.from("attachment"));
+	const invalidNames = [
+		"",
+		"   ",
+		".",
+		"..",
+		"folder/file.txt",
+		String.raw`folder\file.txt`,
+		"line\nbreak.txt",
+	];
+	for (const name of invalidNames) {
+		expect(() => parseEncodedAttachments([{ name, payload }])).toThrow();
+	}
+	expect(() =>
+		parseEncodedAttachments([
+			{ name: "duplicate.txt", payload },
+			{ name: "duplicate.txt", payload },
+		]),
+	).toThrow();
+});
+
+test("payload decoders reject invalid and noncanonical Base64", () => {
+	for (const data of ["%%%", "YQ", "YR=="]) {
+		expect(() => decodeBinaryPayload({ encoding: "base64", data })).toThrow();
+		expect(() =>
+			parseEncodedAttachments([
+				{
+					name: "attachment.txt",
+					payload: { encoding: "base64", data },
+				},
+			]),
+		).toThrow();
+	}
+
+	const compressed = encodeTextPayload("compressible payload\n".repeat(4_000));
+	if (compressed.encoding !== "gzip+base64")
+		throw new Error("test payload did not compress");
+	expect(() =>
+		decodeTextPayload({ ...compressed, data: `${compressed.data}\n` }),
+	).toThrow();
+});
+
+test("payload decoders require exact encoding and data fields", () => {
+	expect(() =>
+		decodeTextPayload({
+			encoding: "identity",
+			data: "message",
+			uncompressedBytes: 7,
+		} as never),
+	).toThrow();
+	expect(() =>
+		decodeTextPayload({
+			encoding: "identity",
+			data: "message",
+			unknown: true,
+		} as never),
+	).toThrow();
+	expect(() =>
+		decodeBinaryPayload({
+			encoding: "base64",
+			data: "YQ==",
+			uncompressedBytes: 1,
+		} as never),
+	).toThrow();
+	expect(() =>
+		decodeBinaryPayload({
+			encoding: "base64",
+			data: "YQ==",
+			unknown: true,
+		} as never),
+	).toThrow();
+});
+
+test("attachment parsing requires exact attachment and payload fields", () => {
+	const payload = { encoding: "base64" as const, data: "YQ==" };
+	expect(() =>
+		parseEncodedAttachments([
+			{ name: "handoff.txt", payload, unknown: true },
+		]),
+	).toThrow();
+	expect(() =>
+		parseEncodedAttachments([
+			{
+				name: "handoff.txt",
+				payload: { ...payload, uncompressedBytes: 1 },
+			},
+		]),
+	).toThrow();
+	expect(() =>
+		parseEncodedAttachments([
+			{ name: "handoff.txt", payload: { ...payload, unknown: true } },
+		]),
+	).toThrow();
+});
+
 test("malformed compressed payloads throw their codec errors", () => {
 	const data = Buffer.from("not gzip", "utf8").toString("base64");
 	expect(() =>

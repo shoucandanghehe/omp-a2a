@@ -79,9 +79,9 @@ Because this deployment has no accounts or durable identities, direct messaging 
 omp-a2a is for a fully trusted private network of matching Hub and Extension versions.
 
 - No accounts, authentication, authorization, or tenant isolation.
-- Project, name, sender content, payload shape, and history access are trusted claims.
+- Project, name, sender content, and history access are trusted claims.
 - The application imposes no payload-size, attachment-count, or history-response cap. Deployment memory and container limits own resource isolation.
-- Malformed internal payloads are client bugs and fail loudly through the underlying codec or storage operation.
+- Malformed payload shapes, attachment names, Base64, and gzip data fail loudly before persistence or materialization.
 - Do not expose the Hub to the public Internet or an untrusted network.
 
 ## Current operational constraints
@@ -270,12 +270,13 @@ Queries already-persisted Project history by `before`, `after`, `limit`, or `fro
 
 While connected, every model turn receives the current A2A roster name and a rule to address peers only by names returned by `a2a_peers` or inbound sender names. Disconnected turns receive no A2A identity prompt.
 
-Inbound messages are pushed automatically and processed serially in Hub-assigned Project sequence. Presence changes update the UI without starting an idle model turn. Each Message uses `steer` delivery: an idle session starts a turn, while a busy session queues it into the active turn. Messages are acknowledged only after attachment materialization and successful injection. After `a2a_message`, models continue independent work or end the current turn; they never wait, sleep, or poll `a2a_history` for a reply.
+Inbound messages are pushed automatically and processed serially in Hub-assigned Project sequence. While the model is idle, Presence churn is not appended event by event: the extension compares the roster at the last terminal `agent_end` with the current roster and emits at most one hidden `a2a-presence` delta before the next inbound Message or model turn. Join/leave pairs that produce no net roster change disappear. While the model is busy, each Presence change is queued into the active turn through `steer`. An inbound Message starts an idle turn or joins the active turn through `steer`, and is acknowledged only after attachment materialization and successful injection. After `a2a_message`, models continue independent work or end the current turn; they never wait, sleep, or poll `a2a_history` for a reply.
 
 ## Payload and persistence
 
 - Text below 32 KiB uses identity encoding; larger text uses gzip + Base64 only when compression is smaller.
 - Attachment bytes use Base64 and use gzip only when that reduces payload size.
+- Payload objects contain exactly `encoding` and `data`; attachment objects contain exactly `name` and `payload`. Attachment names are unique, nonblank basenames without control characters or path segments.
 - Messages, attachments, WebSocket frames, JSON bodies, and history responses have no application-level resource cap.
 - History keeps stable Project-sequence cursors, a default 50-item page, and accepts any explicit positive integer limit without silent truncation.
 - `messageId` is an opaque idempotency key. Reusing it with different text, attachment names, attachment order, attachment content, target, or causal parent fails.

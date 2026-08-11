@@ -7,6 +7,49 @@ import type {
 
 export const PAYLOAD_COMPRESSION_THRESHOLD_BYTES = 32 * 1024;
 
+const CONTROL_CHARACTER_RE = /\p{Cc}/u;
+
+function hasExactKeys(
+	value: unknown,
+	expectedKeys: readonly string[],
+): value is Record<string, unknown> {
+	if (!value || typeof value !== "object" || Array.isArray(value)) return false;
+	const actualKeys = Reflect.ownKeys(value);
+	return (
+		actualKeys.length === expectedKeys.length &&
+		expectedKeys.every((key) => Object.hasOwn(value, key))
+	);
+}
+
+function decodeCanonicalBase64(data: unknown, label: string): Buffer {
+	if (typeof data !== "string")
+		throw new Error(`${label} data must be a string`);
+	const bytes = Buffer.from(data, "base64");
+	if (bytes.toString("base64") !== data)
+		throw new Error(`${label} data is not canonical base64`);
+	return bytes;
+}
+
+export function validateAttachmentName(
+	value: unknown,
+	names: Set<string>,
+): string {
+	if (
+		typeof value !== "string" ||
+		value.trim().length === 0 ||
+		value === "." ||
+		value === ".." ||
+		value.includes("/") ||
+		value.includes("\\") ||
+		CONTROL_CHARACTER_RE.test(value)
+	) {
+		throw new Error(`invalid attachment name: ${String(value)}`);
+	}
+	if (names.has(value)) throw new Error(`duplicate attachment name: ${value}`);
+	names.add(value);
+	return value;
+}
+
 export function encodeTextPayload(text: string): EncodedTextPayload {
 	const byteLength = Buffer.byteLength(text, "utf8");
 	if (byteLength < PAYLOAD_COMPRESSION_THRESHOLD_BYTES) {
@@ -20,17 +63,15 @@ export function encodeTextPayload(text: string): EncodedTextPayload {
 }
 
 export function decodeTextPayload(payload: EncodedTextPayload): string {
-	if (!payload || typeof payload !== "object")
-		throw new Error("message text payload is required");
-	if (payload.encoding === "identity") {
-		if (typeof payload.data !== "string")
-			throw new Error("message text data must be a string");
-		return payload.data;
-	}
+	if (!hasExactKeys(payload, ["encoding", "data"]))
+		throw new Error("message text payload must contain only encoding and data");
+	if (typeof payload.data !== "string")
+		throw new Error("message text data must be a string");
+	if (payload.encoding === "identity") return payload.data;
 	if (payload.encoding === "gzip+base64") {
-		if (typeof payload.data !== "string")
-			throw new Error("message text data must be a string");
-		return gunzipSync(Buffer.from(payload.data, "base64")).toString("utf8");
+		return gunzipSync(
+			decodeCanonicalBase64(payload.data, "message text"),
+		).toString("utf8");
 	}
 	throw new Error("unsupported message text encoding");
 }
@@ -50,11 +91,9 @@ export function encodeBinaryPayload(bytes: Uint8Array): EncodedBinaryPayload {
 }
 
 export function decodeBinaryPayload(payload: EncodedBinaryPayload): Buffer {
-	if (!payload || typeof payload !== "object")
-		throw new Error("attachment payload is required");
-	if (typeof payload.data !== "string")
-		throw new Error("attachment data must be a string");
-	const encoded = Buffer.from(payload.data, "base64");
+	if (!hasExactKeys(payload, ["encoding", "data"]))
+		throw new Error("attachment payload must contain only encoding and data");
+	const encoded = decodeCanonicalBase64(payload.data, "attachment");
 	if (payload.encoding === "base64") return encoded;
 	if (payload.encoding === "gzip+base64") return gunzipSync(encoded);
 	throw new Error("unsupported attachment encoding");
@@ -62,34 +101,25 @@ export function decodeBinaryPayload(payload: EncodedBinaryPayload): Buffer {
 
 export function parseEncodedAttachments(value: unknown): EncodedAttachment[] {
 	if (!Array.isArray(value)) throw new Error("attachments must be an array");
+	const names = new Set<string>();
 	return value.map((candidate) => {
-		if (
-			!candidate ||
-			typeof candidate !== "object" ||
-			!("name" in candidate) ||
-			typeof candidate.name !== "string" ||
-			!("payload" in candidate)
-		) {
+		if (!hasExactKeys(candidate, ["name", "payload"]))
 			throw new Error("invalid attachment");
-		}
-		const payload = candidate.payload;
+		const name = validateAttachmentName(candidate.name, names);
+		const payloadValue = candidate.payload;
 		if (
-			!payload ||
-			typeof payload !== "object" ||
-			!("encoding" in payload) ||
-			(payload.encoding !== "base64" && payload.encoding !== "gzip+base64") ||
-			!("data" in payload) ||
-			typeof payload.data !== "string"
+			!hasExactKeys(payloadValue, ["encoding", "data"]) ||
+			(payloadValue.encoding !== "base64" &&
+				payloadValue.encoding !== "gzip+base64") ||
+			typeof payloadValue.data !== "string"
 		) {
-			throw new Error(`invalid attachment payload: ${candidate.name}`);
+			throw new Error(`invalid attachment payload: ${name}`);
 		}
-		const attachment: EncodedAttachment = {
-			name: candidate.name,
-			payload: {
-				encoding: payload.encoding,
-				data: payload.data,
-			},
+		const payload: EncodedBinaryPayload = {
+			encoding: payloadValue.encoding,
+			data: payloadValue.data,
 		};
-		return attachment;
+		decodeBinaryPayload(payload);
+		return { name, payload };
 	});
 }

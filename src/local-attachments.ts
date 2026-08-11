@@ -12,7 +12,7 @@ import {
 	resolveLocalUrlToFile,
 	resolveLocalUrlToPath,
 } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
-import { encodeBinaryPayload } from "./hub/payload";
+import { encodeBinaryPayload, validateAttachmentName } from "./hub/payload";
 import type { EncodedAttachment } from "./hub/types";
 import type { MessageAttachment } from "./operations";
 
@@ -67,9 +67,7 @@ export async function snapshotLocalAttachments(
 		if (!resolved)
 			throw new Error(`attachment source must be a regular file: ${source}`);
 		const bytes = await readStableFile(resolved.path, source);
-		const name = path.basename(resolved.path);
-		if (names.has(name)) throw new Error(`duplicate attachment name: ${name}`);
-		names.add(name);
+		const name = validateAttachmentName(path.basename(resolved.path), names);
 		attachments.push({
 			name,
 			payload: encodeBinaryPayload(bytes),
@@ -83,6 +81,9 @@ export async function materializeLocalAttachments(
 	localProtocolOptions: LocalProtocolOptions | undefined,
 ): Promise<LocalAttachmentReference[]> {
 	if (attachments.length === 0) return [];
+	const names = new Set<string>();
+	for (const attachment of attachments)
+		validateAttachmentName(attachment.name, names);
 	if (!localProtocolOptions)
 		throw new Error("current OMP session does not expose local:// storage");
 

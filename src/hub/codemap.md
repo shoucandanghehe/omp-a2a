@@ -22,7 +22,7 @@
 | `messages.ts` | SQLite append-only message log, history queries, idempotency, references, deletion, and migration. | `MessageStore` |
 | `client.ts` | Hub URL resolution and HTTP meta/Project/history client. | `HubClient`, `connectHub`, `resolveHubUrl` |
 | `realtime-types.ts` | Versioned WebSocket frames and public realtime/history shapes. | protocol types, `A2A_PROTOCOL_VERSION` |
-| `payload.ts` | Text and binary encoding/decoding plus attachment wire parsing. | text/binary codecs, `parseEncodedAttachments` |
+| `payload.ts` | Exact payload/attachment wire parsing, canonical Base64 decoding, structural attachment-name validation, and text/binary codecs. | codecs, `parseEncodedAttachments`, `validateAttachmentName` |
 | `data-lock.ts` | Exclusive ownership of one Hub data directory. | `HubDataLock` |
 | `types.ts` | Hub metadata plus encoded text, binary, and attachment values. | `HubMeta`, encoded payload types |
 
@@ -63,7 +63,7 @@ The client sends `message` with `requestId`, opaque `messageId`, typed target, e
 - Direct target resolves the current name and freezes its `presenceId`.
 - Project target snapshots all current Presence except the sender.
 - A missing direct target fails before persistence.
-- Text and attachment wire shapes plus causal references are checked before append; underlying codec failures propagate wherever payloads are decoded.
+- Exact text and attachment wire shapes, canonical Base64, valid unique attachment basenames, decoded gzip data, and causal references are checked before append.
 - `MessageStore.append` atomically commits one immutable Message—including attachments—and the next Project sequence.
 - The sender receives `accepted` with the canonical message and selected recipient names.
 - Each selected socket receives the canonical `message` frame.
@@ -133,9 +133,9 @@ Migration runs in the new database transaction and does not modify the old datab
 - Text `< 32 KiB`: `{ encoding: "identity", data }`.
 - Larger text: gzip plus Base64 only when smaller, otherwise identity.
 - Attachment bytes: Base64, optionally gzip-compressed only when smaller.
-- Payloads carry no derived byte metadata and codecs perform no bounded decompression or canonical Base64 re-encoding.
+- Payloads carry no derived byte metadata or application resource bounds; Base64 decoding rejects invalid and noncanonical input by canonical re-encoding.
 - Express JSON parsing and both WebSocket endpoints are configured without an application payload cap.
-- Matching private-protocol clients are trusted; malformed payloads fail loudly and deployment limits own resource isolation.
+- Matching private-protocol clients are trusted for resource use, not structural validity; malformed payloads fail loudly and deployment limits own resource isolation.
 
 ## HTTP client
 
@@ -161,7 +161,7 @@ Stop closes realtime clients, the HTTP server, message storage, metadata files, 
 - `hub-realtime.test.ts`: Presence lifetime, duplicate names, direct/broadcast snapshots, Delivery outcomes, attachment persistence, restart, and large same-version payload/attachment-count paths.
 - `message-store.test.ts`: ordering, attachment-aware idempotency, causal references, cursor/filter/default/explicit-limit behavior, canonical schema, legacy migration, integrity, and deletion.
 - `hub-control.test.ts`: independent Hubs, uncapped HTTP request bodies, Project control, active-Presence deletion rejection, and safe name reuse.
-- `payload.test.ts`: identity/gzip/Base64 round trips, compression choice, uncapped attachment parsing, and malformed codec failures.
+- `payload.test.ts`: identity/gzip/Base64 round trips, compression choice, uncapped attachment parsing, exact wire shapes, safe unique names, and malformed codec failures.
 - `operations.test.ts`: client/runtime integration plus successful and failed Delivery callbacks.
 
 See `scripts/codemap.md` for executable boundary scenarios.

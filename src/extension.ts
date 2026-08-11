@@ -235,6 +235,7 @@ export default function a2aExtension(pi: ExtensionAPI) {
 	let desiredConnection: { project: string; name: string } | null = null;
 	let reconnectTimer: NodeJS.Timeout | undefined;
 	let reconnectDelayMs = 500;
+	let modelPeerNames = new Set<string>();
 
 	const refreshHubUrl = (cwd: string) => {
 		configuredHubUrl = loadLocalConfig(cwd)?.hubUrl;
@@ -246,13 +247,30 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		return client;
 	};
 
+	const publishPresenceChange = (
+		name: string,
+		status: "joined" | "left",
+	): void => {
+		const context = activeContext;
+		if (!context) return;
+		context.ui.notify(`[a2a] ${name} ${status}`, "info");
+		if (context.isIdle()) return;
+		pi.sendMessage(
+			{
+				customType: "a2a-presence",
+				content: `[a2a presence] ${name} ${status}`,
+				display: false,
+			},
+			{ deliverAs: "steer", triggerTurn: false },
+		);
+		modelPeerNames = currentPeerNames();
+	};
+
 	const runtime = new A2aRuntime({
 		getClient: ensureClient,
 		events: {
-			onPresenceJoined: (peer) =>
-				activeContext?.ui.notify(`[a2a] ${peer.name} joined`, "info"),
-			onPresenceLeft: (peer) =>
-				activeContext?.ui.notify(`[a2a] ${peer.name} left`, "info"),
+			onPresenceJoined: (peer) => publishPresenceChange(peer.name, "joined"),
+			onPresenceLeft: (peer) => publishPresenceChange(peer.name, "left"),
 			onDelivery: (delivery) =>
 				activeContext?.ui.notify(
 					`[a2a] ${delivery.to} ${delivery.status}${delivery.status === "failed" ? `: ${delivery.error}` : ""}`,
@@ -268,6 +286,14 @@ export default function a2aExtension(pi: ExtensionAPI) {
 				if (activeContext !== context)
 					throw new Error("A2A inbound message cancelled after session change");
 				const attachments = formatAttachments(materialized.attachments);
+				const presenceDelta = context.isIdle()
+					? takePresenceDelta()
+					: undefined;
+				if (presenceDelta)
+					pi.sendMessage(presenceDelta, {
+						deliverAs: "steer",
+						triggerTurn: false,
+					});
 				pi.sendMessage(
 					{
 						customType: "a2a-inbound",
@@ -282,6 +308,7 @@ export default function a2aExtension(pi: ExtensionAPI) {
 				);
 			},
 			onClose: ({ manual }) => {
+				modelPeerNames.clear();
 				if (manual || !desiredConnection) return;
 				activeContext?.ui.notify(
 					"[a2a] connection lost; reconnecting",
@@ -292,10 +319,42 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		},
 	});
 
+	function currentPeerNames(): Set<string> {
+		return new Set(runtime.peers().map((peer) => peer.name));
+	}
+
+	function takePresenceDelta():
+		| {
+				customType: string;
+				content: string;
+				display: boolean;
+		  }
+		| undefined {
+		const current = currentPeerNames();
+		const joined = [...current]
+			.filter((name) => !modelPeerNames.has(name))
+			.sort();
+		const left = [...modelPeerNames]
+			.filter((name) => !current.has(name))
+			.sort();
+		modelPeerNames = current;
+		if (joined.length === 0 && left.length === 0) return;
+		let content = "[a2a presence]";
+		if (joined.length > 0) content += ` joined=${joined.join(",")}`;
+		if (left.length > 0) content += ` left=${left.join(",")}`;
+		return {
+			customType: "a2a-presence",
+			content,
+			display: false,
+		};
+	}
+
 	const connectDesired = async (): Promise<void> => {
 		if (!desiredConnection) return;
+		modelPeerNames.clear();
 		try {
 			await runtime.connect(desiredConnection.project, desiredConnection.name);
+			modelPeerNames = currentPeerNames();
 			reconnectDelayMs = 500;
 			activeContext?.ui.notify(
 				`Connected to ${desiredConnection.project} as ${desiredConnection.name}`,
@@ -323,6 +382,7 @@ export default function a2aExtension(pi: ExtensionAPI) {
 	}
 
 	const activateSession = async (context: ExtensionContext) => {
+		modelPeerNames.clear();
 		activeContext = null;
 		if (reconnectTimer) {
 			clearTimeout(reconnectTimer);
@@ -341,11 +401,17 @@ export default function a2aExtension(pi: ExtensionAPI) {
 	pi.on("before_agent_start", () => {
 		const name = runtime.name;
 		if (!name) return;
+		const message = takePresenceDelta();
 		return {
+			...(message ? { message } : {}),
 			systemPrompt: [
 				`Your A2A roster name is ${name}. Address peers only by exact names returned by a2a_peers or by sender names in inbound A2A messages.`,
 			],
 		};
+	});
+	pi.on("agent_end", (event) => {
+		if (!event.willContinue)
+			modelPeerNames = runtime.name ? currentPeerNames() : new Set();
 	});
 
 	pi.on(
@@ -357,6 +423,7 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		async (_event, context) => await activateSession(context),
 	);
 	pi.on("session_shutdown", async () => {
+		modelPeerNames.clear();
 		activeContext = null;
 		desiredConnection = null;
 		clearTimeout(reconnectTimer);
@@ -442,6 +509,7 @@ export default function a2aExtension(pi: ExtensionAPI) {
 					return;
 				}
 				if (command === "disconnect") {
+					modelPeerNames.clear();
 					desiredConnection = null;
 					clearTimeout(reconnectTimer);
 					reconnectTimer = undefined;

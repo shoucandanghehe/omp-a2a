@@ -33,7 +33,7 @@ Private protocol version `3` reuses the Hub HTTP server:
 - in-memory indexes store Presence and pending delivery;
 - SQLite `messages.sqlite` stores append-only Project history with WAL and `synchronous = FULL`.
 
-Text below 32 KiB stays identity encoded. Larger text uses gzip plus Base64 only when compression is smaller; attachment bytes use Base64 and the same compression rule. Matching Hub and Extension versions are trusted, so Messages, attachments, transport frames, and history responses have no application resource cap or derived byte metadata. Underlying codec and storage errors fail loudly; deployment memory and container limits provide resource isolation.
+Text below 32 KiB stays identity encoded. Larger text uses gzip plus Base64 only when compression is smaller; attachment bytes use Base64 and the same compression rule. Payload and attachment objects have exact wire shapes, Base64 is canonical, and attachment names are unique safe basenames. Matching Hub and Extension versions are trusted for resource use, so Messages, attachments, transport frames, and history responses have no application resource cap or derived byte metadata. Malformed payloads fail loudly; deployment memory and container limits provide resource isolation.
 
 ### Public interfaces
 

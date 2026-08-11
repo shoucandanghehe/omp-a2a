@@ -11,7 +11,7 @@ The central seam is `A2aRuntime`: extension callbacks and commands depend on one
 | File | Responsibility | Primary interface |
 | --- | --- | --- |
 | `extension.ts` | OMP registration, session lifecycle, UI notifications, reconnect policy, slash commands, completions, and model tools. | default extension factory |
-| `local-attachments.ts` | Snapshots actual sender-session `local://` file bytes without application count or size caps and materializes received/history bytes into the calling session. | `snapshotLocalAttachments`, `materializeLocalAttachments` |
+| `local-attachments.ts` | Snapshots actual sender-session `local://` file bytes without application count or size caps and safely materializes validated attachment basenames into the calling session. | `snapshotLocalAttachments`, `materializeLocalAttachments` |
 | `operations.ts` | Connected runtime over one WebSocket plus HTTP Project/history operations. | `A2aRuntime`, `MessageView`, `RuntimeStatus` |
 | `config.ts` | Strict repository-local YAML/JSON connection defaults. | `loadLocalConfig` |
 | `paths.ts` | Hub storage paths and local config candidates. | path functions |
@@ -39,7 +39,7 @@ On `session_shutdown`, it clears the active context and desired state, cancels r
 
 ### Inbound events
 
-- `presence_joined` and `presence_left` update the UI only.
+- `presence_joined` and `presence_left` always update the UI. Busy sessions receive each change as a hidden-display `a2a-presence` custom message through `steer`. Idle changes are collapsed into at most one joined/left roster delta between the last terminal `agent_end` snapshot and the current Presence; net-zero churn is discarded, and the delta is injected before the next inbound Message or returned by `before_agent_start` for the next model turn.
 - `delivery` reports the selected peer name and `delivered`/`failed`/`disconnected` outcome.
 - `message` callbacks run serially in Hub-assigned Project sequence. Each callback captures the active session, materializes attachment bytes, then verifies that the session is still active before injecting an `a2a-inbound` OMP custom message through `steer`; session changes cancel the injection. Idle sessions start a turn and busy sessions queue the Message into the active turn. Materialization or injection failure produces `failed`, not `delivered`.
 - socket/protocol errors are written to the extension logger.
@@ -138,6 +138,7 @@ OMP callbacks / slash / tools
 ## Tests touching this directory
 
 - `extension.test.ts`: registered surfaces, help contract, ArkType schemas, multi-level completion, and cross-session attachment snapshot/materialization/history.
+- `local-attachments.test.ts`: materialization rejects unsafe or duplicate attachment names before writing files.
 - `operations.test.ts`: runtime connect, snapshots, message and successful/failed Delivery callbacks, and disconnected errors.
 - `config.test.ts`: strict configuration parsing and migration failures.
 - `hub-control.test.ts`: public Project control behavior reached through `HubClient`.
