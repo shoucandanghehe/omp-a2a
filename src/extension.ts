@@ -194,19 +194,91 @@ type MaterializedMessageView = Omit<MessageView, "attachments"> & {
 };
 
 type AttachmentMaterializer = typeof materializeLocalAttachments;
+type PendingMaterializedMessage = {
+	value: MaterializedMessageView;
+	commit(): void;
+	dispose(): Promise<void>;
+};
+type DesiredConnection = {
+	project: string;
+	name: string;
+	hubUrl: string;
+	client?: HubClient;
+};
+
+function combineAbortSignals(
+	first: AbortSignal,
+	...rest: Array<AbortSignal | undefined>
+): AbortSignal {
+	const signals = [first, ...rest].filter(
+		(signal): signal is AbortSignal => signal !== undefined,
+	);
+	return signals.length === 1 ? first : AbortSignal.any(signals);
+}
 
 async function materializeMessage(
 	message: MessageView,
 	context: Pick<ExtensionContext, "localProtocolOptions"> | null | undefined,
 	materializeAttachments: AttachmentMaterializer,
-): Promise<MaterializedMessageView> {
+	signal?: AbortSignal,
+): Promise<PendingMaterializedMessage> {
+	const materialized = await materializeAttachments(
+		message.attachments,
+		context?.localProtocolOptions,
+		signal,
+	);
 	return {
-		...message,
-		attachments: await materializeAttachments(
-			message.attachments,
-			context?.localProtocolOptions,
-		),
+		value: {
+			...message,
+			attachments: materialized.attachments,
+		},
+		commit: materialized.commit,
+		dispose: materialized.dispose,
 	};
+}
+
+async function materializeMessages(
+	messages: MessageView[],
+	context: Pick<ExtensionContext, "localProtocolOptions"> | null | undefined,
+	materializeAttachments: AttachmentMaterializer,
+	signal: AbortSignal,
+): Promise<PendingMaterializedMessage[]> {
+	if (messages.length === 0) return [];
+	const batchAbort = new AbortController();
+	const batchSignal = combineAbortSignals(signal, batchAbort.signal);
+	const outcomes = await Promise.allSettled(
+		messages.map(async (message) => {
+			try {
+				return await materializeMessage(
+					message,
+					context,
+					materializeAttachments,
+					batchSignal,
+				);
+			} catch (error) {
+				batchAbort.abort(error);
+				throw error;
+			}
+		}),
+	);
+	const materialized: PendingMaterializedMessage[] = [];
+	const errors: unknown[] = [];
+	for (const outcome of outcomes) {
+		if (outcome.status === "fulfilled") materialized.push(outcome.value);
+		else errors.push(outcome.reason);
+	}
+	if (errors.length === 0) return materialized;
+	const cleanup = await Promise.allSettled(
+		materialized.map((message) => message.dispose()),
+	);
+	for (const outcome of cleanup) {
+		if (outcome.status === "rejected") errors.push(outcome.reason);
+	}
+	if (errors.length === 1) throw errors[0];
+	throw new AggregateError(
+		errors,
+		"failed to materialize and clean up A2A message attachments",
+	);
 }
 
 function formatAttachments(attachments: LocalAttachmentReference[]): string {
@@ -234,6 +306,7 @@ function formatMessages(messages: MaterializedMessageView[]): string {
 export default function a2aExtension(
 	pi: ExtensionAPI,
 	dependencies: {
+		snapshotAttachments?: typeof snapshotLocalAttachments;
 		materializeAttachments?: AttachmentMaterializer;
 	} = {},
 ) {
@@ -241,23 +314,45 @@ export default function a2aExtension(
 	pi.setLabel("A2A Realtime Chat");
 	const materializeAttachments =
 		dependencies.materializeAttachments ?? materializeLocalAttachments;
+	const snapshotAttachments =
+		dependencies.snapshotAttachments ?? snapshotLocalAttachments;
 
 	let client: HubClient | null = null;
 	let configuredHubUrl: string | undefined;
 	let activeContext: ExtensionContext | null = null;
-	let desiredConnection: { project: string; name: string } | null = null;
+	let desiredConnection: DesiredConnection | null = null;
 	let reconnectTimer: NodeJS.Timeout | undefined;
 	let reconnectDelayMs = 500;
+	let sessionGeneration = 0;
+	let sessionLifecycle = new AbortController();
 
 	const refreshHubUrl = (cwd: string) => {
 		configuredHubUrl = loadLocalConfig(cwd)?.hubUrl;
 	};
 	const ensureClient = async (): Promise<HubClient> => {
 		const target = resolveHubUrl({ hubUrl: configuredHubUrl });
-		if (client?.baseUrl !== target) client = null;
-		client ??= await HubClient.connect({ hubUrl: configuredHubUrl });
-		return client;
+		if (client?.baseUrl === target) return client;
+		const candidate = await HubClient.connect({ hubUrl: target });
+		if (resolveHubUrl({ hubUrl: configuredHubUrl }) === target) client = candidate;
+		return candidate;
 	};
+
+	const desiredClient = async (
+		target: DesiredConnection,
+	): Promise<HubClient> => {
+		if (target.client) return target.client;
+		target.client =
+			target.hubUrl === resolveHubUrl({ hubUrl: configuredHubUrl })
+				? await ensureClient()
+				: await HubClient.connect({ hubUrl: target.hubUrl });
+		return target.client;
+	};
+
+	const desiredTarget = (project: string, name: string): DesiredConnection => ({
+		project,
+		name,
+		hubUrl: resolveHubUrl({ hubUrl: configuredHubUrl }),
+	});
 
 	const runtime = new A2aRuntime({
 		getClient: ensureClient,
@@ -273,32 +368,50 @@ export default function a2aExtension(
 				),
 			onError: (error) =>
 				pi.logger?.warn?.(`a2a realtime error: ${error.message}`),
-			onMessage: async (message, signal) => {
+			onMessage: async (message, connectionToken) => {
 				const context = activeContext;
+				const generation = sessionGeneration;
+				const sessionToken = sessionLifecycle.signal;
 				if (!context)
 					throw new Error("A2A inbound message has no active session");
+				const signal = combineAbortSignals(sessionToken, connectionToken);
+				signal.throwIfAborted();
 				const materialized = await materializeMessage(
 					message,
 					context,
 					materializeAttachments,
+					signal,
 				);
-				if (activeContext !== context || signal.aborted)
-					throw new Error(
-						"A2A inbound message cancelled after session or connection change",
+				try {
+					signal.throwIfAborted();
+					if (
+						sessionGeneration !== generation ||
+						sessionLifecycle.signal !== sessionToken ||
+						!runtime.isPublishedConnection(connectionToken)
+					) {
+						throw new Error(
+							"A2A inbound message cancelled after session or connection change",
+						);
+					}
+					const attachments = formatAttachments(
+						materialized.value.attachments,
 					);
-				const attachments = formatAttachments(materialized.attachments);
-				pi.sendMessage(
-					{
-						customType: "a2a-inbound",
-						content: `[a2a message] ref=${message.messageRef} from=${message.from.name} project=${message.project} at=${new Date(message.createdAt).toISOString()} replyTo=${message.replyTo ?? "-"}\n${message.text}${attachments}`,
-						display: true,
-						details: materialized,
-					},
-					{
-						deliverAs: "steer",
-						triggerTurn: true,
-					},
-				);
+					pi.sendMessage(
+						{
+							customType: "a2a-inbound",
+							content: `[a2a message] ref=${message.messageRef} from=${message.from.name} project=${message.project} at=${new Date(message.createdAt).toISOString()} replyTo=${message.replyTo ?? "-"}\n${message.text}${attachments}`,
+							display: true,
+							details: materialized.value,
+						},
+						{
+							deliverAs: "steer",
+							triggerTurn: true,
+						},
+					);
+					materialized.commit();
+				} finally {
+					await materialized.dispose();
+				}
 			},
 			onClose: ({ manual }) => {
 				if (manual || !desiredConnection) return;
@@ -316,7 +429,11 @@ export default function a2aExtension(
 	): Promise<void> => {
 		if (!target || desiredConnection !== target) return;
 		try {
-			await runtime.connect(target.project, target.name);
+			await runtime.connect(
+				target.project,
+				target.name,
+				() => desiredClient(target),
+			);
 			if (desiredConnection !== target) return;
 			clearTimeout(reconnectTimer);
 			reconnectTimer = undefined;
@@ -329,10 +446,15 @@ export default function a2aExtension(
 			if (desiredConnection !== target) return;
 			const message = error instanceof Error ? error.message : String(error);
 			if (message.includes("name_in_use")) {
-				const project = runtime.project;
-				const name = runtime.name;
-				desiredConnection =
-					project && name ? { project, name } : null;
+				const published = runtime.publishedTarget;
+				desiredConnection = published
+					? {
+							project: published.project,
+							name: published.name,
+							hubUrl: published.client.baseUrl,
+							client: published.client,
+						}
+					: null;
 				if (desiredConnection) reconnectDelayMs = 500;
 				activeContext?.ui.notify(message, "error");
 				return;
@@ -352,19 +474,28 @@ export default function a2aExtension(
 	}
 
 	const activateSession = async (context: ExtensionContext) => {
+		const generation = ++sessionGeneration;
+		sessionLifecycle.abort(new Error("A2A Session changed"));
+		const lifecycle = new AbortController();
+		sessionLifecycle = lifecycle;
 		activeContext = null;
-		if (reconnectTimer) {
-			clearTimeout(reconnectTimer);
-			reconnectTimer = undefined;
-		}
-		await runtime.disconnect();
-		activeContext = context;
-		refreshHubUrl(context.cwd);
 		desiredConnection = null;
+		clearTimeout(reconnectTimer);
+		reconnectTimer = undefined;
+		reconnectDelayMs = 500;
+		await runtime.disconnect();
+		if (
+			sessionGeneration !== generation ||
+			sessionLifecycle !== lifecycle
+		)
+			return;
+		activeContext = context;
 		const config = loadLocalConfig(context.cwd);
+		configuredHubUrl = config?.hubUrl;
 		if (!config || config.autoConnect === false) return;
-		desiredConnection = { project: config.project, name: config.name };
-		await connectDesired();
+		const target = desiredTarget(config.project, config.name);
+		desiredConnection = target;
+		await connectDesired(target);
 	};
 
 	pi.on("before_agent_start", () => {
@@ -386,6 +517,8 @@ export default function a2aExtension(
 		async (_event, context) => await activateSession(context),
 	);
 	pi.on("session_shutdown", async () => {
+		++sessionGeneration;
+		sessionLifecycle.abort(new Error("A2A Session shut down"));
 		activeContext = null;
 		desiredConnection = null;
 		clearTimeout(reconnectTimer);
@@ -397,6 +530,8 @@ export default function a2aExtension(
 		description: "A2A realtime chat connection and Project administration",
 		getArgumentCompletions: completeA2aArguments,
 		handler: async (raw, context) => {
+			const generation = sessionGeneration;
+			const sessionToken = sessionLifecycle.signal;
 			activeContext = context;
 			refreshHubUrl(context.cwd);
 			const { positional, flags } = parseArgs(raw);
@@ -468,8 +603,9 @@ export default function a2aExtension(
 					}
 					clearTimeout(reconnectTimer);
 					reconnectTimer = undefined;
-					desiredConnection = { project, name };
-					await connectDesired();
+					const target = desiredTarget(project, name);
+					desiredConnection = target;
+					await connectDesired(target);
 					return;
 				}
 				if (command === "disconnect") {
@@ -507,30 +643,57 @@ export default function a2aExtension(
 				if (command === "history") {
 					const limit =
 						flags.limit === undefined ? undefined : Number(flags.limit);
+					const connectionToken = runtime.connectionToken();
+					const signal = combineAbortSignals(
+						sessionToken,
+						connectionToken,
+					);
+					signal.throwIfAborted();
 					const messages = await runtime.history({
 						before: typeof flags.before === "string" ? flags.before : undefined,
 						after: typeof flags.after === "string" ? flags.after : undefined,
 						from: typeof flags.from === "string" ? flags.from : undefined,
 						limit,
 					});
-					context.ui.notify(
-						formatMessages(
-							await Promise.all(
-								messages.map((message) =>
-									materializeMessage(
-										message,
-										context,
-										materializeAttachments,
-									),
-								),
-							),
-						),
-						"info",
+					signal.throwIfAborted();
+					const materialized = await materializeMessages(
+						messages,
+						context,
+						materializeAttachments,
+						signal,
 					);
+					try {
+						signal.throwIfAborted();
+						if (
+							sessionGeneration !== generation ||
+							sessionLifecycle.signal !== sessionToken ||
+							!runtime.isPublishedConnection(connectionToken)
+						)
+							throw new Error(
+								"A2A history cancelled after session or connection change",
+							);
+						context.ui.notify(
+							formatMessages(
+								materialized.map((message) => message.value),
+							),
+							"info",
+						);
+						for (const message of materialized) message.commit();
+					} finally {
+						await Promise.all(
+							materialized.map((message) => message.dispose()),
+						);
+					}
 					return;
 				}
 				throw new Error(`unknown subcommand. ${usage()}`);
 			} catch (error) {
+				if (
+					sessionGeneration !== generation ||
+					sessionLifecycle.signal !== sessionToken ||
+					sessionToken.aborted
+				)
+					return;
 				context.ui.notify(
 					error instanceof Error ? error.message : String(error),
 					"error",
@@ -582,20 +745,43 @@ export default function a2aExtension(
 			"replyTo?": "string",
 			"messageId?": "string",
 		}),
-		async execute(_id, parameters, _signal, _onUpdate, context) {
+		async execute(_id, parameters, callerSignal, _onUpdate, context) {
 			try {
+				const generation = sessionGeneration;
+				const sessionToken = sessionLifecycle.signal;
+				const connectionToken = runtime.connectionToken();
+				const signal = combineAbortSignals(
+					sessionToken,
+					callerSignal,
+					connectionToken,
+				);
+				signal.throwIfAborted();
 				const attachmentSources = parameters.attachments ?? [];
-				const attachments = await snapshotLocalAttachments(
+				const attachments = await snapshotAttachments(
 					attachmentSources,
 					context?.localProtocolOptions,
+					signal,
 				);
-				const accepted = await runtime.message({
-					target: parameters.target as MessageRequestTarget,
-					text: parameters.text,
-					attachments,
-					replyTo: parameters.replyTo,
-					messageId: parameters.messageId,
-				});
+				signal.throwIfAborted();
+				if (
+					sessionGeneration !== generation ||
+					sessionLifecycle.signal !== sessionToken ||
+					!runtime.isPublishedConnection(connectionToken)
+				)
+					throw new Error(
+						"A2A message cancelled after session or connection change",
+					);
+				const accepted = await runtime.message(
+					{
+						target: parameters.target as MessageRequestTarget,
+						text: parameters.text,
+						attachments,
+						replyTo: parameters.replyTo,
+						messageId: parameters.messageId,
+					},
+					connectionToken,
+				);
+				signal.throwIfAborted();
 				const target =
 					parameters.target.type === "project"
 						? `${accepted.recipients.length} Agents`
@@ -641,26 +827,51 @@ export default function a2aExtension(
 			"limit?": "number",
 			"from?": "string",
 		}),
-		async execute(_id, parameters, _signal, _onUpdate, context) {
+		async execute(_id, parameters, callerSignal, _onUpdate, context) {
 			try {
-				const messages = await runtime.history(parameters);
-				const materialized = await Promise.all(
-					messages.map((message) =>
-						materializeMessage(
-							message,
-							context,
-							materializeAttachments,
-						),
-					),
+				const generation = sessionGeneration;
+				const sessionToken = sessionLifecycle.signal;
+				const connectionToken = runtime.connectionToken();
+				const signal = combineAbortSignals(
+					sessionToken,
+					callerSignal,
+					connectionToken,
 				);
-				return {
-					content: [{ type: "text", text: formatMessages(materialized) }],
-					details: { messages: materialized },
-				};
+				signal.throwIfAborted();
+				const messages = await runtime.history(parameters);
+				signal.throwIfAborted();
+				const materialized = await materializeMessages(
+					messages,
+					context,
+					materializeAttachments,
+					signal,
+				);
+				try {
+					signal.throwIfAborted();
+					if (
+						sessionGeneration !== generation ||
+						sessionLifecycle.signal !== sessionToken ||
+						!runtime.isPublishedConnection(connectionToken)
+					)
+						throw new Error(
+							"A2A history cancelled after session or connection change",
+						);
+					const values = materialized.map((message) => message.value);
+					const result = {
+						content: [{ type: "text" as const, text: formatMessages(values) }],
+						details: { messages: values },
+					};
+					for (const message of materialized) message.commit();
+					return result;
+				} finally {
+					await Promise.all(
+						materialized.map((message) => message.dispose()),
+					);
+				}
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
 				return {
-					content: [{ type: "text", text: message }],
+					content: [{ type: "text" as const, text: message }],
 					details: { error: message },
 					isError: true,
 				};

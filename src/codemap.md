@@ -11,7 +11,7 @@ The central seam is `A2aRuntime`: extension callbacks and commands depend on one
 | File | Responsibility | Primary interface |
 | --- | --- | --- |
 | `extension.ts` | OMP registration, session lifecycle, UI notifications, reconnect policy, slash commands, completions, and model tools. | default extension factory |
-| `local-attachments.ts` | Snapshot sender-session `local://` files and materialize received/history attachment bytes into the calling session. | `snapshotLocalAttachments`, `materializeLocalAttachments` |
+| `local-attachments.ts` | Cancellable snapshot of sender-session `local://` files and leak-free materialization of received/history attachment bytes into the calling session. | `snapshotLocalAttachments`, `materializeLocalAttachments` |
 | `operations.ts` | Connected runtime over one WebSocket plus HTTP Project/history operations. | `A2aRuntime`, `MessageView`, `RuntimeStatus` |
 | `config.ts` | Strict repository-local YAML/JSON connection defaults. | `loadLocalConfig` |
 | `paths.ts` | Hub storage paths and local config candidates. | path functions |
@@ -21,23 +21,23 @@ The central seam is `A2aRuntime`: extension callbacks and commands depend on one
 
 ## Extension lifecycle
 
-`a2aExtension(pi)` owns the active OMP `ExtensionContext`, the desired `{ project, name }` object identity, and one bounded exponential reconnect timer from 500 ms to 10 seconds. `A2aRuntime`, not the Extension, owns connection transitions and published connection lifetime.
+`a2aExtension(pi)` owns the active OMP `ExtensionContext`, an explicit Session generation and AbortController, the desired `{ hubUrl, client?, project, name }` target, and one bounded exponential reconnect timer from 500 ms to 10 seconds. `A2aRuntime`, not the Extension, owns connection transitions and published connection lifetime.
 
 On `session_start` and `session_switch`, the extension:
 
-1. clears the active context so in-flight inbound callbacks cannot inject into the new session;
-2. cancels pending reconnect and disconnects the published Presence or pending handshake;
-3. activates the new context and resolves its repository-local configuration;
-4. replaces the desired target and auto-connects only when configuration exists and `autoConnect !== false`.
+1. increments the Session generation, aborts the prior Session controller, and synchronously clears the active context, desired target, and reconnect timer so obsolete work cannot occupy the new Session;
+2. cancels and awaits the published Presence or pending handshake;
+3. activates the new context and resolves its repository-local configuration only if no newer Session transition superseded it;
+4. captures the selected Hub URL in the desired target and auto-connects only when configuration exists and `autoConnect !== false`.
 
-On `session_shutdown`, it clears the active context and desired target, cancels reconnect, and disconnects the Runtime. Unexpected close of the published socket reconnects only the current desired target. A `name_in_use` candidate is terminal for that failed target; when an older connection remains published, its `{ project, name }` becomes the reconnect intent.
+On `session_shutdown`, it increments the Session generation, aborts the Session controller, synchronously clears the active context and desired target, cancels reconnect, and disconnects the Runtime. Slash history and model attachment work combine caller, Session, and published-connection cancellation; stale slash history cannot notify a retired Session. Unexpected close of the published socket reconnects only the current desired target using its captured accepting Hub client. A `name_in_use` candidate is terminal for that failed target; when an older connection remains published, its `{ hubUrl, client, project, name }` becomes the reconnect intent. Project administration continues to use the currently selected client.
 
 ### Inbound events
 
 - Only events from the currently published connection reach the Extension; candidate and retired connection events are discarded.
 - `presence_joined` and `presence_left` update the UI only.
 - `delivery` reports the selected peer name and `delivered`/`failed`/`disconnected` outcome.
-- `message` callbacks run serially in Hub-assigned Project sequence. Each callback captures the active session and the Runtime-owned published-connection `AbortSignal`, materializes attachment bytes, then verifies both identities before injecting an `a2a-inbound` OMP custom message through `steer`. Session changes, connection replacement, disconnect, or current socket close cancel injection. Idle sessions start a turn and busy sessions queue the Message into the active turn. Materialization or injection failure produces `failed`, not `delivered`.
+- `message` callbacks run serially in Hub-assigned Project sequence. Each callback captures the Session generation and the Runtime-owned published-connection token, combines both lifecycle signals through attachment materialization, then verifies generation and token before injecting an `a2a-inbound` OMP custom message through `steer`. Session changes, connection replacement, disconnect, or current socket close cancel injection and dispose every uncommitted attachment directory, including materialization that already returned. Idle sessions start a turn and busy sessions queue the Message into the active turn. Candidate and retired sockets fail delivery rather than acknowledging an injection that never happened.
 - socket/protocol errors from the published connection are written to the extension logger.
 
 ## Human command surface
@@ -73,14 +73,16 @@ Connected model turns receive the current A2A roster name and use only `a2a_peer
 
 `A2aRuntime` is the sole owner of published connection state. A published value binds one `A2aConnection`, the `HubClient` that admitted it, and a Runtime-owned message-lifecycle `AbortController`.
 
-- `connect(project, name)` starts a cancellable candidate while preserving the published value. Only the latest transition may publish; candidate success atomically replaces the binding before retiring its predecessor, while candidate failure leaves the predecessor and its lifecycle signal unchanged. An identical target is reused only when the selected Hub URL also matches.
-- Candidate and retired connections cannot forward Presence, message, Delivery, close, or error events. A candidate closed during predecessor cleanup cannot report success.
-- `disconnect()` is idempotent, supersedes pending connect work, aborts the published message lifecycle, clears the binding, and closes its socket.
-- Replacing a published connection or closing its current socket aborts the signal passed to asynchronous `onMessage` work.
-- `peers()` and `message()` use the published WebSocket.
+- `connect(project, name, client?)` starts a cancellable candidate while preserving the published value. Every connect waits the shared teardown barrier from any earlier connect or disconnect before resolving a client or opening another socket, so reverse overlap cannot reclaim a still-owned name. It aborts and awaits any superseded candidate's complete teardown. Only the latest transition may publish; candidate success atomically replaces the binding before retiring its predecessor, while candidate failure leaves the predecessor and its lifecycle signal unchanged. An identical target is reused only when the accepting Hub URL also matches.
+- Candidate and retired connections cannot forward Presence, message, Delivery, close, or error events. A Message arriving there reports failed delivery rather than returning normally, and a candidate closed during predecessor cleanup cannot report success.
+- `disconnect()` is idempotent, supersedes pending connect work, aborts the published message lifecycle, clears the binding, and publishes one teardown barrier until candidate and socket closure complete.
+- Replacing a published connection or closing its current socket aborts the connection token passed to asynchronous inbound and outbound work; the Runtime exposes identity checks for final injection and send fences.
+- `peers()` uses the published WebSocket. `message()` can require the initiating published-connection token so a slow attachment snapshot cannot send through a replacement.
 - `history()` and connected `status()` use the bound `HubClient`; Project create/list/delete and disconnected status use the currently selected client.
 
 `A2aConnection.connect` accepts a caller `AbortSignal` for an unpublished handshake and terminates that socket when cancelled. Established message/history requests retain their existing lifecycle behavior.
+
+Attachment snapshot and materialization accept combined caller, Session, and published-connection `AbortSignal`s. Stable reads check cancellation around each non-cancellable file operation. Materialization returns explicit disposable/commit ownership: cancellation, a final fence failure, injection failure, or a failed history sibling removes every uncommitted output directory, while only a successful caller commits the returned URLs.
 
 `MessageView` is the persistent realtime Message shape with decoded text and attachment bytes replacing encoded wire payloads.
 
@@ -134,8 +136,8 @@ OMP callbacks / slash / tools
 
 ## Tests touching this directory
 
-- `extension.test.ts`: registered surfaces, help contract, ArkType schemas, multi-level completion, attachment snapshot/materialization/history, session and Project-switch cancellation, and reconnect intent.
-- `operations.test.ts`: published Hub bindings, connection transition ownership, message lifecycle signals, snapshots, ordered injection, Delivery outcomes, and disconnected errors.
+- `extension.test.ts`: registered surfaces, help contract, ArkType schemas, multi-level completion, attachment snapshot/materialization/history ownership, Session/Project-switch cancellation, outbound send fencing, stale UI suppression, and reconnect intent.
+- `operations.test.ts`: published Hub bindings, shared connect/disconnect teardown ownership, message lifecycle signals, snapshots, ordered injection, Delivery outcomes, and disconnected errors.
 - `config.test.ts`: strict configuration parsing and migration failures.
 - `hub-control.test.ts`: public Project control behavior reached through `HubClient`.
 
