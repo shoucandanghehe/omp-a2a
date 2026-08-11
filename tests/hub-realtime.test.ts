@@ -10,6 +10,7 @@ import {
 	type ServerFrame,
 } from "../src/hub/realtime-types";
 import { type HubServerHandle, startHubServer } from "../src/hub/server";
+import type { EncodedAttachment } from "../src/hub/types";
 
 const roots: string[] = [];
 const hubs: HubServerHandle[] = [];
@@ -276,7 +277,7 @@ test("message history survives Hub restart while Presence does not", async () =>
 	await web.frames.next();
 	await api.frames.next();
 	const attachmentBytes = Buffer.from("# Training handoff\nseed=20\n", "utf8");
-	const attachment = {
+	const attachment: EncodedAttachment = {
 		name: "training-handoff.md",
 		payload: {
 			encoding: "base64",

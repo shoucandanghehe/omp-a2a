@@ -505,12 +505,13 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerTool({
+	const peersParameters = type({});
+	pi.registerTool<typeof peersParameters>({
 		name: "a2a_peers",
 		label: "A2A Peers",
 		description:
 			"List the exact A2A roster names currently addressable in this Project. Use only a returned name for target.type=agent.",
-		parameters: type({}),
+		parameters: peersParameters,
 		async execute() {
 			try {
 				const peers = runtime.peers();
@@ -537,17 +538,18 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerTool({
+	const messageParameters = type({
+		target: [{ type: "'agent'", name: "string" }, "|", { type: "'project'" }],
+		text: "string",
+		"attachments?": "string[]",
+		"replyTo?": "string",
+		"messageId?": "string",
+	});
+	pi.registerTool<typeof messageParameters>({
 		name: "a2a_message",
 		label: "A2A Message",
 		description: `Send to one current peer or all current peers. Use target.type=agent with a name from a2a_peers, or target.type=project for all current peers. Set replyTo to reply to an earlier Project message. Attachments must be current-session local:// regular files. ${ASYNC_REPLY_GUIDANCE}`,
-		parameters: type({
-			target: [{ type: "'agent'", name: "string" }, "|", { type: "'project'" }],
-			text: "string",
-			"attachments?": "string[]",
-			"replyTo?": "string",
-			"messageId?": "string",
-		}),
+		parameters: messageParameters,
 		async execute(_id, parameters, _signal, _onUpdate, context) {
 			try {
 				const attachmentSources = parameters.attachments ?? [];
@@ -596,17 +598,18 @@ export default function a2aExtension(pi: ExtensionAPI) {
 		},
 	});
 
-	pi.registerTool({
+	const historyParameters = type({
+		"before?": "string",
+		"after?": "string",
+		"limit?": "number",
+		"from?": "string",
+	});
+	pi.registerTool<typeof historyParameters>({
 		name: "a2a_history",
 		label: "A2A History",
 		description:
 			"Review earlier Project messages using before, after, limit, or from. Returned attachment links are valid in the current session. Use only for past context; never wait or poll for new replies.",
-		parameters: type({
-			"before?": "string",
-			"after?": "string",
-			"limit?": "number",
-			"from?": "string",
-		}),
+		parameters: historyParameters,
 		async execute(_id, parameters, _signal, _onUpdate, context) {
 			try {
 				const messages = await runtime.history(parameters);

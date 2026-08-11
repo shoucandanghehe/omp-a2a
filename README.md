@@ -289,23 +289,25 @@ Opening a protocol version `2` `messages.sqlite` adds the attachment columns in 
 ### Local release gate
 
 ```bash
-biome check .slim/codemap.json src tests scripts package.json
-bun run smoke
-bun build src/extension.ts --target=bun --external @oh-my-pi/pi-coding-agent/internal-urls/local-protocol --outdir=/tmp/omp-a2a-extension-build
-bun build src/hub/cli.ts --target=bun --outdir=/tmp/omp-a2a-hub-build
-docker compose config
+bun install --frozen-lockfile
+bun run verify
+bun run audit
+docker compose config --quiet
 ```
 
-These commands check formatting, run the Bun tests plus Project Registry and live Hub/client smokes, build both executable entry points, and validate the Compose model. The behavioral coverage includes WebSocket Presence, name conflicts, Presence notifications, direct and broadcast routing, successful/failed/disconnected Delivery, cross-session attachment snapshot/materialization/history, protocol version `2` and legacy Inbox migration, payload limits, Project deletion, Hub restart semantics, and command completion.
+`bun run verify` is the canonical source gate: zero-warning Biome formatting/lint/import checks, TypeScript 7 strict no-emit checking, both Bun entry-point builds, all Bun tests, and the Project Registry plus live in-process Hub smokes. `bun run audit` separately fails on high or critical production-dependency advisories.
 
 ### Docker boundary
 
 ```bash
-docker compose up -d --build --force-recreate --wait --wait-timeout 60 hub
+docker compose up -d --build --wait --wait-timeout 90
 bun run smoke:docker
+docker compose down --volumes --remove-orphans
 ```
 
-`smoke:docker` targets the running Hub selected by `OMP_A2A_HUB_URL`, crosses the public HTTP and WebSocket boundary, verifies persisted history, and deletes its temporary Project. `bun run smoke` alone does not build or start a container.
+`smoke:docker` targets the running Hub selected by `OMP_A2A_HUB_URL`, crosses the public HTTP and WebSocket boundary, verifies persisted history, and deletes its temporary Project. GitHub Actions runs source, production dependency audit, and container gates independently; pins third-party actions by commit SHA; grants read-only repository access; cancels superseded runs; and always removes container resources. Dependabot checks Bun, Actions, and Docker dependencies weekly.
+
+The dated tool/version rationale and rejected alternatives are recorded in [`docs/ci-best-practices-2026-08-11.md`](docs/ci-best-practices-2026-08-11.md).
 
 ## Layout
 

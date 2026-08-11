@@ -102,9 +102,11 @@ test("human commands and model tools expose separate A2A surfaces", async () => 
 	expect(help).not.toContain("/a2a send");
 	expect(help).not.toContain("/a2a inbox");
 	expect(help).not.toContain("/a2a join");
-	if (!commandCompletions)
-		throw new Error("a2a command completions were not registered");
-	expect(commandCompletions("").map((item) => item.label)).toEqual([
+	const complete = commandCompletions;
+	if (!complete) throw new Error("a2a command completions were not registered");
+	const rootCompletions = complete("");
+	if (!rootCompletions) throw new Error("expected root a2a completions");
+	expect(rootCompletions.map((item) => item.label)).toEqual([
 		"hub",
 		"project",
 		"connect",
@@ -114,29 +116,27 @@ test("human commands and model tools expose separate A2A surfaces", async () => 
 		"history",
 		"help",
 	]);
-	expect(commandCompletions("project d")).toEqual([
+	expect(complete("project d")).toEqual([
 		{
 			value: "project delete ",
 			label: "delete",
 			description: "Delete a Project and its history",
 		},
 	]);
-	expect(commandCompletions("connect billing ")).toEqual([
+	expect(complete("connect billing ")).toEqual([
 		{
 			value: "connect billing --as ",
 			label: "--as",
 			description: "Set this Presence name",
 		},
 	]);
-	expect(
-		commandCompletions("history --before billing:42 ").map(
-			(item) => item.value,
-		),
-	).toEqual([
+	const historyCompletions = complete("history --before billing:42 ");
+	if (!historyCompletions) throw new Error("expected history flag completions");
+	expect(historyCompletions.map((item) => item.value)).toEqual([
 		"history --before billing:42 --limit ",
 		"history --before billing:42 --from ",
 	]);
-	expect(commandCompletions("history --limit ")).toBeNull();
+	expect(complete("history --limit ")).toBeNull();
 });
 
 test("model tool contract makes replies push-driven instead of history-polled", async () => {
