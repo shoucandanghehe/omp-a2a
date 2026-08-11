@@ -209,3 +209,31 @@ test("receiver injection failure produces a terminal failed delivery", async () 
 	await web.disconnect();
 	await api.disconnect();
 });
+
+test("pre-dispatch message abort sends nothing to history", async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-runtime-abort-"));
+	roots.push(dataDir);
+	const hub = await startHubServer({ port: 0, dataDir });
+	hubs.push(hub);
+	const client = new HubClient(hub.meta.baseUrl);
+	await client.createProject({ name: "runtime-abort" });
+	const api = new A2aRuntime({
+		getClient: async () => client,
+		events: {},
+	});
+	await api.connect("runtime-abort", "api");
+	const controller = new AbortController();
+	controller.abort();
+	await expect(
+		api.message(
+			{
+				target: { type: "project" },
+				text: "must not persist",
+				messageId: "pre-aborted",
+			},
+			{ signal: controller.signal },
+		),
+	).rejects.toThrow("aborted before dispatch");
+	expect(await api.history()).toEqual([]);
+	await api.disconnect();
+});

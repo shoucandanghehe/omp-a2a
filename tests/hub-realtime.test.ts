@@ -1,33 +1,37 @@
 import { afterEach, expect, test } from "bun:test";
 import { mkdtempSync, rmSync } from "node:fs";
+import { createServer } from "node:http";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import WebSocket from "ws";
+import WebSocket, { WebSocketServer } from "ws";
+import { A2aConnection } from "../src/hub/connection";
 import { HubClient } from "../src/hub/client";
 import { decodeTextPayload, encodeTextPayload } from "../src/hub/payload";
 import {
 	A2A_PROTOCOL_VERSION,
+	type ClientFrame,
 	type ServerFrame,
 } from "../src/hub/realtime-types";
 import { type HubServerHandle, startHubServer } from "../src/hub/server";
 
 const roots: string[] = [];
 const hubs: HubServerHandle[] = [];
+const transports: Array<() => Promise<void>> = [];
 
-class FrameQueue {
-	#frames: ServerFrame[] = [];
-	#waiters: Array<(frame: ServerFrame) => void> = [];
+class FrameQueue<Frame = ServerFrame> {
+	#frames: Frame[] = [];
+	#waiters: Array<(frame: Frame) => void> = [];
 
-	push(frame: ServerFrame): void {
+	push(frame: Frame): void {
 		const waiter = this.#waiters.shift();
 		if (waiter) waiter(frame);
 		else this.#frames.push(frame);
 	}
 
-	next(): Promise<ServerFrame> {
+	next(): Promise<Frame> {
 		const frame = this.#frames.shift();
 		if (frame) return Promise.resolve(frame);
-		return new Promise<ServerFrame>((resolve) => this.#waiters.push(resolve));
+		return new Promise<Frame>((resolve) => this.#waiters.push(resolve));
 	}
 }
 
@@ -56,7 +60,71 @@ async function connect(
 	return { socket, frames };
 }
 
+async function startTestTransport(): Promise<{
+	baseUrl: string;
+	socket: Promise<WebSocket>;
+	frames: FrameQueue<ClientFrame>;
+}> {
+	const server = createServer();
+	const websocketServer = new WebSocketServer({ server });
+	const connected = Promise.withResolvers<WebSocket>();
+	const frames = new FrameQueue<ClientFrame>();
+	websocketServer.once("connection", (socket) => {
+		connected.resolve(socket);
+		socket.on("message", (data) =>
+			frames.push(JSON.parse(data.toString()) as ClientFrame),
+		);
+	});
+	await new Promise<void>((resolve, reject) => {
+		server.once("error", reject);
+		server.listen(0, "127.0.0.1", resolve);
+	});
+	const address = server.address();
+	if (!address || typeof address === "string")
+		throw new Error("expected test transport TCP address");
+	transports.push(async () => {
+		for (const socket of websocketServer.clients) socket.terminate();
+		await new Promise<void>((resolve) => websocketServer.close(() => resolve()));
+		await new Promise<void>((resolve) => server.close(() => resolve()));
+	});
+	return {
+		baseUrl: `http://127.0.0.1:${address.port}`,
+		socket: connected.promise,
+		frames,
+	};
+}
+
+function claimedFrame(name: string): ServerFrame {
+	return {
+		type: "claimed",
+		protocolVersion: A2A_PROTOCOL_VERSION,
+		project: "room",
+		self: { name, presenceId: `${name}-presence` },
+		peers: [],
+	};
+}
+
+function acceptedFrame(requestId: string, messageId: string): ServerFrame {
+	return {
+		type: "accepted",
+		requestId,
+		message: {
+			messageId,
+			messageRef: `room:${messageId}`,
+			project: "room",
+			sequence: 1,
+			from: { name: "api", presenceId: "api-presence" },
+			target: { type: "project" },
+			payload: encodeTextPayload("accepted"),
+			attachments: [],
+			createdAt: 1,
+		},
+		recipients: [],
+	};
+}
+
 afterEach(async () => {
+	await Promise.all(transports.splice(0).map((stop) => stop()));
 	await Promise.all(hubs.splice(0).map((hub) => hub.stop()));
 	for (const root of roots.splice(0))
 		rmSync(root, { recursive: true, force: true });
@@ -327,4 +395,312 @@ test("message history survives Hub restart while Presence does not", async () =>
 		peers: [],
 	});
 	replacement.socket.close();
+});
+
+test("client handshake timeout and caller abort leave no socket or Presence", async () => {
+	const stalled = await startTestTransport();
+	const timedOut = expect(
+		A2aConnection.connect({
+			baseUrl: stalled.baseUrl,
+			project: "room",
+			name: "api",
+			timeoutMs: 250,
+		}),
+	).rejects.toThrow("handshake timed out");
+	const stalledSocket = await stalled.socket;
+	const serverObservedClose = Promise.withResolvers<void>();
+	stalledSocket.once("close", () => serverObservedClose.resolve());
+	expect(await stalled.frames.next()).toMatchObject({ type: "hello" });
+	await timedOut;
+	await serverObservedClose.promise;
+
+	const abortedTransport = await startTestTransport();
+	const inFlightController = new AbortController();
+	const abortedHandshake = expect(
+		A2aConnection.connect({
+			baseUrl: abortedTransport.baseUrl,
+			project: "room",
+			name: "api",
+			signal: inFlightController.signal,
+		}),
+	).rejects.toThrow("handshake aborted");
+	const abortedSocket = await abortedTransport.socket;
+	const abortObservedClose = Promise.withResolvers<void>();
+	abortedSocket.once("close", () => abortObservedClose.resolve());
+	expect(await abortedTransport.frames.next()).toMatchObject({ type: "hello" });
+	inFlightController.abort();
+	await abortedHandshake;
+	await abortObservedClose.promise;
+
+	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-abort-"));
+	roots.push(dataDir);
+	const hub = await startHubServer({ port: 0, dataDir });
+	hubs.push(hub);
+	const client = new HubClient(hub.meta.baseUrl);
+	await client.createProject({ name: "abort-room" });
+	const preAborted = new AbortController();
+	preAborted.abort();
+	await expect(
+		A2aConnection.connect({
+			baseUrl: hub.meta.baseUrl,
+			project: "abort-room",
+			name: "api",
+			signal: preAborted.signal,
+		}),
+	).rejects.toThrow("aborted before connecting");
+	expect(await client.deleteProject("abort-room")).toBe(true);
+});
+
+test("close shares one goodbye barrier and releases the name before resolving", async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-goodbye-"));
+	roots.push(dataDir);
+	const hub = await startHubServer({ port: 0, dataDir });
+	hubs.push(hub);
+	const client = new HubClient(hub.meta.baseUrl);
+	await client.createProject({ name: "goodbye-room" });
+	const observer = await connect(hub.meta.baseUrl, "goodbye-room", "observer");
+	await observer.frames.next();
+	const api = await A2aConnection.connect({
+		baseUrl: hub.meta.baseUrl,
+		project: "goodbye-room",
+		name: "api",
+	});
+	expect(await observer.frames.next()).toMatchObject({
+		type: "presence_joined",
+		peer: { name: "api" },
+	});
+
+	const firstClose = api.close();
+	const secondClose = api.close();
+	expect(secondClose).toBe(firstClose);
+	await firstClose;
+	expect(await observer.frames.next()).toMatchObject({
+		type: "presence_left",
+		peer: { name: "api" },
+	});
+
+	const replacement = await A2aConnection.connect({
+		baseUrl: hub.meta.baseUrl,
+		project: "goodbye-room",
+		name: "api",
+	});
+	expect(await observer.frames.next()).toMatchObject({
+		type: "presence_joined",
+		peer: { name: "api" },
+	});
+	await Promise.all([replacement.close(), replacement.close()]);
+	expect(await observer.frames.next()).toMatchObject({
+		type: "presence_left",
+		peer: { name: "api" },
+	});
+	observer.socket.send(JSON.stringify({ type: "goodbye" }));
+	expect(await observer.frames.next()).toEqual({ type: "goodbye" });
+	expect(await client.deleteProject("goodbye-room")).toBe(true);
+	observer.socket.close();
+});
+
+test("close falls back to bounded termination when goodbye and close stall", async () => {
+	const transport = await startTestTransport();
+	const closed = Promise.withResolvers<{ code: number }>();
+	const connecting = A2aConnection.connect({
+		baseUrl: transport.baseUrl,
+		project: "room",
+		name: "api",
+		goodbyeTimeoutMs: 100,
+		closeTimeoutMs: 100,
+		events: { onClose: ({ code }) => closed.resolve({ code }) },
+	});
+	const socket = await transport.socket;
+	expect(await transport.frames.next()).toMatchObject({ type: "hello" });
+	socket.send(JSON.stringify(claimedFrame("api")));
+	const connection = await connecting;
+	const closing = connection.close();
+	expect(await transport.frames.next()).toEqual({ type: "goodbye" });
+	socket.pause();
+	await closing;
+	expect((await closed.promise).code).toBe(1006);
+	socket.resume();
+});
+
+test("aborted and timed out message requests ignore late acceptance and errors", async () => {
+	const transport = await startTestTransport();
+	const unexpectedErrors: Error[] = [];
+	const connecting = A2aConnection.connect({
+		baseUrl: transport.baseUrl,
+		project: "room",
+		name: "api",
+		goodbyeTimeoutMs: 10,
+		closeTimeoutMs: 10,
+		events: { onError: (error) => unexpectedErrors.push(error) },
+	});
+	const socket = await transport.socket;
+	await transport.frames.next();
+	socket.send(JSON.stringify(claimedFrame("api")));
+	const connection = await connecting;
+
+	const controller = new AbortController();
+	const aborted = connection.send(
+		{ target: { type: "project" }, text: "abort", messageId: "abort-message" },
+		{ signal: controller.signal },
+	);
+	const abortedResult = expect(aborted).rejects.toThrow("outcomes are unknown");
+	const abortedFrame = await transport.frames.next();
+	if (abortedFrame.type !== "message")
+		throw new Error("expected aborted message request");
+	controller.abort();
+	await abortedResult;
+	socket.send(
+		JSON.stringify(acceptedFrame(abortedFrame.requestId, "abort-message")),
+	);
+
+	const timedOut = connection.send(
+		{
+			target: { type: "project" },
+			text: "timeout",
+			messageId: "timeout-message",
+		},
+		{ timeoutMs: 10 },
+	);
+	const timedOutResult = expect(timedOut).rejects.toThrow(
+		"outcomes are unknown",
+	);
+	const timedOutFrame = await transport.frames.next();
+	if (timedOutFrame.type !== "message")
+		throw new Error("expected timed out message request");
+	await timedOutResult;
+	socket.send(
+		JSON.stringify({
+			type: "error",
+			requestId: timedOutFrame.requestId,
+			code: "late_error",
+			message: "late request error",
+		}),
+	);
+
+	const final = connection.send({
+		target: { type: "project" },
+		text: "final",
+		messageId: "final-message",
+	});
+	const finalFrame = await transport.frames.next();
+	if (finalFrame.type !== "message")
+		throw new Error("expected final message request");
+	socket.send(JSON.stringify(acceptedFrame(finalFrame.requestId, "final-message")));
+	expect((await final).message.messageId).toBe("final-message");
+	expect(unexpectedErrors).toEqual([]);
+	const closing = connection.close();
+	expect(await transport.frames.next()).toEqual({ type: "goodbye" });
+	socket.send(JSON.stringify({ type: "goodbye" }));
+	await closing;
+});
+
+test("delivery cleanup is fenced by recipient and sender Presence", async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-delivery-cleanup-"));
+	roots.push(dataDir);
+	const hub = await startHubServer({ port: 0, dataDir });
+	hubs.push(hub);
+	const client = new HubClient(hub.meta.baseUrl);
+	await client.createProject({ name: "cleanup" });
+	const sender = await connect(hub.meta.baseUrl, "cleanup", "sender");
+	await sender.frames.next();
+	const recipient = await connect(hub.meta.baseUrl, "cleanup", "recipient");
+	await recipient.frames.next();
+	await sender.frames.next();
+
+	sender.socket.send(
+		JSON.stringify({
+			type: "message",
+			requestId: "recipient-disconnect-request",
+			messageId: "recipient-disconnect",
+			target: { type: "agent", name: "recipient" },
+			payload: encodeTextPayload("recipient leaves"),
+			attachments: [],
+		}),
+	);
+	await recipient.frames.next();
+	await sender.frames.next();
+	recipient.socket.send(JSON.stringify({ type: "goodbye" }));
+	expect(await recipient.frames.next()).toEqual({ type: "goodbye" });
+	expect(await sender.frames.next()).toEqual({
+		type: "delivery",
+		messageId: "recipient-disconnect",
+		to: "recipient",
+		status: "disconnected",
+	});
+	await sender.frames.next();
+
+	const recipientReplacement = await connect(
+		hub.meta.baseUrl,
+		"cleanup",
+		"recipient",
+	);
+	await recipientReplacement.frames.next();
+	await sender.frames.next();
+	recipientReplacement.socket.send(
+		JSON.stringify({ type: "delivered", messageId: "recipient-disconnect" }),
+	);
+	recipientReplacement.socket.send(JSON.stringify({ type: "goodbye" }));
+	expect(await recipientReplacement.frames.next()).toEqual({ type: "goodbye" });
+	await sender.frames.next();
+
+	const recipientTwo = await connect(
+		hub.meta.baseUrl,
+		"cleanup",
+		"recipient",
+	);
+	await recipientTwo.frames.next();
+	await sender.frames.next();
+	sender.socket.send(
+		JSON.stringify({
+			type: "message",
+			requestId: "sender-disconnect-request",
+			messageId: "sender-disconnect",
+			target: { type: "agent", name: "recipient" },
+			payload: encodeTextPayload("sender leaves"),
+			attachments: [],
+		}),
+	);
+	await recipientTwo.frames.next();
+	await sender.frames.next();
+	sender.socket.send(JSON.stringify({ type: "goodbye" }));
+	expect(await sender.frames.next()).toEqual({ type: "goodbye" });
+	expect(await recipientTwo.frames.next()).toMatchObject({
+		type: "presence_left",
+		peer: { name: "sender" },
+	});
+
+	const senderReplacement = await connect(
+		hub.meta.baseUrl,
+		"cleanup",
+		"sender",
+	);
+	await senderReplacement.frames.next();
+	await recipientTwo.frames.next();
+	recipientTwo.socket.send(
+		JSON.stringify({ type: "delivered", messageId: "sender-disconnect" }),
+	);
+	recipientTwo.socket.send(
+		JSON.stringify({
+			type: "message",
+			requestId: "delivery-barrier-request",
+			messageId: "delivery-barrier",
+			target: { type: "agent", name: "sender" },
+			payload: encodeTextPayload("barrier"),
+			attachments: [],
+		}),
+	);
+	expect(await senderReplacement.frames.next()).toMatchObject({
+		type: "message",
+		message: { messageId: "delivery-barrier" },
+	});
+	await recipientTwo.frames.next();
+	senderReplacement.socket.send(
+		JSON.stringify({ type: "delivered", messageId: "delivery-barrier" }),
+	);
+	await recipientTwo.frames.next();
+	senderReplacement.socket.close();
+	recipientTwo.socket.close();
+	sender.socket.close();
+	recipient.socket.close();
+	recipientReplacement.socket.close();
 });

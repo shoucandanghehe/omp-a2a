@@ -35,7 +35,7 @@ On `session_start` and `session_switch`, the extension:
 3. activates the new context and resolves its repository-local configuration;
 4. clears prior desired connection state and auto-connects only when configuration exists and `autoConnect !== false`.
 
-On `session_shutdown`, it clears the active context and desired state, cancels reconnect, and closes the socket. Unexpected socket close schedules reconnect. A `name_in_use` response is terminal for that desired connection rather than repeatedly displacing or retrying the owner.
+On `session_shutdown`, it clears the active context and desired state, cancels reconnect, and performs the shared graceful close. The close sends one `goodbye`, waits up to 1 second for the Hub to release Presence, starts the WebSocket close, and terminates after another 2 seconds if needed. Unexpected socket close schedules reconnect. A `name_in_use` response is terminal for that desired connection rather than repeatedly displacing or retrying the owner.
 
 ### Inbound events
 
@@ -68,7 +68,7 @@ The extension uses the injected ArkType module as the canonical schema authoring
 | Tool | Contract |
 | --- | --- |
 | `a2a_peers` | Returns current peer names from the connected Presence snapshot. |
-| `a2a_message` | Requires a typed direct or Project target and text; accepts optional current-session `local://` attachment sources, `replyTo`, and `messageId`; every description and success result states the push-driven reply control flow. |
+| `a2a_message` | Requires a typed direct or Project target and text; accepts optional current-session `local://` attachment sources, `replyTo`, and `messageId`; forwards the model-call abort signal only to the WebSocket acceptance request; every description and success result states the push-driven reply control flow. |
 | `a2a_history` | Accepts `before`, `after`, `limit`, and `from`; rematerializes persisted attachments into the calling session; it is only for deliberate review of persisted context, never waiting for a new reply. |
 
 Connected model turns receive the current A2A roster name and use only `a2a_peers` results or inbound sender names to address peers; disconnected turns receive no A2A identity prompt. There is no model-side connect/disconnect or Project administration. Replies arrive automatically; after sending, the model continues independent work or ends its turn instead of waiting or polling history.
@@ -77,11 +77,11 @@ Connected model turns receive the current A2A roster name and use only `a2a_peer
 
 `A2aRuntime` owns at most one `A2aConnection`.
 
-- `connect(project, name)` cleanly closes any old connection, obtains the current Hub client, and returns self plus peer snapshot.
-- `disconnect()` is idempotent and clears the stored connection before awaiting close.
+- `connect(project, name)` cleanly closes any old connection, obtains the current Hub client, and returns self plus peer snapshot after the WebSocket claim. The underlying handshake has a 5-second default deadline and supports caller cancellation at the `A2aConnection` seam.
+- `disconnect()` is idempotent and clears the stored connection before awaiting close; the underlying `A2aConnection.close()` shares one goodbye/close Promise across concurrent callers.
 - `peers()` returns the current client-side Presence map.
-- `message()` requires a live connection, sends through it, and decodes the accepted persistent message for callers.
-- `history()` requires a connected Project but uses HTTP through the current Hub client.
+- `message()` requires a live connection, sends through it, forwards an optional caller signal, and decodes the accepted persistent message for callers. The request has a 15-second default deadline; pre-dispatch abort sends nothing, while abort/timeout/close after dispatch reports unknown acceptance and Delivery outcomes without retry.
+- `history()` requires a connected Project but uses HTTP through the current Hub client and does not receive the message caller signal.
 - `status()` combines Hub metadata with connected Presence state.
 - Project create/list/delete are thin HTTP operations and do not require a Presence.
 
@@ -138,7 +138,7 @@ OMP callbacks / slash / tools
 ## Tests touching this directory
 
 - `extension.test.ts`: registered surfaces, help contract, ArkType schemas, multi-level completion, and cross-session attachment snapshot/materialization/history.
-- `operations.test.ts`: runtime connect, snapshots, message and successful/failed Delivery callbacks, and disconnected errors.
+- `operations.test.ts`: runtime connect, snapshots, message cancellation before dispatch, message and successful/failed Delivery callbacks, and disconnected errors.
 - `config.test.ts`: strict configuration parsing and migration failures.
 - `hub-control.test.ts`: public Project control behavior reached through `HubClient`.
 

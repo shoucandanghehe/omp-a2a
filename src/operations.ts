@@ -125,15 +125,21 @@ export class A2aRuntime {
 		return this.#connection.peers();
 	}
 
-	async message(options: {
-		target: MessageRequestTarget;
-		text: string;
-		attachments?: EncodedAttachment[];
-		replyTo?: string;
-		messageId?: string;
-	}): Promise<{ message: MessageView; recipients: string[] }> {
+	async message(
+		options: {
+			target: MessageRequestTarget;
+			text: string;
+			attachments?: EncodedAttachment[];
+			replyTo?: string;
+			messageId?: string;
+		},
+		request: { signal?: AbortSignal } = {},
+	): Promise<{ message: MessageView; recipients: string[] }> {
 		if (!this.#connection) throw new Error("A2A is not connected");
-		const accepted: AcceptedMessage = await this.#connection.send(options);
+		const accepted: AcceptedMessage = await this.#connection.send(
+			options,
+			request,
+		);
 		return {
 			message: this.#view(accepted.message),
 			recipients: accepted.recipients,

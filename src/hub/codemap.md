@@ -48,13 +48,13 @@ The public `baseUrl` reported in Hub metadata can differ from the listen host. C
 
 ### Handshake
 
-1. A new socket must send `hello` within 5 seconds.
+1. A new socket must send `hello`; the client waits at most 5 seconds by default and may cancel through a caller `AbortSignal`.
 2. The frame supplies protocol version, Project, and temporary name.
 3. The Hub verifies the Project and protocol, then claims the name in `PresenceRegistry`.
 4. The claimant receives `claimed` with a new `presenceId` and current peer snapshot.
 5. Existing peers receive `presence_joined`.
 
-One socket can claim one name. One name can be held by one current socket inside a Project. A duplicate fails with `name_in_use`; it never replaces the owner.
+Handshake failure, timeout, or cancellation terminates the unpublished socket and waits for its close before returning. One socket can claim one name. One name can be held by one current socket inside a Project. A duplicate fails with `name_in_use`; it never replaces the owner.
 
 ### Message request
 
@@ -68,15 +68,19 @@ The client sends `message` with `requestId`, opaque `messageId`, typed target, e
 - The sender receives `accepted` with the canonical message and selected recipient names.
 - Each selected socket receives the canonical `message` frame.
 
+The client waits 15 seconds by default for `accepted` or request-scoped `error`. A caller abort before dispatch sends no frame. After `socket.send` succeeds, caller abort, timeout, or transport close reports ordinary error text that acceptance and Delivery outcomes are unknown, removes the request, ignores late replies, and never retries.
+
 ### Delivery
 
-The Hub records selected recipients only in memory. Receiver `delivered` or `delivery_failed` frames resolve the matching `(messageId, recipientPresenceId)` entry and produce a sender Delivery event. If that exact Presence disconnects first, the sender receives `disconnected`.
+The Hub records selected recipients only in memory and fences each entry by sender and recipient `presenceId`. Receiver `delivered` or `delivery_failed` frames resolve the matching `(messageId, recipientPresenceId)` entry and produce one sender Delivery event. If that exact recipient Presence disconnects first, the sender receives `disconnected`; if the sender disconnects first, its entries are deleted silently. Neither case transfers state to a same-named replacement.
 
-`delivered` proves attachment materialization and injection into the receiving OMP extension. `failed` proves that the accepted Message could not be materialized or injected. Neither proves model comprehension or task completion. Delivery state is not history and is never transferred to a same-named replacement socket.
+`delivered` proves attachment materialization and injection into the receiving OMP extension. `failed` proves that the accepted Message could not be materialized or injected. Neither proves model comprehension or task completion. Pending Delivery has no ACK deadline while both Presences stay connected; it remains until receiver result, either Presence leaving, or Hub shutdown.
 
 ### Presence lifetime
 
-`RealtimeHub` pings sockets every 10 seconds. A socket that does not answer the heartbeat is terminated. Close removes the Presence immediately, emits `presence_left`, and resolves its outstanding deliveries as disconnected. Hub shutdown uses the distinct `hub_shutdown` reason.
+Graceful client close sends one `goodbye`. The Hub atomically removes the Presence, cleans related Delivery entries, broadcasts one `presence_left`, and only then acknowledges `goodbye`. The client waits at most 1 second for that acknowledgement, begins WebSocket close, and terminates after another 2 seconds if close stalls. Concurrent close calls share this one flow. An unpublished socket terminates directly.
+
+Legacy transport close and heartbeat timeout enter the same idempotent Hub release path, so a later close callback cannot repeat Presence or Delivery events. Hub shutdown clears all remaining Presence and Delivery state with the distinct `hub_shutdown` reason.
 
 Presence events are realtime-only and never enter `MessageStore`.
 
@@ -162,10 +166,10 @@ Stop closes realtime clients, the HTTP server, message storage, metadata files, 
 
 ## Test coverage
 
-- `hub-realtime.test.ts`: Presence lifetime, duplicate names, direct/broadcast snapshots, Delivery outcomes, attachment persistence, and restart.
+- `hub-realtime.test.ts`: bounded/cancellable handshake, goodbye ordering and fallback termination, concurrent close, Presence lifetime and name reuse, direct/broadcast snapshots, message request cancellation/timeout and late replies, Delivery outcomes and disconnect cleanup, attachment persistence, and restart.
 - `message-store.test.ts`: ordering, attachment-aware idempotency, causal references, filters, protocol version `2`/legacy migration, integrity, and deletion.
 - `hub-control.test.ts`: independent Hubs, Project control, active-Presence deletion rejection, and safe name reuse.
 - `payload.test.ts`: text/binary compression, attachment count, and decoded-size enforcement.
-- `operations.test.ts`: client/runtime integration plus successful and failed Delivery callbacks.
+- `operations.test.ts`: client/runtime integration, pre-dispatch cancellation, and successful/failed Delivery callbacks.
 
 See `scripts/codemap.md` for executable boundary scenarios.

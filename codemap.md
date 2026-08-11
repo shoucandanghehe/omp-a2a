@@ -44,16 +44,18 @@ OMP session
 
 ### Realtime plane
 
-1. `A2aConnection` opens `/v1/connect` and sends a versioned `hello` with Project and name.
+1. `A2aConnection` opens `/v1/connect`, sends a versioned `hello`, and waits at most 5 seconds (or until caller cancellation) for the claim.
 2. `RealtimeHub` verifies the Project and atomically claims the name in `PresenceRegistry`.
 3. The client receives its `presenceId` and the current peer snapshot; current peers receive `presence_joined`.
 4. A message request resolves either one current Presence or the current Project Presence snapshot.
 5. `MessageStore` atomically appends one immutable Message—including encoded attachment content—and assigns the next Project sequence.
 6. The Hub pushes the Message to selected sockets. Each receiver materializes attachments, injects the Message into OMP, then reports `delivered` or `failed`.
 7. The sender receives one in-memory `delivered`, `failed`, or `disconnected` outcome per selected Presence.
-8. Socket close or heartbeat timeout deletes the Presence and broadcasts `presence_left`.
+8. Graceful disconnect uses a `goodbye` barrier: the Hub releases Presence and Delivery state and broadcasts `presence_left` before its acknowledgement. Transport close and heartbeat timeout use the same idempotent release path.
 
-A same-named later connection is a new Presence and never inherits pending delivery. History is never replayed automatically.
+A message acceptance request waits at most 15 seconds and accepts caller cancellation. Cancellation before dispatch sends nothing. Abort, timeout, or close after WebSocket dispatch reports that acceptance and Delivery outcomes are unknown, removes the client request, ignores late replies, and never retries.
+
+A same-named later connection is a new Presence and never inherits pending Delivery. Pending Delivery has no ACK deadline while both Presences remain connected; it ends on receiver result, either Presence leaving, or Hub shutdown. History is never replayed automatically.
 
 ### Persistent message contract
 
@@ -126,7 +128,7 @@ The sender Extension snapshots attachment bytes before sending. Receivers and hi
 
 ## Verification
 
-The local release gate runs Biome, `bun run smoke`, both Bun entry-point builds, and `docker compose config`. It covers Project isolation and deletion, WebSocket Presence and name conflicts, Presence notifications, direct and broadcast routing, successful/failed/disconnected Delivery outcomes, attachment snapshot/materialization/history, persistent history and protocol version `2`/legacy migration, payload limits, Hub restart, extension registration, and command completion.
+The local release gate runs Biome, `bun run smoke`, both Bun entry-point builds, and `docker compose config`. It covers Project isolation and deletion, bounded WebSocket handshake/message/close lifecycles, caller cancellation boundaries, Presence name conflicts and notifications, direct and broadcast routing, successful/failed/disconnected Delivery cleanup, attachment snapshot/materialization/history, persistent history and protocol version `2`/legacy migration, payload limits, Hub restart, extension registration, and command completion.
 
 `bun run smoke:docker` crosses the public HTTP/WebSocket process boundary of the selected running Hub, verifies persisted history, and removes its temporary Project.
 

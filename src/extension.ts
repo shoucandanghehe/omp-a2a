@@ -548,20 +548,23 @@ export default function a2aExtension(pi: ExtensionAPI) {
 			"replyTo?": "string",
 			"messageId?": "string",
 		}),
-		async execute(_id, parameters, _signal, _onUpdate, context) {
+		async execute(_id, parameters, signal, _onUpdate, context) {
 			try {
 				const attachmentSources = parameters.attachments ?? [];
 				const attachments = await snapshotLocalAttachments(
 					attachmentSources,
 					context?.localProtocolOptions,
 				);
-				const accepted = await runtime.message({
-					target: parameters.target as MessageRequestTarget,
-					text: parameters.text,
-					attachments,
-					replyTo: parameters.replyTo,
-					messageId: parameters.messageId,
-				});
+				const accepted = await runtime.message(
+					{
+						target: parameters.target as MessageRequestTarget,
+						text: parameters.text,
+						attachments,
+						replyTo: parameters.replyTo,
+						messageId: parameters.messageId,
+					},
+					{ signal },
+				);
 				const target =
 					parameters.target.type === "project"
 						? `${accepted.recipients.length} Agents`
