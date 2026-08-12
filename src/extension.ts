@@ -323,7 +323,6 @@ export default function a2aExtension(
 	let reconnectTimer: NodeJS.Timeout | undefined;
 	let reconnectDelayMs = 500;
 	let configRevision = 0;
-	let sessionGeneration = 0;
 	let sessionLifecycle = new AbortController();
 	let modelPeerNames = new Set<string>();
 
@@ -419,7 +418,6 @@ export default function a2aExtension(
 				pi.logger?.warn?.(`a2a realtime error: ${error.message}`),
 			onMessage: async (message, connectionToken) => {
 				const context = activeContext;
-				const generation = sessionGeneration;
 				const sessionToken = sessionLifecycle.signal;
 				if (!context)
 					throw new Error("A2A inbound message has no active session");
@@ -434,7 +432,6 @@ export default function a2aExtension(
 				try {
 					signal.throwIfAborted();
 					if (
-						sessionGeneration !== generation ||
 						sessionLifecycle.signal !== sessionToken ||
 						!runtime.isPublishedConnection(connectionToken)
 					) {
@@ -557,7 +554,6 @@ export default function a2aExtension(
 	}
 
 	const activateSession = async (context: ExtensionContext) => {
-		const generation = ++sessionGeneration;
 		sessionLifecycle.abort(new Error("A2A Session changed"));
 		const lifecycle = new AbortController();
 		sessionLifecycle = lifecycle;
@@ -573,23 +569,20 @@ export default function a2aExtension(
 		reconnectTimer = undefined;
 		reconnectDelayMs = 500;
 		await runtime.disconnect();
-		if (sessionGeneration !== generation || sessionLifecycle !== lifecycle)
-			return;
+		if (sessionLifecycle !== lifecycle) return;
 		activeContext = context;
 		let config: A2aLocalConfig | null;
 		try {
 			config = await refreshLocalConfig(context.cwd);
 		} catch (error) {
-			if (sessionGeneration !== generation || sessionLifecycle !== lifecycle)
-				return;
+			if (sessionLifecycle !== lifecycle) return;
 			context.ui.notify(
 				`A2A config error: ${error instanceof Error ? error.message : String(error)}`,
 				"error",
 			);
 			return;
 		}
-		if (sessionGeneration !== generation || sessionLifecycle !== lifecycle)
-			return;
+		if (sessionLifecycle !== lifecycle) return;
 		if (!config || config.autoConnect === false) return;
 		const target = desiredTarget(config.project, config.name);
 		desiredConnection = target;
@@ -621,7 +614,6 @@ export default function a2aExtension(
 		async (_event, context) => await activateSession(context),
 	);
 	pi.on("session_shutdown", async () => {
-		++sessionGeneration;
 		sessionLifecycle.abort(new Error("A2A Session shut down"));
 		modelPeerNames.clear();
 		activeContext = null;
@@ -640,7 +632,6 @@ export default function a2aExtension(
 		description: "A2A realtime chat connection and Project administration",
 		getArgumentCompletions: completeA2aArguments,
 		handler: async (raw, context) => {
-			const generation = sessionGeneration;
 			const sessionToken = sessionLifecycle.signal;
 			activeContext = context;
 			const { positional, flags } = parseArgs(raw);
@@ -774,7 +765,6 @@ export default function a2aExtension(
 					try {
 						signal.throwIfAborted();
 						if (
-							sessionGeneration !== generation ||
 							sessionLifecycle.signal !== sessionToken ||
 							!runtime.isPublishedConnection(connectionToken)
 						)
@@ -793,11 +783,7 @@ export default function a2aExtension(
 				}
 				throw new Error(`unknown subcommand. ${usage()}`);
 			} catch (error) {
-				if (
-					sessionGeneration !== generation ||
-					sessionLifecycle.signal !== sessionToken ||
-					sessionToken.aborted
-				)
+				if (sessionLifecycle.signal !== sessionToken || sessionToken.aborted)
 					return;
 				context.ui.notify(
 					error instanceof Error ? error.message : String(error),
@@ -854,7 +840,6 @@ export default function a2aExtension(
 		parameters: messageParameters,
 		async execute(_id, parameters, callerSignal, _onUpdate, context) {
 			try {
-				const generation = sessionGeneration;
 				const sessionToken = sessionLifecycle.signal;
 				const connectionToken = runtime.connectionToken();
 				const signal = combineAbortSignals(
@@ -871,7 +856,6 @@ export default function a2aExtension(
 				);
 				signal.throwIfAborted();
 				if (
-					sessionGeneration !== generation ||
 					sessionLifecycle.signal !== sessionToken ||
 					!runtime.isPublishedConnection(connectionToken)
 				)
@@ -940,7 +924,6 @@ export default function a2aExtension(
 		parameters: historyParameters,
 		async execute(_id, parameters, callerSignal, _onUpdate, context) {
 			try {
-				const generation = sessionGeneration;
 				const sessionToken = sessionLifecycle.signal;
 				const connectionToken = runtime.connectionToken();
 				const signal = combineAbortSignals(
@@ -960,7 +943,6 @@ export default function a2aExtension(
 				try {
 					signal.throwIfAborted();
 					if (
-						sessionGeneration !== generation ||
 						sessionLifecycle.signal !== sessionToken ||
 						!runtime.isPublishedConnection(connectionToken)
 					)

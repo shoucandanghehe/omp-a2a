@@ -264,9 +264,6 @@ export class A2aConnection {
 	>();
 	#cancelDeliveryOutcomeExpiry: (() => void) | null = null;
 	#deliveryOutcomeScheduler: DeliveryOutcomeScheduler;
-	#transportClosed = false;
-	#handshakeAborted = false;
-	#handshakeAbortReason: unknown;
 	#closeFinalized = false;
 
 	#terminateHandshake(reason: unknown): void {
@@ -553,15 +550,10 @@ export class A2aConnection {
 		);
 		if (!this.#self)
 			this.#rejectReady(
-				this.#handshakeAborted
-					? this.#handshakeAbortReason
-					: new Error(
-							`A2A connection closed (${code}): ${reason || "no reason"}`,
-						),
+				new Error(`A2A connection closed (${code}): ${reason || "no reason"}`),
 			);
 		for (const requestId of this.#pending.keys())
 			this.#rejectPending(requestId, failure);
-		this.#transportClosed = true;
 		this.#deliveryInflight.clear();
 		this.#clearDeliveryOutcomes();
 		this.#resolveGoodbyeWait?.();
@@ -669,7 +661,7 @@ export class A2aConnection {
 		this.#deliveryInflight.set(message.messageId, outcome);
 		void outcome.then((frame) => {
 			if (
-				this.#transportClosed ||
+				this.#closeFinalized ||
 				this.#deliveryInflight.get(message.messageId) !== outcome
 			) {
 				return;
@@ -687,7 +679,7 @@ export class A2aConnection {
 
 	#scheduleDeliveryOutcomeExpiry(): void {
 		if (
-			this.#transportClosed ||
+			this.#closeFinalized ||
 			this.#cancelDeliveryOutcomeExpiry ||
 			this.#deliveryOutcomes.size === 0
 		) {
@@ -728,7 +720,7 @@ export class A2aConnection {
 	async #deliveryOutcome(
 		message: RealtimeMessage,
 	): Promise<DeliveryOutcomeFrame> {
-		if (this.#transportClosed) {
+		if (this.#closeFinalized) {
 			return {
 				type: "delivery_failed",
 				messageId: message.messageId,
@@ -753,7 +745,7 @@ export class A2aConnection {
 	}
 
 	#sendDeliveryOutcome(frame: DeliveryOutcomeFrame): void {
-		if (this.#transportClosed) return;
+		if (this.#closeFinalized) return;
 		try {
 			this.#send(frame);
 		} catch (error) {

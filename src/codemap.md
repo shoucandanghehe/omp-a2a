@@ -21,13 +21,13 @@ The central seam is `A2aRuntime`: extension callbacks and commands depend on one
 
 ## Extension lifecycle
 
-`a2aExtension(pi)` owns the active OMP `ExtensionContext`, an explicit Session generation and AbortController, cached Hub selection plus persistent invalid-config state, the desired `{ hubUrl, client?, project, name }` reconnect target, and one bounded exponential reconnect timer from 500 ms to 10 seconds. `A2aRuntime`, not the Extension, owns connection transitions and published connection lifetime.
+`a2aExtension(pi)` owns the active OMP `ExtensionContext`, one Session lifecycle `AbortController`, cached Hub selection plus persistent invalid-config state, the desired `{ hubUrl, client?, project, name }` reconnect target, and one bounded exponential reconnect timer from 500 ms to 10 seconds. `A2aRuntime`, not the Extension, owns connection transitions and published connection lifetime.
 
 On `session_start` and `session_switch`, the extension:
 
-1. increments the Session generation, aborts the prior Session controller, and synchronously clears the active context, cached Hub selection, desired target, and reconnect timer;
+1. replaces and aborts the prior Session lifecycle controller, then synchronously clears the active context, cached Hub selection, desired target, and reconnect timer;
 2. cancels and awaits the published Presence or pending handshake;
-3. activates the new context and loads its strict repository-local configuration only if no newer Session transition superseded it;
+3. activates the new context and loads its strict repository-local configuration only if that lifecycle is still current;
 4. reports invalid configuration and preserves that error so Hub and Project operations cannot fall back to environment, global, default, or a prior client;
 5. captures the selected Hub URL in the desired target and auto-connects only when configuration is valid, present, and `autoConnect !== false`.
 
@@ -40,7 +40,7 @@ On `session_shutdown`, the extension aborts Session work, clears active and reco
 - Only events from the currently published connection reach the Extension; candidate and retired connection events are discarded.
 - `presence_joined` and `presence_left` always update the UI. Busy sessions receive each change as a hidden-display `a2a-presence` custom message through `steer`. Idle changes are collapsed into at most one joined/left roster delta between the last terminal `agent_end` snapshot and the current Presence; net-zero churn is discarded, and the delta is injected before the next inbound Message or returned by `before_agent_start` for the next model turn.
 - `delivery` reports the selected peer name and terminal `delivered`/`failed`/`disconnected`/`unknown` outcome; failures and unknown outcomes include their error.
-- Duplicate `message` frames for one `messageId` share one in-flight callback or a 10-second terminal outcome cache, so retries reuse one result. Distinct Messages still run serially in Hub-assigned Project sequence. Each callback captures the Session generation and Runtime-owned published-connection token, carries both lifecycle signals through attachment materialization, then verifies both before injecting an `a2a-inbound` OMP custom message through `steer`. Idle sessions start a turn and busy sessions queue the Message into the active turn. Session changes, connection replacement, disconnect, or socket close cancel injection and dispose every uncommitted attachment directory. Candidate and retired sockets fail delivery rather than acknowledging work that never reached the active OMP Session.
+- Duplicate `message` frames for one `messageId` share one in-flight callback or a 10-second terminal outcome cache, so retries reuse one result. Distinct Messages still run serially in Hub-assigned Project sequence. Each callback captures the Session lifecycle token and Runtime-owned published-connection token, carries both through attachment materialization, then verifies both before injecting an `a2a-inbound` OMP custom message through `steer`. Idle sessions start a turn and busy sessions queue the Message into the active turn. Session changes, connection replacement, disconnect, or socket close cancel injection and dispose every uncommitted attachment directory. Candidate and retired sockets fail delivery rather than acknowledging work that never reached the current Session.
 - Socket/protocol errors from the published connection are written to the extension logger.
 
 ## Human command surface

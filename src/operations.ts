@@ -67,7 +67,6 @@ export class A2aRuntime {
 	#getClient: () => Promise<HubClient>;
 	#events: A2aRuntimeEvents;
 	#published: PublishedConnection | null = null;
-	#transition = 0;
 	#candidate: ConnectionCandidate | null = null;
 	#teardown: Promise<void> = Promise.resolve();
 
@@ -120,7 +119,6 @@ export class A2aRuntime {
 		name: string,
 		client?: HubClient | (() => Promise<HubClient>),
 	): Promise<ConnectionResult> {
-		const transition = ++this.#transition;
 		const predecessorCandidate = this.#candidate;
 		const predecessorTeardown = Promise.all([
 			this.#teardown,
@@ -135,7 +133,6 @@ export class A2aRuntime {
 			project,
 			name,
 			client,
-			transition,
 			abort,
 			predecessorTeardown,
 		});
@@ -152,7 +149,6 @@ export class A2aRuntime {
 		project: string;
 		name: string;
 		client?: HubClient | (() => Promise<HubClient>);
-		transition: number;
 		abort: AbortController;
 		predecessorTeardown: Promise<void>;
 	}): Promise<ConnectionResult> {
@@ -160,7 +156,6 @@ export class A2aRuntime {
 			project,
 			name,
 			client: requestedClient,
-			transition,
 			abort,
 			predecessorTeardown,
 		} = options;
@@ -170,9 +165,6 @@ export class A2aRuntime {
 			typeof requestedClient === "function"
 				? await requestedClient()
 				: (requestedClient ?? (await this.#getClient()));
-		if (transition !== this.#transition) {
-			abort.abort(new Error("A2A connection transition superseded"));
-		}
 		abort.signal.throwIfAborted();
 
 		const predecessor = this.#published;
@@ -240,11 +232,7 @@ export class A2aRuntime {
 				},
 			},
 		});
-		if (
-			transition !== this.#transition ||
-			abort.signal.aborted ||
-			candidateClosed
-		) {
+		if (abort.signal.aborted || candidateClosed) {
 			await connection.close();
 			abort.signal.throwIfAborted();
 			throw new Error("A2A connection candidate closed before publication");
@@ -256,10 +244,7 @@ export class A2aRuntime {
 			);
 			await predecessor.connection.close();
 		}
-		if (
-			transition !== this.#transition ||
-			this.#published?.connection !== connection
-		) {
+		if (this.#published?.connection !== connection) {
 			throw new Error("A2A connection transition superseded");
 		}
 		return {
@@ -271,7 +256,6 @@ export class A2aRuntime {
 	}
 
 	async disconnect(): Promise<boolean> {
-		++this.#transition;
 		const candidate = this.#candidate;
 		this.#candidate = null;
 		candidate?.abort.abort(new Error("A2A connection transition disconnected"));
