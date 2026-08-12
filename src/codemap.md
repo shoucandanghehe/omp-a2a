@@ -111,7 +111,7 @@ Global client configuration uses the same authoritative candidate order under `~
 ## Naming contract
 
 - Project: starts alphanumeric, then `[a-zA-Z0-9._-]`, maximum 64 characters.
-- Agent name: starts alphanumeric, then `[a-zA-Z0-9._-]`, maximum 32 characters.
+- Agent name: starts with a Unicode letter or number, then Unicode letters, numbers, marks, or `._-`, maximum 32 characters.
 
 A name identifies only the lifetime of one current WebSocket Presence. It is not durable identity.
 

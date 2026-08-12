@@ -340,6 +340,65 @@ test("transport close releases Presence and allows name reuse", async () => {
 	replacement.socket.close();
 });
 
+test("Unicode Agent names connect and target by up to 32 characters", async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-realtime-"));
+	roots.push(dataDir);
+	const hub = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir,
+	});
+	hubs.push(hub);
+	const client = new HubClient(hub.listenUrl);
+	await client.createProject({ name: "unicode-names" });
+
+	const senderName = "甲".repeat(32);
+	const sender = await connect(hub.listenUrl, "unicode-names", senderName);
+	expect(await sender.frames.next()).toMatchObject({
+		type: "claimed",
+		self: { name: senderName },
+	});
+
+	const receiver = await connect(hub.listenUrl, "unicode-names", "乙");
+	expect(await receiver.frames.next()).toMatchObject({
+		type: "claimed",
+		peers: [{ name: senderName }],
+	});
+	await sender.frames.next();
+	sender.socket.send(
+		JSON.stringify({
+			type: "message",
+			requestId: "unicode-direct",
+			messageId: "unicode-direct",
+			target: { type: "agent", name: "乙" },
+			payload: encodeTextPayload("你好"),
+			attachments: [],
+		}),
+	);
+	expect(await receiver.frames.next()).toMatchObject({
+		type: "message",
+		message: {
+			from: { name: senderName },
+			target: { type: "agent", name: "乙" },
+		},
+	});
+
+	const overlong = await connect(
+		hub.listenUrl,
+		"unicode-names",
+		"甲".repeat(33),
+	);
+	expect(await overlong.frames.next()).toMatchObject({
+		type: "error",
+		code: "claim_rejected",
+		message: `invalid name: ${"甲".repeat(33)}`,
+	});
+
+	sender.socket.close();
+	receiver.socket.close();
+	overlong.socket.terminate();
+});
+
 test("direct messages and broadcasts bind the current concrete Presences", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-realtime-"));
 	roots.push(dataDir);

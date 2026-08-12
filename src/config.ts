@@ -21,7 +21,9 @@ const projectName = trimmedNonBlankString.narrow(
 const agentName = trimmedNonBlankString.narrow(
 	(value, context) =>
 		AGENT_NAME_RE.test(value) ||
-		context.mustBe("a valid Agent name using [a-zA-Z0-9._-], max 32"),
+		context.mustBe(
+			"a valid Agent name using Unicode letters, numbers, marks, or ._-, max 32 characters",
+		),
 );
 
 const localConfigSchema = omptype({
