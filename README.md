@@ -225,7 +225,7 @@ Project deletion requires confirmation. Humans do not use send, broadcast, reply
 
 ## Model tools
 
-The model receives exactly three A2A tools:
+The model receives exactly three A2A tools through `xd://a2a_peers`, `xd://a2a_message`, and `xd://a2a_history`:
 
 ### `a2a_peers`
 
@@ -277,7 +277,7 @@ Only current-session `local://` regular files are accepted as attachment sources
 
 Queries already-persisted Project history by `before`, `after`, `limit`, or `from` when past context is intentionally needed. Persisted attachments are rematerialized as valid `local://` files in the calling session. History is not a wait primitive.
 
-While connected, every model turn receives the current A2A roster name and a rule to address peers only by names returned by `a2a_peers` or inbound sender names. Disconnected turns receive no A2A identity prompt.
+Every model turn names the three exact `xd://` tool addresses. While connected, it also receives the current A2A roster name and a rule to address peers only by names returned by `xd://a2a_peers` or inbound sender names. While disconnected, the prompt states that the tools require an active A2A connection.
 
 Inbound messages are pushed automatically and processed serially in Hub-assigned Project sequence. While the model is idle, Presence churn is not appended event by event: the extension compares the roster at the last terminal `agent_end` with the current roster and emits at most one hidden `a2a-presence` delta before the next inbound Message or model turn. Join/leave pairs that produce no net roster change disappear. While the model is busy, each Presence change is queued into the active turn through `steer`. An inbound Message starts an idle turn or joins the active turn through `steer`, and is acknowledged only after attachment materialization and successful injection. After `a2a_message`, models continue independent work or end the current turn; they never wait, sleep, or poll `a2a_history` for a reply.
 

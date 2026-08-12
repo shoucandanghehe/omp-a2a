@@ -70,7 +70,7 @@ The extension uses the injected ArkType module as the canonical schema authoring
 | `a2a_message` | Requires a typed direct or Project target and text; accepts optional current-session `local://` attachment sources, `replyTo`, and `messageId`; forwards the model-call abort signal only to the WebSocket acceptance request; distinguishes a new acceptance with recipients from `replayed: true` without recipients or redelivery; every result states the push-driven reply control flow. |
 | `a2a_history` | Accepts `before`, `after`, `limit`, and `from`; rematerializes persisted attachments into the calling session; it is only for deliberate review of persisted context, never waiting for a new reply. |
 
-Connected model turns receive the current A2A roster name and use only `a2a_peers` results or inbound sender names to address peers; disconnected turns receive no A2A identity prompt. There is no model-side connect/disconnect or Project administration. Replies arrive automatically; after sending, the model continues independent work or ends its turn instead of waiting or polling history.
+Every model turn receives the exact `xd://` addresses for all three tools. Connected turns also receive the current A2A roster name and use only `a2a_peers` results or inbound sender names to address peers; disconnected turns are told that the tools require an active connection. There is no model-side connect/disconnect or Project administration. Replies arrive automatically; after sending, the model continues independent work or ends its turn instead of waiting or polling history.
 
 ## Runtime interface
 

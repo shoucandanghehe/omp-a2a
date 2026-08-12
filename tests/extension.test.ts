@@ -97,7 +97,11 @@ test("human commands and model tools expose separate A2A surfaces", async () => 
 	expect(tools.sort()).toEqual(["a2a_history", "a2a_message", "a2a_peers"]);
 	if (!beforeAgentStart)
 		throw new Error("A2A identity system prompt was not registered");
-	expect(await beforeAgentStart()).toBeUndefined();
+	expect(await beforeAgentStart()).toEqual({
+		systemPrompt: [
+			"A2A tools are available at xd://a2a_peers, xd://a2a_message, and xd://a2a_history when this Session has an active A2A connection.",
+		],
+	});
 	if (!commandHandler) throw new Error("a2a command was not registered");
 	await commandHandler("help", {
 		cwd: process.cwd(),
@@ -219,7 +223,7 @@ test("model tools stay push-driven and forward history cancellation", async () =
 		if (!beforeAgentStart)
 			throw new Error("A2A identity system prompt was not registered");
 		expect(beforeAgentStart()?.systemPrompt).toEqual([
-			"Your A2A roster name is api. Address peers only by exact names returned by a2a_peers or by sender names in inbound A2A messages.",
+			"Your A2A roster name is api. Use xd://a2a_peers to discover exact peer names and xd://a2a_message to send; address peers only by names returned there or by sender names in inbound A2A messages. Use xd://a2a_history only to review past context.",
 		]);
 		const peersTool = tools.get("a2a_peers");
 		const messageTool = tools.get("a2a_message");
@@ -441,7 +445,7 @@ test("idle Presence changes collapse to the roster delta before the next message
 				display: false,
 			},
 			systemPrompt: [
-				"Your A2A roster name is receiver. Address peers only by exact names returned by a2a_peers or by sender names in inbound A2A messages.",
+				"Your A2A roster name is receiver. Use xd://a2a_peers to discover exact peer names and xd://a2a_message to send; address peers only by names returned there or by sender names in inbound A2A messages. Use xd://a2a_history only to review past context.",
 			],
 		});
 	} finally {
