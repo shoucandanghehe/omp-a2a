@@ -13,6 +13,11 @@ import { type A2aLocalConfig, AGENT_NAME_RE, PROJECT_NAME_RE } from "./types";
 const ASYNC_REPLY_GUIDANCE =
 	"Replies arrive automatically. After sending, continue independent work; if blocked, end the current turn. Never wait, sleep, or poll a2a_history for a reply.";
 
+type ConfigState =
+	| { status: "unloaded" }
+	| { status: "invalid"; error: Error }
+	| { status: "ready"; hubUrl: string; client?: HubClient };
+
 function parseArgs(raw: string): {
 	positional: string[];
 	flags: Record<string, string | boolean>;
@@ -314,33 +319,25 @@ export default function a2aExtension(
 	const snapshotAttachments =
 		dependencies.snapshotAttachments ?? snapshotLocalAttachments;
 
-	let client: HubClient | null = null;
-	let configuredHubUrl: string | undefined;
-	let configError: Error | null = null;
-	let configLoaded = false;
+	let configState: ConfigState = { status: "unloaded" };
 	let activeContext: ExtensionContext | null = null;
 	let desiredConnection: DesiredConnection | null = null;
 	let reconnectTimer: NodeJS.Timeout | undefined;
 	let reconnectDelayMs = 500;
-	let configRevision = 0;
 	let sessionLifecycle = new AbortController();
 	let modelPeerNames = new Set<string>();
 
 	const refreshLocalConfig = async (cwd: string) => {
 		try {
 			const config = loadLocalConfig(cwd);
-			configuredHubUrl = config?.hubUrl;
-			configError = null;
-			configLoaded = true;
-			configRevision += 1;
+			configState = {
+				status: "ready",
+				hubUrl: resolveHubUrl({ hubUrl: config?.hubUrl }),
+			};
 			return config;
 		} catch (error) {
-			configuredHubUrl = undefined;
-			client = null;
 			const failure = error instanceof Error ? error : new Error(String(error));
-			configError = failure;
-			configLoaded = true;
-			configRevision += 1;
+			configState = { status: "invalid", error: failure };
 			desiredConnection = null;
 			clearTimeout(reconnectTimer);
 			reconnectTimer = undefined;
@@ -349,19 +346,15 @@ export default function a2aExtension(
 		}
 	};
 	const ensureClient = async (): Promise<HubClient> => {
-		if (configError) throw configError;
-		if (!configLoaded) {
+		const state = configState;
+		if (state.status === "invalid") throw state.error;
+		if (state.status === "unloaded") {
 			throw new Error("A2A config is not loaded for the active Session");
 		}
-		const revision = configRevision;
-		const target = resolveHubUrl({ hubUrl: configuredHubUrl });
-		if (client?.baseUrl === target) return client;
-		const candidate = await HubClient.connect({ hubUrl: target });
-		if (revision !== configRevision) {
-			if (configError) throw configError;
-			return await ensureClient();
-		}
-		client = candidate;
+		if (state.client) return state.client;
+		const candidate = await HubClient.connect({ hubUrl: state.hubUrl });
+		if (configState !== state) return await ensureClient();
+		state.client = candidate;
 		return candidate;
 	};
 
@@ -370,17 +363,18 @@ export default function a2aExtension(
 	): Promise<HubClient> => {
 		if (target.client) return target.client;
 		target.client =
-			target.hubUrl === resolveHubUrl({ hubUrl: configuredHubUrl })
+			configState.status === "ready" && target.hubUrl === configState.hubUrl
 				? await ensureClient()
 				: await HubClient.connect({ hubUrl: target.hubUrl });
 		return target.client;
 	};
 
-	const desiredTarget = (project: string, name: string): DesiredConnection => ({
-		project,
-		name,
-		hubUrl: resolveHubUrl({ hubUrl: configuredHubUrl }),
-	});
+	const desiredTarget = (project: string, name: string): DesiredConnection => {
+		if (configState.status === "invalid") throw configState.error;
+		if (configState.status === "unloaded")
+			throw new Error("A2A config is not loaded for the active Session");
+		return { project, name, hubUrl: configState.hubUrl };
+	};
 
 	const publishPresenceChange = (
 		name: string,
@@ -407,11 +401,9 @@ export default function a2aExtension(
 			onPresenceJoined: (peer) => publishPresenceChange(peer.name, "joined"),
 			onPresenceLeft: (peer) => publishPresenceChange(peer.name, "left"),
 			onDelivery: (delivery) => {
-				const uncertain =
-					delivery.status === "failed" || delivery.status === "unknown";
 				activeContext?.ui.notify(
-					`[a2a] ${delivery.to} ${delivery.status}${uncertain ? `: ${delivery.error}` : ""}`,
-					uncertain ? "error" : "info",
+					`[a2a] ${delivery.to} ${delivery.status}${delivery.status === "failed" ? `: ${delivery.error}` : ""}`,
+					delivery.status === "failed" ? "error" : "info",
 				);
 			},
 			onError: (error) =>
@@ -559,12 +551,8 @@ export default function a2aExtension(
 		sessionLifecycle = lifecycle;
 		modelPeerNames.clear();
 		activeContext = null;
-		client = null;
-		configuredHubUrl = undefined;
-		configError = null;
-		configLoaded = false;
+		configState = { status: "unloaded" };
 		desiredConnection = null;
-		configRevision += 1;
 		clearTimeout(reconnectTimer);
 		reconnectTimer = undefined;
 		reconnectDelayMs = 500;
@@ -618,11 +606,7 @@ export default function a2aExtension(
 		modelPeerNames.clear();
 		activeContext = null;
 		desiredConnection = null;
-		client = null;
-		configuredHubUrl = undefined;
-		configError = null;
-		configLoaded = false;
-		configRevision += 1;
+		configState = { status: "unloaded" };
 		clearTimeout(reconnectTimer);
 		reconnectTimer = undefined;
 		await runtime.disconnect();
@@ -650,11 +634,11 @@ export default function a2aExtension(
 					);
 					return;
 				}
-				await refreshLocalConfig(context.cwd);
 				if (command === "help" || command === "--help" || command === "-h") {
 					context.ui.notify(usage(), "info");
 					return;
 				}
+				await refreshLocalConfig(context.cwd);
 				if (command === "hub") {
 					const status = await runtime.status();
 					context.ui.notify(

@@ -1,15 +1,11 @@
 import WebSocket from "ws";
-import {
-	decodeTextPayload,
-	encodeTextPayload,
-	parseEncodedAttachments,
-} from "./payload";
+import { encodeTextPayload } from "./payload";
 import {
 	A2A_PROTOCOL_VERSION,
 	type AcceptedMessage,
 	type ClientFrame,
-	DELIVERY_OUTCOME_CACHE_TTL_MS,
 	type DeliveryEvent,
+	decodeRealtimeMessage,
 	isExactGoodbyeFrame,
 	type MessageRequestTarget,
 	type Peer,
@@ -22,19 +18,6 @@ const HANDSHAKE_TIMEOUT_MS = 5_000;
 const MESSAGE_TIMEOUT_MS = 15_000;
 const GOODBYE_TIMEOUT_MS = 1_000;
 const CLOSE_TIMEOUT_MS = 2_000;
-
-export type DeliveryOutcomeScheduler = {
-	now: () => number;
-	schedule: (callback: () => void, delayMs: number) => () => void;
-};
-
-const DEFAULT_DELIVERY_OUTCOME_SCHEDULER: DeliveryOutcomeScheduler = {
-	now: () => performance.now(),
-	schedule(callback, delayMs) {
-		const timer = setTimeout(callback, delayMs);
-		return () => clearTimeout(timer);
-	},
-};
 
 function boundedTimeout(
 	value: number | undefined,
@@ -59,157 +42,45 @@ function unknownMessageOutcome(reason: string): Error {
 		`A2A message acceptance and Delivery outcomes are unknown because ${reason}`,
 	);
 }
-type JsonObject = Record<string, unknown>;
-
-function isJsonObject(value: unknown): value is JsonObject {
-	return typeof value === "object" && value !== null && !Array.isArray(value);
-}
-
-function hasExactKeys(value: JsonObject, expected: readonly string[]): boolean {
-	const keys = Object.keys(value);
-	return (
-		keys.length === expected.length &&
-		keys.every((key) => expected.includes(key))
-	);
-}
-
-function isPeer(value: unknown): value is Peer {
-	return (
-		isJsonObject(value) &&
-		hasExactKeys(value, ["name", "presenceId"]) &&
-		typeof value.name === "string" &&
-		typeof value.presenceId === "string"
-	);
-}
-
-function isMessageTarget(value: unknown): value is RealtimeMessage["target"] {
-	if (!isJsonObject(value) || typeof value.type !== "string") return false;
-	if (value.type === "project") return hasExactKeys(value, ["type"]);
-	if (value.type !== "agent") return false;
-	const expectedKeys =
-		"presenceId" in value ? ["type", "name", "presenceId"] : ["type", "name"];
-	return (
-		hasExactKeys(value, expectedKeys) &&
-		typeof value.name === "string" &&
-		(!("presenceId" in value) || typeof value.presenceId === "string")
-	);
-}
-
-function isEncodedTextPayload(
-	value: unknown,
-): value is RealtimeMessage["payload"] {
-	return (
-		isJsonObject(value) &&
-		hasExactKeys(value, ["encoding", "data"]) &&
-		(value.encoding === "identity" || value.encoding === "gzip+base64") &&
-		typeof value.data === "string"
-	);
-}
-
-function isEncodedAttachment(
-	value: unknown,
-): value is RealtimeMessage["attachments"][number] {
-	if (
-		!isJsonObject(value) ||
-		!hasExactKeys(value, ["name", "payload"]) ||
-		typeof value.name !== "string" ||
-		!isJsonObject(value.payload)
-	) {
-		return false;
-	}
-	return (
-		hasExactKeys(value.payload, ["encoding", "data"]) &&
-		(value.payload.encoding === "base64" ||
-			value.payload.encoding === "gzip+base64") &&
-		typeof value.payload.data === "string"
-	);
-}
-
-function isRealtimeMessage(value: unknown): value is RealtimeMessage {
-	if (!isJsonObject(value)) return false;
-	const expectedKeys =
-		"replyTo" in value
-			? [
-					"messageId",
-					"messageRef",
-					"project",
-					"sequence",
-					"from",
-					"target",
-					"payload",
-					"attachments",
-					"createdAt",
-					"replyTo",
-				]
-			: [
-					"messageId",
-					"messageRef",
-					"project",
-					"sequence",
-					"from",
-					"target",
-					"payload",
-					"attachments",
-					"createdAt",
-				];
-	const structurallyValid =
-		hasExactKeys(value, expectedKeys) &&
-		typeof value.messageId === "string" &&
-		typeof value.messageRef === "string" &&
-		typeof value.project === "string" &&
-		typeof value.sequence === "number" &&
-		Number.isSafeInteger(value.sequence) &&
-		value.sequence > 0 &&
-		isPeer(value.from) &&
-		isMessageTarget(value.target) &&
-		isEncodedTextPayload(value.payload) &&
-		Array.isArray(value.attachments) &&
-		value.attachments.every(isEncodedAttachment) &&
-		typeof value.createdAt === "number" &&
-		Number.isFinite(value.createdAt) &&
-		(!("replyTo" in value) || typeof value.replyTo === "string");
-	if (!structurallyValid) return false;
-	try {
-		decodeTextPayload(value.payload as RealtimeMessage["payload"]);
-		parseEncodedAttachments(value.attachments);
-		return true;
-	} catch {
-		return false;
-	}
-}
-
 function decodeAcceptedFrame(frame: unknown): AcceptedMessage {
+	if (!frame || typeof frame !== "object" || Array.isArray(frame))
+		throw new Error("Invalid accepted frame from A2A Hub");
+	const candidate = frame as Record<string, unknown>;
 	if (
-		!isJsonObject(frame) ||
-		frame.type !== "accepted" ||
-		typeof frame.requestId !== "string" ||
-		typeof frame.replayed !== "boolean" ||
-		!isRealtimeMessage(frame.message)
+		candidate.type !== "accepted" ||
+		typeof candidate.requestId !== "string" ||
+		typeof candidate.replayed !== "boolean"
 	) {
 		throw new Error("Invalid accepted frame from A2A Hub");
 	}
-	if (frame.replayed) {
-		if (!hasExactKeys(frame, ["type", "requestId", "replayed", "message"]))
+	let message: RealtimeMessage;
+	try {
+		message = decodeRealtimeMessage(candidate.message);
+	} catch (error) {
+		throw new Error(
+			`Invalid accepted frame from A2A Hub: ${error instanceof Error ? error.message : String(error)}`,
+		);
+	}
+	if (candidate.replayed) {
+		if (
+			Object.keys(candidate).length !== 4 ||
+			!Object.hasOwn(candidate, "message")
+		) {
 			throw new Error("Invalid accepted replay frame from A2A Hub");
-		return { replayed: true, message: frame.message };
+		}
+		return { replayed: true, message };
 	}
 	if (
-		!hasExactKeys(frame, [
-			"type",
-			"requestId",
-			"replayed",
-			"message",
-			"recipients",
-		]) ||
-		!Array.isArray(frame.recipients) ||
-		!frame.recipients.every((recipient) => typeof recipient === "string")
+		Object.keys(candidate).length !== 5 ||
+		!Array.isArray(candidate.recipients) ||
+		!candidate.recipients.every((recipient) => typeof recipient === "string")
 	) {
 		throw new Error("Invalid new accepted frame from A2A Hub");
 	}
 	return {
 		replayed: false,
-		message: frame.message,
-		recipients: frame.recipients,
+		message,
+		recipients: candidate.recipients,
 	};
 }
 
@@ -257,13 +128,6 @@ export class A2aConnection {
 	#closeTimeoutMs: number;
 	#manualClose = false;
 	#messageQueue = Promise.resolve();
-	#deliveryInflight = new Map<string, Promise<DeliveryOutcomeFrame>>();
-	#deliveryOutcomes = new Map<
-		string,
-		{ frame: DeliveryOutcomeFrame; expiresAt: number }
-	>();
-	#cancelDeliveryOutcomeExpiry: (() => void) | null = null;
-	#deliveryOutcomeScheduler: DeliveryOutcomeScheduler;
 	#closeFinalized = false;
 
 	#terminateHandshake(reason: unknown): void {
@@ -287,14 +151,12 @@ export class A2aConnection {
 		events: A2aConnectionEvents,
 		goodbyeTimeoutMs: number,
 		closeTimeoutMs: number,
-		deliveryOutcomeScheduler: DeliveryOutcomeScheduler,
 	) {
 		this.#project = project;
 		this.#name = name;
 		this.#events = events;
 		this.#goodbyeTimeoutMs = goodbyeTimeoutMs;
 		this.#closeTimeoutMs = closeTimeoutMs;
-		this.#deliveryOutcomeScheduler = deliveryOutcomeScheduler;
 		this.#ready = new Promise<void>((resolve, reject) => {
 			this.#resolveReady = resolve;
 			this.#rejectReady = reject;
@@ -336,7 +198,6 @@ export class A2aConnection {
 		timeoutMs?: number;
 		goodbyeTimeoutMs?: number;
 		closeTimeoutMs?: number;
-		deliveryOutcomeScheduler?: DeliveryOutcomeScheduler;
 	}): Promise<A2aConnection> {
 		if (options.signal?.aborted)
 			throw options.signal.reason instanceof Error
@@ -364,7 +225,6 @@ export class A2aConnection {
 			options.events ?? {},
 			goodbyeTimeoutMs,
 			closeTimeoutMs,
-			options.deliveryOutcomeScheduler ?? DEFAULT_DELIVERY_OUTCOME_SCHEDULER,
 		);
 		const timeoutMs = handshakeTimeoutMs;
 		const abort = () => connection.#terminateHandshake(options.signal?.reason);
@@ -554,8 +414,6 @@ export class A2aConnection {
 			);
 		for (const requestId of this.#pending.keys())
 			this.#rejectPending(requestId, failure);
-		this.#deliveryInflight.clear();
-		this.#clearDeliveryOutcomes();
 		this.#resolveGoodbyeWait?.();
 		try {
 			this.#events.onClose?.({
@@ -595,11 +453,11 @@ export class A2aConnection {
 				this.#events.onPresenceLeft?.({ ...frame.peer }, frame.reason);
 				return;
 			case "message":
-				this.#receiveMessage(frame.message);
+				this.#receiveMessage(decodeRealtimeMessage(frame.message));
 				return;
 			case "delivery":
 				this.#events.onDelivery?.(
-					frame.status === "failed" || frame.status === "unknown"
+					frame.status === "failed"
 						? {
 								messageId: frame.messageId,
 								to: frame.to,
@@ -639,82 +497,10 @@ export class A2aConnection {
 	}
 
 	#receiveMessage(message: RealtimeMessage): void {
-		const cached = this.#deliveryOutcomes.get(message.messageId);
-		if (cached) {
-			if (cached.expiresAt > this.#deliveryOutcomeScheduler.now()) {
-				this.#sendDeliveryOutcome(cached.frame);
-				return;
-			}
-			this.#deliveryOutcomes.delete(message.messageId);
-			this.#rescheduleDeliveryOutcomeExpiry();
-		}
-		const inflight = this.#deliveryInflight.get(message.messageId);
-		if (inflight) {
-			void inflight.then((outcome) => this.#sendDeliveryOutcome(outcome));
-			return;
-		}
-
-		const outcome = this.#messageQueue.then(() =>
-			this.#deliveryOutcome(message),
-		);
-		this.#messageQueue = outcome.then(() => undefined);
-		this.#deliveryInflight.set(message.messageId, outcome);
-		void outcome.then((frame) => {
-			if (
-				this.#closeFinalized ||
-				this.#deliveryInflight.get(message.messageId) !== outcome
-			) {
-				return;
-			}
-			this.#deliveryInflight.delete(message.messageId);
-			const now = this.#deliveryOutcomeScheduler.now();
-			this.#deliveryOutcomes.set(message.messageId, {
-				frame,
-				expiresAt: now + DELIVERY_OUTCOME_CACHE_TTL_MS,
-			});
-			this.#scheduleDeliveryOutcomeExpiry();
+		this.#messageQueue = this.#messageQueue.then(async () => {
+			const frame = await this.#deliveryOutcome(message);
 			this.#sendDeliveryOutcome(frame);
 		});
-	}
-
-	#scheduleDeliveryOutcomeExpiry(): void {
-		if (
-			this.#closeFinalized ||
-			this.#cancelDeliveryOutcomeExpiry ||
-			this.#deliveryOutcomes.size === 0
-		) {
-			return;
-		}
-		const earliest = this.#deliveryOutcomes.values().next().value;
-		if (!earliest) return;
-		const delayMs = Math.max(
-			0,
-			earliest.expiresAt - this.#deliveryOutcomeScheduler.now(),
-		);
-		this.#cancelDeliveryOutcomeExpiry = this.#deliveryOutcomeScheduler.schedule(
-			() => {
-				this.#cancelDeliveryOutcomeExpiry = null;
-				const now = this.#deliveryOutcomeScheduler.now();
-				for (const [messageId, retained] of this.#deliveryOutcomes) {
-					if (retained.expiresAt > now) break;
-					this.#deliveryOutcomes.delete(messageId);
-				}
-				this.#scheduleDeliveryOutcomeExpiry();
-			},
-			delayMs,
-		);
-	}
-
-	#rescheduleDeliveryOutcomeExpiry(): void {
-		this.#cancelDeliveryOutcomeExpiry?.();
-		this.#cancelDeliveryOutcomeExpiry = null;
-		this.#scheduleDeliveryOutcomeExpiry();
-	}
-
-	#clearDeliveryOutcomes(): void {
-		this.#cancelDeliveryOutcomeExpiry?.();
-		this.#cancelDeliveryOutcomeExpiry = null;
-		this.#deliveryOutcomes.clear();
 	}
 
 	async #deliveryOutcome(

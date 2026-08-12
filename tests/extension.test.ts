@@ -1662,16 +1662,15 @@ test("invalid Session config blocks fallback Hub access until a successful reloa
 	const validCwd = join(root, "valid");
 	const invalidCwd = join(root, "invalid");
 	const invalidFile = join(invalidCwd, ".omp", "a2a.yml");
+	const fallbackUrl = "http://fallback.invalid:4173";
 	mkdirSync(join(validCwd, ".omp"), { recursive: true });
 	mkdirSync(join(invalidCwd, ".omp"), { recursive: true });
 	writeFileSync(
 		join(validCwd, ".omp", "a2a.yml"),
-		"project: billing\nname: api\nautoConnect: false\n",
+		`project: billing\nname: api\nhubUrl: ${fallbackUrl}\nautoConnect: false\n`,
 	);
 	writeFileSync(invalidFile, "project: [\nname: api\n");
 
-	const fallbackUrl = "http://fallback.invalid:4173";
-	const previousEnvironmentUrl = process.env.OMP_A2A_HUB_URL;
 	const originalFetch = globalThis.fetch;
 	let fetchCount = 0;
 	const notifications: string[] = [];
@@ -1704,7 +1703,6 @@ test("invalid Session config blocks fallback Hub access until a successful reloa
 		  ) => Promise<void>)
 		| undefined;
 
-	process.env.OMP_A2A_HUB_URL = fallbackUrl;
 	globalThis.fetch = Object.assign(
 		async () => {
 			fetchCount += 1;
@@ -1763,18 +1761,13 @@ test("invalid Session config blocks fallback Hub access until a successful reloa
 
 		writeFileSync(
 			invalidFile,
-			"project: billing\nname: api\nautoConnect: false\n",
+			`project: billing\nname: api\nhubUrl: ${fallbackUrl}\nautoConnect: false\n`,
 		);
 		await commandHandler("hub", invalidContext);
 		expect(fetchCount).toBe(countBeforeBlockedCommands + 2);
 		expect(notifications.at(-1)).toContain(`Hub ${fallbackUrl}`);
 	} finally {
 		globalThis.fetch = originalFetch;
-		if (previousEnvironmentUrl === undefined) {
-			delete process.env.OMP_A2A_HUB_URL;
-		} else {
-			process.env.OMP_A2A_HUB_URL = previousEnvironmentUrl;
-		}
 		rmSync(root, { recursive: true, force: true });
 	}
 });
@@ -1813,15 +1806,13 @@ test("invalid config reload closes fallback Presence and blocks sends without tr
 	let commandHandler:
 		| ((args: string, commandContext: typeof context) => Promise<void>)
 		| undefined;
-	const previousEnvironmentUrl = process.env.OMP_A2A_HUB_URL;
-	process.env.OMP_A2A_HUB_URL = hub.listenUrl;
 
 	try {
 		await client.createProject({ name: project });
 		mkdirSync(join(cwd, ".omp"), { recursive: true });
 		writeFileSync(
 			invalidFile,
-			`project: ${project}\nname: api\nautoConnect: true\n`,
+			`project: ${project}\nname: api\nhubUrl: ${hub.listenUrl}\nautoConnect: true\n`,
 		);
 		observer = await A2aConnection.connect({
 			baseUrl: hub.listenUrl,
@@ -1916,7 +1907,7 @@ test("invalid config reload closes fallback Presence and blocks sends without tr
 		replacement = null;
 		writeFileSync(
 			invalidFile,
-			`project: ${project}\nname: api\nautoConnect: true\n`,
+			`project: ${project}\nname: api\nhubUrl: ${hub.listenUrl}\nautoConnect: true\n`,
 		);
 		awaitingRecovery = true;
 		await sessionSwitch({}, context);
@@ -1938,11 +1929,6 @@ test("invalid config reload closes fallback Presence and blocks sends without tr
 		await replacement?.close();
 		await observer?.close();
 		await hub.stop();
-		if (previousEnvironmentUrl === undefined) {
-			delete process.env.OMP_A2A_HUB_URL;
-		} else {
-			process.env.OMP_A2A_HUB_URL = previousEnvironmentUrl;
-		}
 		rmSync(dataDir, { recursive: true, force: true });
 	}
 });

@@ -21,7 +21,7 @@
 | `presence.ts` | In-memory Project/name/socket indexes. | `PresenceRegistry`, `Presence` |
 | `store.ts` | Versioned SQLite Project metadata, sequences, Messages, history, atomic deletion, idempotency, and fail-closed schema guard. | `HubStore` |
 | `client.ts` | Hub URL resolution and HTTP meta/Project/history client. | `HubClient`, `connectHub`, `resolveHubUrl` |
-| `realtime-types.ts` | Versioned WebSocket frames, public realtime/history shapes, message identifiers, and canonical references. | protocol types, `A2A_PROTOCOL_VERSION`, message reference helpers |
+| `realtime-types.ts` | Versioned WebSocket frames, canonical realtime Message decoding, public realtime/history shapes, message identifiers, and canonical references. | protocol types, `decodeRealtimeMessage`, `A2A_PROTOCOL_VERSION`, message reference helpers |
 | `payload.ts` | Exact payload/attachment wire parsing, canonical Base64 decoding, structural attachment-name validation, and text/binary codecs. | codecs, `parseEncodedAttachments`, `validateAttachmentName` |
 | `data-lock.ts` | Exclusive ownership of one Hub data directory. | `HubDataLock` |
 | `types.ts` | Minimal Hub protocol metadata plus encoded text, binary, and attachment values. | `HubMeta`, encoded payload types |
@@ -71,13 +71,13 @@ The client waits 15 seconds by default for `accepted` or request-scoped `error`;
 
 ### Delivery
 
-The Hub owns exactly one in-memory pending record per `(messageId, recipientPresenceId)`. It stores the original sender socket, original recipient socket and Presence, attempt count, one timer, and a terminal guard. A WebSocket write callback error or delivery ACK timeout retries the same frame only while that socket still owns that Presence. The default policy permits three attempts, with a two-second ACK window and a fixed 100 ms transport-error delay. `RealtimeHub` validates overrides before opening WebSocket or timer resources: attempts must be a finite positive integer no greater than three, and the ACK timeout must be finite, positive, no greater than two seconds, and bounded by the receiver outcome lifetime. Only scheduling is injectable for deterministic timer tests.
+The Hub owns exactly one in-memory pending record per `(messageId, recipientPresenceId)`. It stores the original sender socket and selected recipient socket/Presence for at most two seconds. The Message frame is written once. A receiver `delivered` or `delivery_failed` frame terminalizes the record; a write callback error, recipient departure, or ACK timeout reports `failed` with an explicit unconfirmed reason.
 
-Receiver `A2aConnection` coalesces duplicate `messageId` frames with one in-flight Promise or a terminal outcome cache retained for 10 seconds. Completion order is expiry order, so one timer targets the earliest entry and amortizes cleanup while idle; socket close cancels that timer and clears the cache. Project sequence order remains serial, `onMessage` runs once, and each retry re-sends the cached `delivered` or `delivery_failed` frame. `delivery_failed` is terminal; no error-string retry classification exists.
+Receiver `A2aConnection` processes distinct Message frames serially in Project sequence, invokes `onMessage` once per frame, and immediately returns `delivered` or `delivery_failed`. It keeps no duplicate cache because the Hub never retries.
 
-`delivered` proves attachment materialization and injection into the receiving OMP extension. `failed` records an explicit terminal receiver failure. `disconnected` means the bound recipient Presence left. `unknown` means the finite attempt budget ended without a conclusive ACK or the transport write dispatch result remained uncertain. None proves model comprehension or task completion.
+`delivered` proves attachment materialization and injection into the receiving OMP extension. `failed` records either an explicit receiver failure or an unconfirmed write, disconnect, or timeout. Because an ACK can be lost after successful injection, unconfirmed failure does not prove the receiver missed the Message. Neither result proves model comprehension or task completion.
 
-Receiver result, either Presence leaving, graceful goodbye, heartbeat cleanup, and Hub shutdown all cancel the one timer and terminalize the record at most once. Sender departure deletes its records silently. Recipient departure reports `disconnected` to a still-current sender. A same-named reconnect never inherits the record, and Hub restart retains history without resuming delivery.
+Receiver result, either Presence leaving, graceful goodbye, heartbeat cleanup, the ACK timeout, and Hub shutdown clear the pending record at most once. Sender departure deletes its records silently. A same-named reconnect never inherits a record, and Hub restart retains history without resuming delivery.
 
 ### Presence lifetime
 
@@ -113,7 +113,7 @@ WebSocket -> Presence
 - canonical encoded text and ordered attachment names/content;
 - creation timestamp and optional same-Project causal parent sequence.
 
-Project recipient arrays, pending Delivery, retry attempts, outcome caches, and terminal events are not durable facts.
+Project recipient arrays, pending ACK records, and Delivery events are not durable facts.
 
 Message references use `<project>:<sequence>`. Parsing rejects invalid Project names, non-positive/unsafe sequences, and cross-Project history cursors.
 
@@ -155,7 +155,7 @@ Opening an existing database requires the exact current storage version and the 
 
 ## HTTP client
 
-`resolveHubUrl` precedence is explicit argument, environment, first existing global config, then loopback default. That resolved URL remains authoritative for HTTP and WebSocket connections; `HubClient` strictly decodes only `protocolVersion` from metadata and never replaces its `baseUrl`. Existing malformed global configuration fails immediately. `probeHub` uses a 1.5-second metadata deadline: only a classified `HubTransportError` means unavailable, while expiry propagates the named deadline error.
+`resolveHubUrl` precedence is explicit argument, then the first existing global config. Missing configuration fails explicitly. That resolved URL remains authoritative for HTTP and WebSocket connections; `HubClient` strictly decodes only `protocolVersion` from metadata and never replaces its `baseUrl`. Existing malformed global configuration fails immediately. `probeHub` uses a 1.5-second metadata deadline: only a classified `HubTransportError` means unavailable, while expiry propagates the named deadline error.
 
 `HubClient` gives metadata, Project CRUD, and history requests a 15-second default deadline, composes caller cancellation with that deadline, and keeps the bound active through response-body reading. Fetch and body network failures become `HubTransportError` only after cancellation and deadline expiry are ruled out. One request/JSON seam preserves non-2xx status and URL details, then operation-specific decoders require exact response shapes. History snapshots its query before dispatch and verifies ordering, canonical references, and causal references. Requests are not retried. Realtime operations belong to `A2aConnection`; server routes and realtime claims use the same `HubStore`.
 
@@ -175,7 +175,7 @@ Opening an existing database requires the exact current storage version and the 
 
 ## Test coverage
 
-- `hub-realtime.test.ts`: bounded/cancellable handshake and teardown, exact goodbye ordering, Project claims, persist-before-enumerate routing, replay without redelivery, same-Presence retries, receiver deduplication, terminal Delivery cleanup, attachment persistence, large same-version payload/attachment-count paths, and restart.
+- `hub-realtime.test.ts`: bounded/cancellable handshake and teardown, exact goodbye ordering, Project claims, persist-before-enumerate routing, replay without redelivery, one-shot Delivery acknowledgement/failure cleanup, attachment persistence, large same-version payload/attachment-count paths, and restart.
 - `message-store.test.ts`: Project CRUD/reopen/sorting, atomic delete rollback, ordering, idempotency, causality, cursor/filter/default/explicit-limit behavior, current schema creation/reopen, fail-closed guards, integrity, and deletion.
 - `hub-control.test.ts`: minimal metadata/health, authoritative configured URLs, explicit/wildcard listeners, CLI parsing/executability, deployment limits, independent Hubs, uncapped HTTP request bodies, claim/delete ordering, active-Presence rejection with unchanged history, storage startup rejection, cleanup, and concurrent stop.
 - `payload.test.ts`: identity/gzip/Base64 round trips, compression choice, uncapped attachment parsing, exact wire shapes, safe unique names, and malformed codec failures.

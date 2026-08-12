@@ -4,25 +4,15 @@ import * as path from "node:path";
 import { type as omptype } from "@oh-my-pi/omptype";
 import { parseWithSchema } from "../config-document";
 import { a2aRoot } from "../paths";
-import { type A2aProject, AGENT_NAME_RE, PROJECT_NAME_RE } from "../types";
-import {
-	parseEncodedAttachments,
-	decodeTextPayload as validateEncodedText,
-} from "./payload";
+import { type A2aProject, PROJECT_NAME_RE } from "../types";
 import {
 	A2A_PROTOCOL_VERSION,
-	formatMessageRef,
+	decodeRealtimeMessage,
 	type HistoryPage,
 	type HistoryQuery,
-	MESSAGE_ID_RE,
-	type MessageTarget,
-	type Peer,
-	parseMessageRef,
-	type RealtimeMessage,
 } from "./realtime-types";
-import type { EncodedTextPayload, HubMeta } from "./types";
+import type { HubMeta } from "./types";
 
-const DEFAULT_HUB_URL = "http://127.0.0.1:4173";
 const DEFAULT_REQUEST_TIMEOUT_MS = 15_000;
 const PROBE_TIMEOUT_MS = 1_500;
 
@@ -84,23 +74,6 @@ const PROJECT_KEYS = [
 	"createdAt",
 	"createdByCwd",
 ] as const;
-const PEER_KEYS = ["name", "presenceId"] as const;
-const PROJECT_TARGET_KEYS = ["type"] as const;
-const AGENT_TARGET_KEYS = ["type", "name", "presenceId"] as const;
-const PAYLOAD_KEYS = ["encoding", "data"] as const;
-const ATTACHMENT_KEYS = ["name", "payload"] as const;
-const MESSAGE_KEYS = [
-	"messageId",
-	"messageRef",
-	"project",
-	"sequence",
-	"from",
-	"target",
-	"payload",
-	"attachments",
-	"createdAt",
-	"replyTo",
-] as const;
 
 function record(value: unknown, label: string): Record<string, unknown> {
 	if (!value || typeof value !== "object" || Array.isArray(value))
@@ -119,15 +92,6 @@ function exactRecord(
 			throw new Error(`${label}.${key} is not allowed`);
 	}
 	return candidate;
-}
-
-function assertExactAttachmentKeys(value: unknown): void {
-	if (!Array.isArray(value)) return;
-	for (const [index, candidate] of value.entries()) {
-		const label = `message.attachments[${index}]`;
-		const attachment = exactRecord(candidate, label, ATTACHMENT_KEYS);
-		exactRecord(attachment.payload, `${label}.payload`, PAYLOAD_KEYS);
-	}
 }
 
 function stringField(
@@ -191,88 +155,6 @@ function decodeProject(value: unknown): A2aProject {
 	if (displayName !== undefined) decoded.displayName = displayName;
 	if (description !== undefined) decoded.description = description;
 	if (createdByCwd !== undefined) decoded.createdByCwd = createdByCwd;
-	return decoded;
-}
-
-function decodePeer(value: unknown): Peer {
-	const peer = exactRecord(value, "message.from", PEER_KEYS);
-	const name = stringField(peer, "name", "message.from");
-	if (!AGENT_NAME_RE.test(name))
-		throw new Error("message.from.name is invalid");
-	const presenceId = stringField(peer, "presenceId", "message.from");
-	if (!presenceId) throw new Error("message.from.presenceId must not be empty");
-	return { name, presenceId };
-}
-
-function decodeTarget(value: unknown): MessageTarget {
-	const candidate = record(value, "message.target");
-	const type = stringField(candidate, "type", "message.target");
-	const target = exactRecord(
-		candidate,
-		"message.target",
-		type === "project" ? PROJECT_TARGET_KEYS : AGENT_TARGET_KEYS,
-	);
-	if (type === "project") return { type };
-	if (type !== "agent") throw new Error("message.target.type is invalid");
-	const name = stringField(target, "name", "message.target");
-	if (!AGENT_NAME_RE.test(name))
-		throw new Error("message.target.name is invalid");
-	const presenceId = optionalStringField(
-		target,
-		"presenceId",
-		"message.target",
-	);
-	if (presenceId === "")
-		throw new Error("message.target.presenceId is invalid");
-	return presenceId === undefined ? { type, name } : { type, name, presenceId };
-}
-
-function decodeTextPayload(value: unknown): EncodedTextPayload {
-	const payload = exactRecord(value, "message.payload", PAYLOAD_KEYS);
-	const encoding = stringField(payload, "encoding", "message.payload");
-	const data = stringField(payload, "data", "message.payload");
-	if (encoding !== "identity" && encoding !== "gzip+base64")
-		throw new Error("message.payload.encoding is invalid");
-	const decoded: EncodedTextPayload = { encoding, data };
-	validateEncodedText(decoded);
-	return decoded;
-}
-
-function decodeRealtimeMessage(value: unknown): RealtimeMessage {
-	const message = exactRecord(value, "message", MESSAGE_KEYS);
-	const messageId = stringField(message, "messageId", "message");
-	if (!MESSAGE_ID_RE.test(messageId))
-		throw new Error("message.messageId is invalid");
-	const project = stringField(message, "project", "message");
-	if (!PROJECT_NAME_RE.test(project))
-		throw new Error("message.project is invalid");
-	const sequence = safeIntegerField(message, "sequence", "message", 1);
-	const messageRef = stringField(message, "messageRef", "message");
-	if (messageRef !== formatMessageRef(project, sequence))
-		throw new Error("message.messageRef is not canonical");
-	const payload = decodeTextPayload(message.payload);
-	assertExactAttachmentKeys(message.attachments);
-	const attachments = parseEncodedAttachments(message.attachments);
-	const replyTo = optionalStringField(message, "replyTo", "message");
-	if (replyTo !== undefined) {
-		const reply = parseMessageRef(replyTo);
-		if (reply.project !== project)
-			throw new Error("message.replyTo belongs to another project");
-		if (reply.sequence >= sequence)
-			throw new Error("message.replyTo must precede the message");
-	}
-	const decoded: RealtimeMessage = {
-		messageId,
-		messageRef,
-		project,
-		sequence,
-		from: decodePeer(message.from),
-		target: decodeTarget(message.target),
-		payload,
-		attachments,
-		createdAt: safeIntegerField(message, "createdAt", "message", 0),
-	};
-	if (replyTo !== undefined) decoded.replyTo = replyTo;
 	return decoded;
 }
 
@@ -414,8 +296,6 @@ export function resolveHubUrl(options?: {
 	home?: string;
 }): string {
 	if (options?.hubUrl?.trim()) return stripTrailingSlash(options.hubUrl.trim());
-	const environmentUrl = process.env.OMP_A2A_HUB_URL?.trim();
-	if (environmentUrl) return stripTrailingSlash(environmentUrl);
 	const home = options?.home ?? os.homedir();
 	for (const name of ["config.yml", "config.yaml", "config.json"]) {
 		const file = path.join(a2aRoot(home), name);
@@ -425,7 +305,9 @@ export function resolveHubUrl(options?: {
 		});
 		return stripTrailingSlash(config.hubUrl);
 	}
-	return DEFAULT_HUB_URL;
+	throw new Error(
+		"A2A Hub URL is not configured; set hubUrl in the Project or global A2A config",
+	);
 }
 
 export async function probeHub(baseUrl: string): Promise<HubMeta | null> {
@@ -447,7 +329,7 @@ export async function connectHub(options?: {
 	const meta = await probeHub(baseUrl);
 	if (!meta) {
 		throw new Error(
-			`A2A Hub not reachable at ${baseUrl}. Start it separately with Docker Compose or set OMP_A2A_HUB_URL / hubUrl.`,
+			`A2A Hub not reachable at ${baseUrl}. Start it separately with Docker Compose or configure another hubUrl.`,
 		);
 	}
 	if (meta.protocolVersion !== A2A_PROTOCOL_VERSION) {

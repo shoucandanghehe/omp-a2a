@@ -70,9 +70,8 @@ Cross the deployed process/network boundary rather than proving another in-proce
 
 ### Preconditions
 
-- A Hub is already reachable through normal client URL resolution.
+- A Hub is already reachable at the explicit `OMP_A2A_SMOKE_HUB_URL`, or through normal project/global client configuration.
 - For Compose, run `docker compose --project-name omp-a2a-boundary-smoke up -d --build` first and use the same project name for teardown.
-- `OMP_A2A_HUB_URL` may select a non-default published URL.
 
 ### Scenario
 

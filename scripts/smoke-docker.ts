@@ -14,7 +14,9 @@ function assert(condition: unknown, message: string): asserts condition {
 	if (!condition) throw new Error(`ASSERT: ${message}`);
 }
 
-const client = await HubClient.connect();
+const client = await HubClient.connect({
+	hubUrl: process.env.OMP_A2A_SMOKE_HUB_URL,
+});
 const metaResponse = await fetch(`${client.baseUrl}/v1/meta`);
 assert(
 	metaResponse.ok,

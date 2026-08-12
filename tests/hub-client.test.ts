@@ -14,13 +14,11 @@ import {
 } from "../src/hub/client";
 
 const homes: string[] = [];
-const originalEnvironmentUrl = process.env.OMP_A2A_HUB_URL;
 
 function createHome(): string {
 	const home = mkdtempSync(join(tmpdir(), "omp-a2a-global-config-"));
 	homes.push(home);
 	mkdirSync(join(home, ".omp", "a2a"), { recursive: true });
-	delete process.env.OMP_A2A_HUB_URL;
 	return home;
 }
 
@@ -33,11 +31,6 @@ function writeConfig(home: string, name: string, contents: string): string {
 afterEach(() => {
 	for (const home of homes.splice(0))
 		rmSync(home, { recursive: true, force: true });
-	if (originalEnvironmentUrl === undefined) {
-		delete process.env.OMP_A2A_HUB_URL;
-	} else {
-		process.env.OMP_A2A_HUB_URL = originalEnvironmentUrl;
-	}
 });
 
 test("global YAML preserves a quoted Hub URL", () => {
@@ -48,6 +41,28 @@ test("global YAML preserves a quoted Hub URL", () => {
 		'hubUrl: " http://hub:4173/path#fragment "\n',
 	);
 	expect(resolveHubUrl({ home })).toBe("http://hub:4173/path#fragment");
+});
+
+test("explicit Hub URL overrides global config", () => {
+	const home = createHome();
+	writeConfig(home, "config.yml", "hubUrl: http://global:4173\n");
+	expect(resolveHubUrl({ home, hubUrl: " http://project:4173/ " })).toBe(
+		"http://project:4173",
+	);
+});
+
+test("Hub URL requires project or global configuration", () => {
+	const home = createHome();
+	const previous = process.env.OMP_A2A_HUB_URL;
+	process.env.OMP_A2A_HUB_URL = "http://ignored:4173";
+	try {
+		expect(() => resolveHubUrl({ home })).toThrow(
+			"A2A Hub URL is not configured",
+		);
+	} finally {
+		if (previous === undefined) delete process.env.OMP_A2A_HUB_URL;
+		else process.env.OMP_A2A_HUB_URL = previous;
+	}
 });
 
 test("global config rejects non-object roots and unknown aliases", () => {

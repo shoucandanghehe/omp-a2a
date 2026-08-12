@@ -68,11 +68,11 @@ Repeating an accepted request with the same `messageId` and content returns the 
 
 ### Delivery
 
-Receiving extensions process Messages serially in Hub-assigned Project sequence, materialize all attachments, and inject each OMP message through `steer` delivery. Retries of one `messageId` are coalesced with the original in-flight injection or a 10-second terminal outcome cache, so they resend the same `delivered` or `delivery_failed` result without injecting twice. One earliest-expiry timer removes cached outcomes in completion order even while the connection is idle, and socket close clears both the cache and timer. `delivery_failed` is terminal and is not classified by matching error text.
+Receiving extensions process Messages serially in Hub-assigned Project sequence, materialize all attachments, inject each OMP message through `steer`, and return `delivered` or `delivery_failed`. The Hub pushes each accepted Message once; the receiver does not cache or deduplicate outcomes because the Hub never retries.
 
-The sender receives `delivered`, `failed`, `disconnected`, or `unknown` for each selected Presence. `failed` means the receiver explicitly reported that materialization or injection failed. `disconnected` means the selected Presence left. `unknown` means the finite retry budget ended without a conclusive receiver result—for example, after repeated ACK timeouts or transport writes whose dispatch outcome could not be established. Delivery still proves neither model understanding nor task completion.
+The sender receives `delivered` or `failed` for each selected Presence. `delivered` proves attachment materialization and injection into the receiving OMP extension. `failed` means either the receiver explicitly rejected injection or delivery remained unconfirmed because the socket write failed, the selected Presence disconnected, or no ACK arrived within two seconds. An ACK can be lost after successful injection, so an unconfirmed failure does not prove the receiver missed the Message. Neither state proves model understanding or task completion.
 
-Delivery state is realtime and in-memory. The Hub binds one pending entry to `(messageId, recipientPresenceId)`, the original sender socket, and the original recipient socket. A transport write error or missing ACK retries the same frame only on that same socket while it still owns that same Presence, for at most three attempts in one Hub process. Constructor overrides may only shorten the finite positive integer attempt count or the finite positive two-second ACK window; they cannot extend the protocol retry window beyond the receiver's 10-second outcome retention. A receiver result, either Presence leaving, or Hub shutdown cancels its timer and produces at most one terminal event. A same-named reconnect never inherits the entry.
+Delivery state is realtime and in-memory. The Hub binds one pending entry to `(messageId, recipientPresenceId)`, the original sender socket, and the original recipient socket until one receiver result or the two-second timeout. A same-named reconnect never inherits it.
 
 ACK never deletes message history. A Hub restart retains accepted history but discards in-memory delivery state; it does not enumerate new recipients or resume delivery.
 
@@ -175,14 +175,12 @@ The default data directory is `~/.omp/a2a`. Project metadata and message history
 
 ## Point OMP at a Hub
 
-First match wins:
+Hub URL precedence:
 
 1. Per-repository `.omp/a2a.yml` / `.yaml` / `.json` → `hubUrl`
-2. `OMP_A2A_HUB_URL`
-3. Global `~/.omp/a2a/config.yml` / `.yaml` / `.json`
-4. `http://127.0.0.1:4173`
+2. Global `~/.omp/a2a/config.yml` / `.yaml` / `.json`
 
-The resolved URL is authoritative for HTTP and WebSocket connections. `/v1/meta` validates protocol compatibility but does not replace the configured route.
+If neither level defines `hubUrl`, client operations fail explicitly. The resolved URL is authoritative for HTTP and WebSocket connections. `/v1/meta` validates protocol compatibility but does not replace the configured route.
 
 `GET /v1/meta` returns exactly `{ "protocolVersion": 3 }`. `GET /healthz` returns exactly `{ "ok": true, "service": "omp-a2a-hub" }`; neither response advertises a client route or process/storage details. In-process callers use the server handle's loopback-reachable `listenUrl`.
 
@@ -308,7 +306,7 @@ bun run audit
 docker compose --project-name omp-a2a-boundary-smoke config --quiet
 ```
 
-`bun run verify` is the canonical source gate: zero-warning Biome formatting/lint/import checks, TypeScript 7 strict no-emit checking, both Bun entry-point builds, all Bun tests, and the SQLite Project-store plus live in-process Hub smokes. Coverage includes WebSocket Presence, retries and Delivery outcomes, attachment ownership and history, atomic Project deletion, current unified storage creation/reopen and fail-closed schema guards, uncapped trusted payload and history paths, Hub restart semantics, and command completion. `bun run audit` separately fails on high or critical production-dependency advisories.
+`bun run verify` is the canonical source gate: zero-warning Biome formatting/lint/import checks, TypeScript 7 strict no-emit checking, both Bun entry-point builds, all Bun tests, and the SQLite Project-store plus live in-process Hub smokes. Coverage includes WebSocket Presence, single-attempt Delivery outcomes, attachment ownership and history, atomic Project deletion, current unified storage creation/reopen and fail-closed schema guards, uncapped trusted payload and history paths, Hub restart semantics, and command completion. `bun run audit` separately fails on high or critical production-dependency advisories.
 
 ### Docker boundary
 
@@ -320,7 +318,7 @@ docker compose --project-name omp-a2a-boundary-smoke down --volumes --remove-orp
 
 The dedicated Compose project keeps this disposable smoke volume separate from the operator's normal Hub volume. CI uses the same project name for configuration, startup, failure logs, and unconditional teardown.
 
-`smoke:docker` targets the running Hub selected by `OMP_A2A_HUB_URL`, crosses the public HTTP and WebSocket boundary, verifies persisted history, and deletes its temporary Project. GitHub Actions runs source, production dependency audit, and container gates independently; pins third-party actions by commit SHA; grants read-only repository access; cancels superseded runs; and always removes container resources. Dependabot checks Bun, Actions, and Docker dependencies weekly.
+`smoke:docker` uses `OMP_A2A_SMOKE_HUB_URL` only as its explicit test target, crosses the public HTTP and WebSocket boundary, verifies persisted history, and deletes its temporary Project. GitHub Actions runs source, production dependency audit, and container gates independently; pins third-party actions by commit SHA; grants read-only repository access; cancels superseded runs; and always removes container resources. Dependabot checks Bun, Actions, and Docker dependencies weekly.
 
 The dated tool/version rationale and rejected alternatives are recorded in [`docs/ci-best-practices-2026-08-11.md`](docs/ci-best-practices-2026-08-11.md).
 

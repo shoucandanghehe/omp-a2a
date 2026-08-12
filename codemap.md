@@ -48,14 +48,14 @@ OMP session
 3. The client receives its `presenceId` and the current peer snapshot; current peers receive `presence_joined`.
 4. A direct request checks idempotency, resolves one current Presence, then persists. A Project broadcast persists first and, only for a new acceptance, enumerates current Project Presence once into a local array.
 5. `HubStore` verifies the Project and atomically appends one immutable Message—including encoded attachment content—while assigning the next Project sequence; an identical existing `messageId` returns `replayed`.
-6. The Hub synchronously enqueues the Message to the selected concrete sockets and keeps one bounded in-memory retry record per `(messageId, recipientPresenceId)`.
-7. Each receiver coalesces duplicate frames, materializes attachments, injects the Message once into OMP, then reports or re-reports `delivered` or `delivery_failed`.
-8. The sender receives one terminal in-memory `delivered`, `failed`, `disconnected`, or `unknown` outcome per selected Presence.
+6. The Hub synchronously enqueues the Message once to each selected concrete socket and keeps one bounded in-memory ACK record per `(messageId, recipientPresenceId)`.
+7. Each receiver materializes attachments, injects the Message into OMP, then reports `delivered` or `delivery_failed`.
+8. The sender receives one terminal in-memory `delivered` or `failed` outcome per selected Presence; write errors, disconnects, and a two-second ACK timeout are unconfirmed failures.
 9. Graceful disconnect releases Presence and Delivery state, broadcasts `presence_left`, then acknowledges exact `goodbye` and bounds transport close/termination. Transport close and heartbeat timeout use the same idempotent release path.
 
 A message acceptance request waits at most 15 seconds and accepts caller cancellation. Cancellation before dispatch sends nothing. Abort, timeout, or close after WebSocket dispatch reports that acceptance and Delivery outcomes are unknown, removes the client request, ignores late replies, and never retries.
 
-A same-named later connection is a new Presence and never inherits pending Delivery. Transport write errors and missing ACKs retry the same Message only on the original socket while it still owns the original Presence, for at most three attempts in one Hub process; retry overrides may shorten, never extend, that protocol window. Receiver outcomes use one ordered earliest-expiry timer for their 10-second idle-cleaned cache. Receiver outcomes, either Presence leaving, and Hub shutdown cancel retry timers. Restart retains history but never resumes delivery.
+A same-named later connection is a new Presence and never inherits pending Delivery. The Hub sends each Message once and never retries at the application layer. A receiver result, either Presence leaving, the two-second ACK timeout, or Hub shutdown clears the pending record. Restart retains history but never resumes delivery.
 
 ### Persistent store contract
 
@@ -64,7 +64,7 @@ A same-named later connection is a new Presence and never inherits pending Deliv
 - `messageId` is the persistent idempotency key; conflicting reuse fails and identical reuse returns the canonical Message as `replayed` without Presence enumeration or redelivery.
 - `replyTo` must resolve inside the same Project.
 - Direct messages are bound to the resolved `presenceId`; Project broadcasts persist before one local Presence enumeration and never persist their recipient array.
-- History is append-only until Project deletion. Presence, recipient arrays, retry trackers, and delivery events are not persisted.
+- History is append-only until Project deletion. Presence, recipient arrays, ACK trackers, and delivery events are not persisted.
 - Attachments are ordered immutable values inside a Message. Their names and bytes participate in `messageId` idempotency; they share the Message lifecycle.
 - `messages.sqlite` has an independent storage version. Startup accepts only the exact current version and complete set of current non-internal schema objects; unsupported storage fails closed.
 
@@ -77,11 +77,9 @@ Text below 32 KiB remains identity encoded. Larger text and attachment bytes use
 Hub URL precedence is:
 
 1. repository-local `.omp/a2a.yml`, `.yaml`, or `.json` through `hubUrl`;
-2. `OMP_A2A_HUB_URL`;
-3. global `~/.omp/a2a/config.yml`, `.yaml`, or `.json`;
-4. `http://127.0.0.1:4173`.
+2. global `~/.omp/a2a/config.yml`, `.yaml`, or `.json`.
 
-The resolved client URL is authoritative for HTTP and WebSocket connections. Hub metadata is exactly `{protocolVersion}` and only validates compatibility; health is exactly `{ok:true,service:"omp-a2a-hub"}`. Neither response advertises a route. In-process server callers receive a loopback-reachable `listenUrl`.
+Missing configuration fails explicitly. The resolved client URL is authoritative for HTTP and WebSocket connections. Hub metadata is exactly `{protocolVersion}` and only validates compatibility; health is exactly `{ok:true,service:"omp-a2a-hub"}`. Neither response advertises a route. In-process server callers receive a loopback-reachable `listenUrl`.
 
 Repository-local connection defaults require `project` and `name`; `autoConnect` defaults to enabled. Removed `agentId` and `autoJoin` fields fail with an explicit migration error.
 
@@ -135,7 +133,7 @@ The sender Extension snapshots attachment bytes before sending and fences the fi
 
 ## Verification
 
-`bun run check` enforces zero-warning Biome CI checks and strict TypeScript 7 no-emit checking. `bun run verify` adds both Bun entry-point builds, all Bun tests, the SQLite Project-store smoke, and the live in-process Hub smoke. It covers current storage guards, bounded WebSocket lifecycles, caller cancellation, Presence routing, replay and retries, receiver deduplication, Delivery cleanup, attachment ownership and history, uncapped trusted payload/history behavior, Hub restart/cleanup, extension lifecycle, and command completion. `bun run audit` rejects high or critical advisories in production dependencies.
+`bun run check` enforces zero-warning Biome CI checks and strict TypeScript 7 no-emit checking. `bun run verify` adds both Bun entry-point builds, all Bun tests, the SQLite Project-store smoke, and the live in-process Hub smoke. It covers current storage guards, bounded WebSocket lifecycles, caller cancellation, Presence routing, replay without redelivery, single-attempt Delivery cleanup, attachment ownership and history, uncapped trusted payload/history behavior, Hub restart/cleanup, extension lifecycle, and command completion. `bun run audit` rejects high or critical advisories in production dependencies.
 
 GitHub Actions runs those source and dependency gates alongside an independent Docker Compose job that validates the model, waits for the real container health check, crosses its HTTP/WebSocket boundary with `bun run smoke:docker`, prints logs on failure, and always removes containers and volumes. Third-party actions are commit-SHA pinned; workflow permissions are read-only; superseded runs are cancelled. Dependabot checks the Bun lockfile, action pins, and Docker base image weekly.
 

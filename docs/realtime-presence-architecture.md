@@ -17,7 +17,7 @@ Those mechanics did not match the actual product boundary: independent OMP sessi
 - A **Project** is a persistent room.
 - A **Presence** starts when the Hub accepts `hello` and ends when the Hub runs its idempotent release path. An exact `goodbye` releases it before the old WebSocket transport necessarily finishes closing; transport close and heartbeat timeout are the fallback release triggers.
 - A **Message** is immutable, receives one monotonically increasing Project sequence, and remains until Project deletion. Optional attachments are immutable file-content values inside the Message, not independently identified objects.
-- A **Delivery** is the in-memory outcome for one selected Presence: `delivered`, `failed`, or `disconnected`.
+- A **Delivery** is one in-memory `delivered` or `failed` outcome for one selected Presence.
 
 There is no offline, stale, durable member, recipient cursor, or offline-delivery state. A same-named later connection is a new Presence and inherits nothing from the old socket.
 
@@ -30,7 +30,7 @@ Private protocol version `3` reuses the Hub HTTP server:
 - WebSocket `/v1/connect` carries handshake, Presence events, Messages with inline attachment content, acknowledgments, and Delivery outcomes. Failed handshake teardown preserves whichever timeout, protocol, transport, or caller-cancellation outcome settled first.
 - HTTP carries Hub metadata, Project administration, and explicit history queries.
 - SQLite `messages.sqlite`, owned by the canonical `HubStore`, stores Project metadata, each Project's sequence, and append-only message history with WAL and `synchronous = FULL`.
-- in-memory indexes store Presence and pending delivery.
+- in-memory indexes store Presence and one short-lived ACK record per selected recipient.
 
 Text below 32 KiB stays identity encoded. Larger text uses gzip plus Base64 only when compression is smaller; attachment bytes use Base64 and the same compression rule. Payload and attachment objects have exact wire shapes, Base64 is canonical, and attachment names are unique safe basenames. Matching Hub and Extension versions are trusted for resource use, so Messages, attachments, transport frames, and history responses have no application resource cap or derived byte metadata. Malformed payloads fail loudly; deployment memory and container limits provide resource isolation.
 
@@ -40,7 +40,7 @@ Humans administer Projects and their own connection through `/a2a`. Models recei
 
 `a2a_message` accepts optional current-session `local://` regular-file sources. The sender Extension snapshots their bytes before sending; the Hub never resolves sender-local URLs. Receiving and history-querying Extensions materialize new `local://` copies inside their own sessions before exposing the Message.
 
-Repository configuration uses `name` and `autoConnect`. Removed `agentId` and `autoJoin` fields fail with an explicit migration error.
+Repository configuration uses `name` and `autoConnect`; Hub selection is explicit at the repository or global config level, with no client environment or loopback fallback. Removed `agentId` and `autoJoin` fields fail with an explicit migration error.
 
 ### Storage schema
 
@@ -51,8 +51,8 @@ Repository configuration uses `name` and `autoConnect`. Removed `agentId` and `a
 - Presence state is simple and observable: a successfully claimed socket is present until Hub release; graceful release and bounded transport teardown are separate steps.
 - Missing direct recipients fail immediately instead of creating latent work.
 - Hub restart clears Presence and delivery state but preserves message history.
-- `delivered` proves successful attachment materialization and injection into the receiving OMP extension, not model understanding or task completion. Materialization or injection errors produce a terminal `failed` Delivery.
-- Receiver terminal outcomes live for 10 seconds behind one ordered earliest-expiry timer, so retries cannot reinject during the Hub's bounded retry window and idle connections do not retain expired outcomes. Socket close cancels the timer and clears the cache.
+- `delivered` proves successful attachment materialization and injection into the receiving OMP extension, not model understanding or task completion. Materialization or injection errors produce `failed`; write errors, disconnects, and missing ACKs also produce `failed` with an explicit unconfirmed reason.
+- The Hub sends each Message frame once and retains no receiver outcome cache. An ACK lost after injection can therefore produce an unconfirmed failure even though the receiver injected successfully.
 - Direct routing is not confidential history. Without accounts and authorization, any trusted current Agent can query Project history.
 - Hub and extension must upgrade together because private protocol version `3` requires an exact match and has no compatibility path for version `2` Message frames.
 - Matching-version clients are trusted to produce valid internal payloads. Removing application payload and history resource caps keeps the path linear, while deployment resource isolation contains failures.
@@ -60,7 +60,7 @@ Repository configuration uses `name` and `autoConnect`. Removed `agentId` and `a
 
 ## Verification
 
-The behavior suite and executable smoke scenarios cover duplicate names, immediate Presence removal, direct-target failure, broadcast snapshots, causal replies, retries and deduplication, non-persistent Presence events, bounded teardown, attachment ownership and history, uncapped trusted payload and history paths, failed Delivery, restart persistence, exact current storage guards, the model and human surfaces, and the Docker HTTP/WebSocket boundary.
+The behavior suite and executable smoke scenarios cover duplicate names, immediate Presence removal, direct-target failure, broadcast snapshots, causal replies, single-attempt Delivery acknowledgements and failures, non-persistent Presence events, bounded teardown, attachment ownership and history, uncapped trusted payload and history paths, restart persistence, exact current storage guards, the model and human surfaces, and the Docker HTTP/WebSocket boundary.
 
 ## Deployment
 

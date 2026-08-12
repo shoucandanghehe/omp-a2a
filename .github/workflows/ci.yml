@@ -62,7 +62,7 @@ jobs:
         run: docker compose --project-name omp-a2a-boundary-smoke up --build --wait --wait-timeout 90
       - name: Exercise container boundary
         env:
-          OMP_A2A_HUB_URL: http://127.0.0.1:4173
+          OMP_A2A_SMOKE_HUB_URL: http://127.0.0.1:4173
         run: bun run smoke:docker
       - name: Show container logs on failure
         if: failure()
