@@ -11,6 +11,7 @@ import {
 	type Peer,
 	type RealtimeMessage,
 	type ServerFrame,
+	type UserApprovalReceipt,
 } from "./realtime-types";
 import type { EncodedAttachment } from "./types";
 
@@ -281,6 +282,7 @@ export class A2aConnection {
 			attachments?: EncodedAttachment[];
 			replyTo?: string;
 			messageId?: string;
+			userApproval?: UserApprovalReceipt;
 		},
 		request: { signal?: AbortSignal; timeoutMs?: number } = {},
 	): Promise<AcceptedMessage> {
@@ -306,6 +308,7 @@ export class A2aConnection {
 				payload: encodeTextPayload(options.text),
 				attachments: options.attachments ?? [],
 				replyTo: options.replyTo,
+				userApproval: options.userApproval,
 			};
 			const timer = setTimeout(() => {
 				this.#rejectPending(

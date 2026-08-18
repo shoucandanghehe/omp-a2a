@@ -8,6 +8,7 @@ import type {
 	MessageRequestTarget,
 	Peer,
 	RealtimeMessage,
+	UserApprovalReceipt,
 } from "./hub/realtime-types";
 import type { EncodedAttachment } from "./hub/types";
 import type { A2aProject } from "./types";
@@ -287,6 +288,7 @@ export class A2aRuntime {
 			attachments?: EncodedAttachment[];
 			replyTo?: string;
 			messageId?: string;
+			userApproval?: UserApprovalReceipt;
 		},
 		request: { signal?: AbortSignal; connectionToken?: AbortSignal } = {},
 	): Promise<AcceptedMessageView> {

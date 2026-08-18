@@ -81,15 +81,20 @@ test("one runtime path serves discovery, messaging, delivery, and history", asyn
 		target: { type: "agent", name: "web" },
 		text: "check login",
 		messageId: "runtime-message",
+		userApproval: { kind: "omp-ui" },
 	});
 	expect(accepted).toMatchObject({
 		replayed: false,
-		message: { messageRef: "runtime:1" },
+		message: {
+			messageRef: "runtime:1",
+			userApproval: { kind: "omp-ui" },
+		},
 		recipients: ["web"],
 	});
 	expect(await received).toMatchObject({
 		from: { name: "api" },
 		text: "check login",
+		userApproval: { kind: "omp-ui" },
 	});
 	await expect(
 		api.message({ target: { type: "agent", name: "api" }, text: "self" }),
@@ -100,7 +105,11 @@ test("one runtime path serves discovery, messaging, delivery, and history", asyn
 		status: "delivered",
 	});
 	expect(await api.history()).toMatchObject([
-		{ messageRef: "runtime:1", text: "check login" },
+		{
+			messageRef: "runtime:1",
+			text: "check login",
+			userApproval: { kind: "omp-ui" },
+		},
 	]);
 
 	await web.disconnect();
@@ -108,6 +117,7 @@ test("one runtime path serves discovery, messaging, delivery, and history", asyn
 		target: { type: "agent", name: "web" },
 		text: "check login",
 		messageId: "runtime-message",
+		userApproval: { kind: "omp-ui" },
 	});
 	expect(replayed).toEqual({
 		replayed: true,
@@ -426,7 +436,7 @@ test("superseding a same-name connect waits for the prior candidate teardown", a
 			socket.send(
 				JSON.stringify({
 					type: "claimed",
-					protocolVersion: 3,
+					protocolVersion: A2A_PROTOCOL_VERSION,
 					project: frame.project,
 					self: { name: frame.name, presenceId: `presence-${presence}` },
 					peers: [],
@@ -566,7 +576,7 @@ test("only the latest connection transition can publish or emit events", async (
 		socket.send(
 			JSON.stringify({
 				type: "claimed",
-				protocolVersion: 3,
+				protocolVersion: A2A_PROTOCOL_VERSION,
 				project,
 				self: { name, presenceId: `${name}-presence` },
 				peers: [],

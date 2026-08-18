@@ -53,6 +53,7 @@ test("messages form one immutable sequence per Project", () => {
 		payload: encodeTextPayload("check the login contract"),
 		attachments: [],
 		createdAt: 100,
+		userApproval: { kind: "omp-ui" },
 	});
 	const second = store.append({
 		messageId: "message-2",
@@ -64,15 +65,19 @@ test("messages form one immutable sequence per Project", () => {
 		createdAt: 101,
 		replyTo: first.message.messageRef,
 	});
-
 	expect(first).toMatchObject({
 		replayed: false,
-		message: { sequence: 1, messageRef: "billing:1" },
+		message: {
+			sequence: 1,
+			messageRef: "billing:1",
+			userApproval: { kind: "omp-ui" },
+		},
 	});
 	expect(second).toMatchObject({
 		replayed: false,
 		message: { sequence: 2, messageRef: "billing:2", replyTo: "billing:1" },
 	});
+	expect(second.message.userApproval).toBeUndefined();
 	expect(
 		store
 			.history({ project: "billing", limit: 10 })
@@ -87,8 +92,20 @@ test("messages form one immutable sequence per Project", () => {
 		payload: encodeTextPayload("check the login contract"),
 		attachments: [],
 		createdAt: 999,
+		userApproval: { kind: "omp-ui" },
 	});
 	expect(repeated).toEqual({ replayed: true, message: first.message });
+	expect(() =>
+		store.append({
+			messageId: "message-1",
+			project: "billing",
+			from: { name: "api", presenceId: "presence-api" },
+			target: { type: "agent", name: "web", presenceId: "presence-web" },
+			payload: encodeTextPayload("check the login contract"),
+			attachments: [],
+			createdAt: 100,
+		}),
+	).toThrow(MessageIdConflictError);
 	expect(() =>
 		store.append({
 			messageId: "message-1",
@@ -98,6 +115,7 @@ test("messages form one immutable sequence per Project", () => {
 			payload: encodeTextPayload("different body"),
 			attachments: [],
 			createdAt: 100,
+			userApproval: { kind: "omp-ui" },
 		}),
 	).toThrow(MessageIdConflictError);
 
@@ -107,12 +125,25 @@ test("messages form one immutable sequence per Project", () => {
 		.query<{ name: string }, []>("PRAGMA table_info(messages)")
 		.all()
 		.map((column) => column.name);
+	expect(columns).toContain("user_approved");
+	expect(
+		database
+			.query<{ msg_id: string; user_approved: number }, []>(
+				"SELECT msg_id, user_approved FROM messages ORDER BY project_sequence",
+			)
+			.all(),
+	).toEqual([
+		{ msg_id: "message-1", user_approved: 1 },
+		{ msg_id: "message-2", user_approved: 0 },
+	]);
+	expect(() => database.run("UPDATE messages SET user_approved = 2")).toThrow();
 	expect(columns).not.toContain("uncompressed_bytes");
 	expect(columns).not.toContain("content_bytes");
 	database.close();
 });
 
 test("current storage schema is versioned and reopens", () => {
+	expect(MESSAGE_STORAGE_VERSION).toBe(2);
 	const root = mkdtempSync(join(tmpdir(), "omp-a2a-messages-"));
 	roots.push(root);
 	const databasePath = join(root, "messages.sqlite");
@@ -126,6 +157,7 @@ test("current storage schema is versioned and reopens", () => {
 		payload: encodeTextPayload("persist the current schema"),
 		attachments: [],
 		createdAt: 100,
+		userApproval: { kind: "omp-ui" },
 	});
 	store.close();
 
@@ -142,6 +174,7 @@ test("current storage schema is versioned and reopens", () => {
 			messageId: "current-schema",
 			messageRef: "current:1",
 			attachments: [],
+			userApproval: { kind: "omp-ui" },
 		},
 	]);
 	reopened.close();

@@ -2,7 +2,7 @@ import { AGENT_NAME_RE, PROJECT_NAME_RE } from "../types";
 import { decodeTextPayload, parseEncodedAttachments } from "./payload";
 import type { EncodedAttachment, EncodedTextPayload } from "./types";
 
-export const A2A_PROTOCOL_VERSION = 3;
+export const A2A_PROTOCOL_VERSION = 4;
 export const DELIVERY_ACKNOWLEDGE_TIMEOUT_MS = 2_000;
 
 export const MESSAGE_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
@@ -12,6 +12,7 @@ const PROJECT_TARGET_KEYS = ["type"] as const;
 const AGENT_TARGET_KEYS = ["type", "name", "presenceId"] as const;
 const PAYLOAD_KEYS = ["encoding", "data"] as const;
 const ATTACHMENT_KEYS = ["name", "payload"] as const;
+const USER_APPROVAL_KEYS = ["kind"] as const;
 const MESSAGE_KEYS = [
 	"messageId",
 	"messageRef",
@@ -23,6 +24,7 @@ const MESSAGE_KEYS = [
 	"attachments",
 	"createdAt",
 	"replyTo",
+	"userApproval",
 ] as const;
 
 function record(value: unknown, label: string): Record<string, unknown> {
@@ -127,6 +129,15 @@ function decodePayload(value: unknown): EncodedTextPayload {
 	decodeTextPayload(decoded);
 	return decoded;
 }
+export function decodeUserApprovalReceipt(
+	value: unknown,
+	label = "userApproval",
+): UserApprovalReceipt {
+	const receipt = exactRecord(value, label, USER_APPROVAL_KEYS);
+	if (stringField(receipt, "kind", label) !== "omp-ui")
+		throw new Error(`${label}.kind is invalid`);
+	return { kind: "omp-ui" };
+}
 
 export function decodeRealtimeMessage(value: unknown): RealtimeMessage {
 	const message = exactRecord(value, "message", MESSAGE_KEYS);
@@ -168,6 +179,12 @@ export function decodeRealtimeMessage(value: unknown): RealtimeMessage {
 		createdAt: safeIntegerField(message, "createdAt", "message", 0),
 	};
 	if (replyTo !== undefined) decoded.replyTo = replyTo;
+	if (message.userApproval !== undefined) {
+		decoded.userApproval = decodeUserApprovalReceipt(
+			message.userApproval,
+			"message.userApproval",
+		);
+	}
 	return decoded;
 }
 
@@ -221,6 +238,7 @@ export type Peer = {
 export type MessageTarget =
 	| { type: "agent"; name: string; presenceId?: string }
 	| { type: "project" };
+export type UserApprovalReceipt = { kind: "omp-ui" };
 
 export type MessageRequestTarget =
 	| { type: "agent"; name: string }
@@ -253,6 +271,7 @@ export type RealtimeMessage = {
 	attachments: EncodedAttachment[];
 	createdAt: number;
 	replyTo?: string;
+	userApproval?: UserApprovalReceipt;
 };
 
 export type HistoryQuery = {
@@ -277,6 +296,7 @@ export type ClientFrame =
 			payload: EncodedTextPayload;
 			attachments: EncodedAttachment[];
 			replyTo?: string;
+			userApproval?: UserApprovalReceipt;
 	  }
 	| { type: "delivered"; messageId: string }
 	| { type: "delivery_failed"; messageId: string; error: string }

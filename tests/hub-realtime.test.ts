@@ -126,6 +126,7 @@ function messageFromDraft(draft: MessageDraft): RealtimeMessage {
 		attachments: draft.attachments,
 		createdAt: draft.createdAt,
 		replyTo: draft.replyTo,
+		userApproval: draft.userApproval,
 	};
 }
 
@@ -203,6 +204,7 @@ function acceptedFrame(
 			payload: encodeTextPayload("accepted"),
 			attachments: [],
 			createdAt: 1,
+			userApproval: undefined,
 		},
 		recipients: [],
 	};
@@ -376,6 +378,7 @@ test("direct messages and broadcasts bind the current concrete Presences", async
 			target: { type: "agent", name: "web" },
 			payload: encodeTextPayload("check login"),
 			attachments: [],
+			userApproval: { kind: "omp-ui" },
 		}),
 	);
 	const direct = await web.frames.next();
@@ -385,6 +388,7 @@ test("direct messages and broadcasts bind the current concrete Presences", async
 			messageId: "direct-1",
 			messageRef: "chat:1",
 			from: { name: "api" },
+			userApproval: { kind: "omp-ui" },
 		},
 	});
 	if (direct.type !== "message") throw new Error("expected message frame");
@@ -393,6 +397,7 @@ test("direct messages and broadcasts bind the current concrete Presences", async
 		type: "accepted",
 		requestId: "request-direct",
 		replayed: false,
+		message: { userApproval: { kind: "omp-ui" } },
 		recipients: ["web"],
 	});
 	web.socket.send(JSON.stringify({ type: "delivered", messageId: "direct-1" }));
@@ -413,14 +418,16 @@ test("direct messages and broadcasts bind the current concrete Presences", async
 			attachments: [],
 		}),
 	);
-	expect(await web.frames.next()).toMatchObject({
-		type: "message",
-		message: { messageId: "broadcast-1" },
-	});
-	expect(await testPeer.frames.next()).toMatchObject({
-		type: "message",
-		message: { messageId: "broadcast-1" },
-	});
+	const unsignedWeb = await web.frames.next();
+	if (unsignedWeb.type !== "message")
+		throw new Error("expected unsigned message frame");
+	expect(unsignedWeb.message.messageId).toBe("broadcast-1");
+	expect(unsignedWeb.message.userApproval).toBeUndefined();
+	const unsignedTest = await testPeer.frames.next();
+	if (unsignedTest.type !== "message")
+		throw new Error("expected unsigned message frame");
+	expect(unsignedTest.message.messageId).toBe("broadcast-1");
+	expect(unsignedTest.message.userApproval).toBeUndefined();
 	expect(await api.frames.next()).toMatchObject({
 		type: "accepted",
 		requestId: "request-broadcast",
@@ -486,6 +493,7 @@ test("direct messages and broadcasts bind the current concrete Presences", async
 			target: { type: "agent", name: "web" },
 			payload: encodeTextPayload("check login"),
 			attachments: [],
+			userApproval: { kind: "omp-ui" },
 		}),
 	);
 	const replayed = await api.frames.next();
@@ -500,10 +508,18 @@ test("direct messages and broadcasts bind the current concrete Presences", async
 	const replacementClaimed = await replacement.frames.next();
 	if (replacementClaimed.type !== "claimed")
 		throw new Error("expected replacement claim");
-	const pendingMessage = (
-		await client.history({ project: "chat", from: "api" })
-	).messages.find((message) => message.messageId === "disconnect-1");
-	expect(pendingMessage?.target).toMatchObject({ type: "agent", name: "web" });
+	const history = (await client.history({ project: "chat", from: "api" }))
+		.messages;
+	expect(
+		history.find((message) => message.messageId === "direct-1")?.userApproval,
+	).toEqual({ kind: "omp-ui" });
+	expect(
+		history.find((message) => message.messageId === "broadcast-1")
+			?.userApproval,
+	).toBeUndefined();
+	const pendingMessage = history.find(
+		(message) => message.messageId === "disconnect-1",
+	);
 	if (pendingMessage?.target.type !== "agent")
 		throw new Error("expected direct target");
 	expect(pendingMessage.target.presenceId).not.toBe(
@@ -514,6 +530,49 @@ test("direct messages and broadcasts bind the current concrete Presences", async
 	api.socket.close();
 	// web closed above to prove pending delivery does not survive its Presence.
 	testPeer.socket.close();
+});
+
+test("the Hub rejects malformed user approval receipts without persistence", async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-realtime-"));
+	roots.push(dataDir);
+	const hub = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir,
+	});
+	hubs.push(hub);
+	const client = new HubClient(hub.listenUrl);
+	await client.createProject({ name: "approval-shape" });
+	const api = await connect(hub.listenUrl, "approval-shape", "api");
+	await api.frames.next();
+
+	const malformedReceipts = [
+		{ kind: "other-ui" },
+		{ kind: "omp-ui", unexpected: true },
+	];
+	for (const [index, userApproval] of malformedReceipts.entries()) {
+		const requestId = `malformed-approval-${index}`;
+		api.socket.send(
+			JSON.stringify({
+				type: "message",
+				requestId,
+				messageId: requestId,
+				target: { type: "project" },
+				payload: encodeTextPayload("must not persist"),
+				attachments: [],
+				userApproval,
+			}),
+		);
+		expect(await api.frames.next()).toMatchObject({
+			type: "error",
+			requestId,
+			code: "message_rejected",
+		});
+	}
+	expect(
+		(await client.history({ project: "approval-shape" })).messages,
+	).toEqual([]);
+	api.socket.close();
 });
 
 test("message history survives Hub restart while Presence does not", async () => {
@@ -1128,6 +1187,32 @@ test("malformed accepted frames reject the matching request", async () => {
 				return {
 					...accepted,
 					message: { ...accepted.message, unexpected: true },
+				};
+			},
+		},
+		{
+			name: "canonical message with an invalid approval kind",
+			frame(requestId, messageId) {
+				const accepted = acceptedFrame(requestId, messageId);
+				return {
+					...accepted,
+					message: {
+						...accepted.message,
+						userApproval: { kind: "other-ui" },
+					},
+				};
+			},
+		},
+		{
+			name: "canonical message with approval receipt fields",
+			frame(requestId, messageId) {
+				const accepted = acceptedFrame(requestId, messageId);
+				return {
+					...accepted,
+					message: {
+						...accepted.message,
+						userApproval: { kind: "omp-ui", unexpected: true },
+					},
 				};
 			},
 		},

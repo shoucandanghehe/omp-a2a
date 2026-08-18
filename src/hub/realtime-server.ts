@@ -7,6 +7,7 @@ import {
 	A2A_PROTOCOL_VERSION,
 	type ClientFrame,
 	DELIVERY_ACKNOWLEDGE_TIMEOUT_MS,
+	decodeUserApprovalReceipt,
 	isExactGoodbyeFrame,
 	type ServerFrame,
 } from "./realtime-types";
@@ -300,6 +301,13 @@ export class RealtimeHub {
 			) {
 				throw new Error("recipient name is required");
 			}
+			const userApproval =
+				frame.userApproval === undefined
+					? undefined
+					: decodeUserApprovalReceipt(
+							frame.userApproval,
+							"message.userApproval",
+						);
 
 			const draft: MessageDraft = {
 				messageId: frame.messageId,
@@ -313,6 +321,7 @@ export class RealtimeHub {
 				attachments: frame.attachments,
 				createdAt: Date.now(),
 				replyTo: frame.replyTo,
+				userApproval,
 			};
 			let recipients: Presence[];
 			let appended: MessageAppendResult;

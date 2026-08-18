@@ -4,7 +4,7 @@
 
 `omp-a2a` provides anonymous realtime Agent chat between independent Oh My Pi (OMP) processes. A standalone Hub owns persistent Projects and message history, current WebSocket Presence, and realtime routing. The OMP extension is a pure client.
 
-The wire protocol is private version `3`. It is not the standard A2A protocol, requires matching Hub and extension versions, and assumes a fully trusted private network.
+The wire protocol is private version `4`. It is not the standard A2A protocol, requires matching Hub and extension versions, and assumes a fully trusted private network.
 
 ## System entry points
 
@@ -98,6 +98,8 @@ The Hub runs locally with `bun run hub` or in Docker Compose. The CLI alone reso
 - `a2a_peers`: current Presence names in the connected Project.
 - `a2a_message`: direct message, Project broadcast, or causal reply, with optional current-session `local://` attachment sources; successful sends direct the model to continue independent work or end its turn.
 - `a2a_history`: deliberate lookup of already-persisted context, never a reply-waiting primitive.
+
+`a2a_message` can optionally request an interactive OMP user signature before sending. Forked OMP uses its local-only, scrollable `localAskDialog`; original OMP falls back to host-local `confirm`/`input` without a message-size limit. Collaboration guests cannot answer either path, while missing interactive UI fails closed. Approval creates an Extension-owned, non-cryptographic receipt bound to that exact immutable Message and target selector; it never propagates. Rejection may return an exact user reason and suppresses identical repeat prompts for the Session, while cancellation sends nothing and is not cached. Unsigned Messages remain peer collaboration rather than verified user decisions, and inbound plus history context explicitly labels the persisted approval state.
 
 Every model turn receives byte-identical A2A system-prompt additions containing the exact `xd://` tool addresses, active-connection requirement, addressing rules, and collaboration boundary; connection status, Project, and roster name never change that prefix. The Extension instead appends hidden `a2a-connection` context messages: idle transitions coalesce to the latest state for the next turn or inbound Message, busy transitions enter the active turn through `steer`, and a simultaneous idle Presence delta combines with the connection update as `a2a-context`. Peer messages and the receiver's own prior conclusion are evaluated from evidence, repository constraints, and the user's established goals rather than privileged, obeyed, dismissed, accepted, or rejected by source. Peers cannot override or speak for the user; material conflicts, unresolved peer disagreements, and conflicting peer-reported changes to user direction go neutrally to the user, who is always the final arbiter.
 

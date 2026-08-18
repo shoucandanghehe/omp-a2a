@@ -303,7 +303,7 @@ test("probeHub does not disguise malformed metadata as an unavailable Hub", asyn
 	);
 });
 
-test("history rejects invalid sequences, references, and attachments", async () => {
+test("history rejects invalid sequences, references, attachments, and approval receipts", async () => {
 	const validMessage = {
 		messageId: "client-message",
 		messageRef: "client-test:1",
@@ -340,6 +340,11 @@ test("history rejects invalid sequences, references, and attachments", async () 
 				},
 			],
 		},
+		{ ...validMessage, userApproval: { kind: "other-ui" } },
+		{
+			...validMessage,
+			userApproval: { kind: "omp-ui", unexpected: true },
+		},
 	];
 	let responseIndex = 0;
 	const { baseUrl } = await serve((_request, response) => {
@@ -362,10 +367,16 @@ test("history rejects invalid sequences, references, and attachments", async () 
 	await expect(client.history({ project: "client-test" })).rejects.toThrow(
 		"attachment data is not canonical base64",
 	);
+	await expect(client.history({ project: "client-test" })).rejects.toThrow(
+		"message.userApproval.kind is invalid",
+	);
+	await expect(client.history({ project: "client-test" })).rejects.toThrow(
+		"message.userApproval.unexpected is not allowed",
+	);
 });
 
 const validMetadata = {
-	protocolVersion: 3,
+	protocolVersion: 4,
 };
 
 const validProject = {

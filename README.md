@@ -21,7 +21,7 @@ omp-a2a-hub
 - **Extension:** a pure client. It never starts the Hub or reads the Hub data directory.
 - **Docker:** only keeps the Hub running. Users manage Projects and their own connection through `/a2a` commands.
 - **Multiple Hubs:** supported when each Hub has a different URL and data directory. Same-named Projects on different Hubs are unrelated.
-- **Wire protocol:** private protocol version `3`; Hub and extension reject mismatched versions. It is not the standard A2A protocol.
+- **Wire protocol:** private protocol version `4`; Hub and extension reject mismatched versions. It is not the standard A2A protocol.
 
 ## Domain model
 
@@ -182,7 +182,7 @@ Hub URL precedence:
 
 If neither level defines `hubUrl`, client operations fail explicitly. The resolved URL is authoritative for HTTP and WebSocket connections. `/v1/meta` validates protocol compatibility but does not replace the configured route.
 
-`GET /v1/meta` returns exactly `{ "protocolVersion": 3 }`. `GET /healthz` returns exactly `{ "ok": true, "service": "omp-a2a-hub" }`; neither response advertises a client route or process/storage details. In-process callers use the server handle's loopback-reachable `listenUrl`.
+`GET /v1/meta` returns exactly `{ "protocolVersion": 4 }`. `GET /healthz` returns exactly `{ "ok": true, "service": "omp-a2a-hub" }`; neither response advertises a client route or process/storage details. In-process callers use the server handle's loopback-reachable `listenUrl`.
 
 Per-repository auto-connect example:
 
@@ -273,6 +273,12 @@ Message with a session-local attachment:
 
 Only current-session `local://` regular files are accepted as attachment sources. Source URLs are never sent to or resolved by the Hub.
 
+To carry explicit user authorization, set `"requestUserSignature": true`. On the forked OMP, the Extension uses the local-only, scrollable `localAskDialog` to display a control-safe JSON review of the exact target, text, causal parent, attachment sources, and attachment payload hashes. On original OMP builds without that interface, it falls back to the existing host-local `confirm` and `input` dialogs without imposing a message-size limit. Collaboration guests cannot answer either path. Choosing Sign sends the Message; choosing Reject opens a local optional-reason input; Escape cancels. Approval adds a non-cryptographic `omp-ui` receipt to that one immutable Message; the receipt applies only to its exact content and target selector and never propagates through forwarding. A rejection returns its reason unchanged and sends nothing. Repeating the same rejected Project, target, text, causal parent, and attachment content in the same Session returns the prior rejection without opening another prompt; changing any of those facts permits a new request. Cancelling is not cached. Missing interactive UI fails closed before attachment snapshotting.
+
+Unsigned Messages remain ordinary peer collaboration rather than verified user decisions. Inbound and history context uses structured JSON metadata whose `userApproval` field is `confirmed` or `none`; only the Extension-generated confirmed value is authoritative. Peer text is JSON-escaped so it cannot create a second metadata record or manufacture approval.
+
+The `omp-ui` receipt is a trusted-client UI provenance marker, not authenticated identity. The Hub validates and persists its shape but cannot prove that a UI event created it; a custom or malicious client can forge the field. This matches the product's self-developed-client, trusted-private-network boundary.
+
 ### `a2a_history`
 
 Queries already-persisted Project history by `before`, `after`, `limit`, or `from` when past context is intentionally needed. Persisted attachments are rematerialized as valid `local://` files in the calling session. History is not a wait primitive.
@@ -288,7 +294,7 @@ Inbound messages are pushed automatically and processed serially in Hub-assigned
 - Payload objects contain exactly `encoding` and `data`; attachment objects contain exactly `name` and `payload`. Attachment names are unique, nonblank basenames without control characters or path segments.
 - Messages, attachments, WebSocket frames, JSON bodies, and history responses have no application-level resource cap.
 - History keeps stable Project-sequence cursors, a default 50-item page, and accepts any explicit positive integer limit without silent truncation.
-- `messageId` is an opaque idempotency key. Reusing it with different text, attachment names, attachment order, attachment content, target, or causal parent fails. Reusing it with identical content returns the prior acceptance without redelivery.
+- `messageId` is an opaque idempotency key. Reusing it with different text, attachment names, attachment order, attachment content, target, causal parent, or user-approval receipt fails. Reusing it with identical content returns the prior acceptance without redelivery.
 - Project metadata and history share one SQLite database using WAL with `synchronous = FULL`; it stores canonical encoded payload fields rather than derived byte counts.
 - Project deletion atomically removes metadata, Project sequence, and complete history; it needs no deletion marker or reconciliation path.
 - The Hub data directory has an exclusive lock; two Hub processes cannot write the same data.

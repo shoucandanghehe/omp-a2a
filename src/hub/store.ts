@@ -6,6 +6,7 @@ import type { A2aProject } from "../types";
 import { AGENT_NAME_RE, PROJECT_NAME_RE } from "../types";
 import { decodeTextPayload, parseEncodedAttachments } from "./payload";
 import {
+	decodeUserApprovalReceipt,
 	formatMessageRef,
 	type HistoryPage,
 	type HistoryQuery,
@@ -13,10 +14,11 @@ import {
 	type MessageTarget,
 	parseMessageRef,
 	type RealtimeMessage,
+	type UserApprovalReceipt,
 } from "./realtime-types";
 import type { EncodedAttachment, EncodedTextPayload } from "./types";
 
-export const MESSAGE_STORAGE_VERSION = 1;
+export const MESSAGE_STORAGE_VERSION = 2;
 const UNSUPPORTED_STORAGE_MESSAGE =
 	"unsupported pre-release storage; start with an empty data directory";
 
@@ -33,6 +35,7 @@ export type MessageDraft = {
 	attachments: EncodedAttachment[];
 	createdAt: number;
 	replyTo?: string;
+	userApproval?: UserApprovalReceipt;
 };
 
 export type MessageAppendResult =
@@ -51,6 +54,7 @@ type MessageRow = {
 	encoding: string;
 	data: string;
 	attachments: string;
+	user_approved: number;
 	created_at: number;
 	reply_to_sequence: number | null;
 };
@@ -95,6 +99,7 @@ const MESSAGES_SCHEMA = `
 		encoding TEXT NOT NULL,
 		data TEXT NOT NULL,
 		attachments TEXT NOT NULL,
+		user_approved INTEGER NOT NULL CHECK (user_approved IN (0, 1)),
 		created_at INTEGER NOT NULL,
 		reply_to_sequence INTEGER,
 		PRIMARY KEY(project, project_sequence)
@@ -195,8 +200,8 @@ export class HubStore {
 				INSERT INTO messages(
 					project, project_sequence, msg_id, sender_name, sender_presence_id,
 					target_kind, target_name, target_presence_id, encoding, data,
-					attachments, created_at, reply_to_sequence
-				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+					attachments, user_approved, created_at, reply_to_sequence
+				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			`);
 			this.#insertProject = this.#database.query(`
 				INSERT INTO projects(
@@ -258,6 +263,7 @@ export class HubStore {
 						draft.payload.encoding,
 						draft.payload.data,
 						JSON.stringify(attachments),
+						draft.userApproval === undefined ? 0 : 1,
 						draft.createdAt,
 						replyToSequence,
 					);
@@ -277,6 +283,10 @@ export class HubStore {
 							})),
 							createdAt: draft.createdAt,
 							replyTo: draft.replyTo,
+							userApproval:
+								draft.userApproval === undefined
+									? undefined
+									: { kind: "omp-ui" },
 						},
 					};
 				},
@@ -484,6 +494,8 @@ export class HubStore {
 			throw new Error("invalid createdAt");
 		if (decodeTextPayload(draft.payload).trim().length === 0)
 			throw new Error("message text required");
+		if (draft.userApproval !== undefined)
+			decodeUserApprovalReceipt(draft.userApproval, "message.userApproval");
 		return parseEncodedAttachments(draft.attachments);
 	}
 
@@ -502,6 +514,7 @@ export class HubStore {
 			row.encoding === draft.payload.encoding &&
 			row.data === draft.payload.data &&
 			row.attachments === JSON.stringify(attachments) &&
+			row.user_approved === (draft.userApproval === undefined ? 0 : 1) &&
 			row.reply_to_sequence === replyToSequence
 		);
 	}
@@ -535,6 +548,7 @@ export class HubStore {
 			target,
 			payload,
 			attachments,
+			userApproval: row.user_approved === 1 ? { kind: "omp-ui" } : undefined,
 			createdAt: row.created_at,
 			replyTo:
 				row.reply_to_sequence == null

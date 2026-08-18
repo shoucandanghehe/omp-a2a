@@ -25,7 +25,7 @@ Direct messaging resolves one current name and binds the target `presenceId`. Pr
 
 ### Transport and persistence
 
-Private protocol version `3` reuses the Hub HTTP server:
+Private protocol version `4` reuses the Hub HTTP server:
 
 - WebSocket `/v1/connect` carries handshake, Presence events, Messages with inline attachment content, acknowledgments, and Delivery outcomes. Failed handshake teardown preserves whichever timeout, protocol, transport, or caller-cancellation outcome settled first.
 - HTTP carries Hub metadata, Project administration, and explicit history queries.
@@ -39,6 +39,10 @@ Text below 32 KiB stays identity encoded. Larger text uses gzip plus Base64 only
 Humans administer Projects and their own connection through `/a2a`. Models receive exactly `a2a_peers`, `a2a_message`, and `a2a_history`. Connected model turns receive the current roster name and use only current peer results or inbound sender names for A2A addressing; disconnected turns receive no A2A identity prompt. Inbound messages are pushed into OMP serially in Hub-assigned Project sequence through `steer` delivery; there is no polling tool or user send/Inbox protocol surface.
 
 `a2a_message` accepts optional current-session `local://` regular-file sources. The sender Extension snapshots their bytes before sending; the Hub never resolves sender-local URLs. Receiving and history-querying Extensions materialize new `local://` copies inside their own sessions before exposing the Message.
+
+`a2a_message` may request an interactive OMP user signature for one exact Message. Forked OMP uses its local-only, scrollable `localAskDialog`; original OMP builds without that interface fall back to host-local `confirm`/`input` without a message-size limit. Collaboration guests cannot answer either path; the model cannot create the receipt, and missing interactive UI fails closed before attachment snapshotting. A control-safe fenced JSON review contains the target selector, text, causal parent, attachment sources, and attachment payload hashes. The canonical Message persists the resulting non-cryptographic receipt and exposes a structured `userApproval` value of `confirmed` or `none` in realtime and history context, with peer text JSON-escaped behind an unambiguous record boundary. Approval does not propagate through forwarding, rejection sends nothing and may return an exact user reason, and cancellation is not cached.
+
+The receipt is client-declared within the trusted private protocol. The Hub validates and persists it but does not attest that an OMP UI created it; malicious or custom clients can forge it. It prevents accidental model-side authority escalation among matching self-developed clients, not hostile-client impersonation.
 
 Repository configuration uses `name` and `autoConnect`; Hub selection is explicit at the repository or global config level, with no client environment or loopback fallback. Removed `agentId` and `autoJoin` fields fail with an explicit migration error.
 
@@ -54,7 +58,7 @@ Repository configuration uses `name` and `autoConnect`; Hub selection is explici
 - `delivered` proves successful attachment materialization and injection into the receiving OMP extension, not model understanding or task completion. Materialization or injection errors produce `failed`; write errors, disconnects, and missing ACKs also produce `failed` with an explicit unconfirmed reason.
 - The Hub sends each Message frame once and retains no receiver outcome cache. An ACK lost after injection can therefore produce an unconfirmed failure even though the receiver injected successfully.
 - Direct routing is not confidential history. Without accounts and authorization, any trusted current Agent can query Project history.
-- Hub and extension must upgrade together because private protocol version `3` requires an exact match and has no compatibility path for version `2` Message frames.
+- Hub and extension must upgrade together because private protocol version `4` requires an exact match and has no compatibility path for version `3` Message frames.
 - Matching-version clients are trusted to produce valid internal payloads. Removing application payload and history resource caps keeps the path linear, while deployment resource isolation contains failures.
 - Project deletion is rejected while that Project has an active Presence, then removes its metadata, sequence, and message history in one SQLite transaction.
 
