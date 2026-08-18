@@ -634,11 +634,15 @@ export default function a2aExtension(
 		await connectDesired(target);
 	};
 
-	pi.on("before_agent_start", () => {
+	pi.on("before_agent_start", (event) => {
 		const message = takeContextDelta();
 		return {
 			...(message ? { message } : {}),
-			systemPrompt: [A2A_TOOL_GUIDANCE, A2A_COLLABORATION_GUIDANCE],
+			systemPrompt: [
+				...event.systemPrompt,
+				A2A_TOOL_GUIDANCE,
+				A2A_COLLABORATION_GUIDANCE,
+			],
 		};
 	});
 	pi.on("agent_end", (event) => {
