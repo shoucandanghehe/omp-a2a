@@ -91,6 +91,10 @@ export class A2aRuntime {
 		return this.#published?.connection.name ?? null;
 	}
 
+	get self(): Peer | null {
+		return this.#published?.connection.self ?? null;
+	}
+
 	get publishedTarget(): {
 		project: string;
 		name: string;
