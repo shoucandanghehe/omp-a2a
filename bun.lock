@@ -5,7 +5,7 @@
     "": {
       "name": "omp-a2a",
       "dependencies": {
-        "@oh-my-pi/omptype": "^17.2.11",
+        "@oh-my-pi/omptype": "^18.0.8",
         "express": "^5.2.1",
         "ws": "^8.21.3",
       },
@@ -122,7 +122,7 @@
 
     "@oh-my-pi/omp-stats": ["@oh-my-pi/omp-stats@17.2.12", "", { "dependencies": { "@oh-my-pi/pi-ai": "17.2.12", "@oh-my-pi/pi-catalog": "17.2.12", "@oh-my-pi/pi-utils": "17.2.12", "@tailwindcss/node": "^4.3.2", "chart.js": "^4.5.1", "lucide-react": "^1.24.0", "react": "19.2.7", "react-chartjs-2": "^5.3.1", "react-dom": "19.2.7", "tailwindcss": "^4.3.2" }, "bin": { "omp-stats": "src/index.ts" } }, "sha512-BOyDNq8Hj/CJVc6Wntdo+1yaG/b8CqLcxsBnHefLoC7vO96YoFjt4S7GOpp3cd+ysiuxHnmrWn30kEtwR9fhjQ=="],
 
-    "@oh-my-pi/omptype": ["@oh-my-pi/omptype@17.2.12", "", {}, "sha512-Y27VMnPbcUEOpK1DgYuvNIaVnGxEmOcEP2bYPfuAWkx2vc4PKXL0NCRzGLwYMjhwjjd9O/gn8lywZfxDCBytjA=="],
+    "@oh-my-pi/omptype": ["@oh-my-pi/omptype@18.0.8", "", {}, "sha512-1g1Q8xAnrA62he2sP/JW84zZine7PvaXjOhgHcmauFvU2HSSIJHX5t8iF5+gcvX/s6P0h4wZSS/aGfVCHeMT4w=="],
 
     "@oh-my-pi/pi-agent-core": ["@oh-my-pi/pi-agent-core@17.2.12", "", { "dependencies": { "@oh-my-pi/pi-ai": "17.2.12", "@oh-my-pi/pi-catalog": "17.2.12", "@oh-my-pi/pi-natives": "17.2.12", "@oh-my-pi/pi-utils": "17.2.12", "@oh-my-pi/pi-wire": "17.2.12", "@oh-my-pi/snapcompact": "17.2.12", "@opentelemetry/api": "^1.9.1" } }, "sha512-VIJnZCQyshiZoiWpvhoNVHhUQmptLG41h7XPg2IZfEdDNdDpV26JuZdDMgBr0hIz1L/RfTq8MiRcRuAcasvkOg=="],
 
@@ -579,6 +579,12 @@
     "yargs-parser": ["yargs-parser@22.0.0", "", {}, "sha512-rwu/ClNdSMpkSrUb+d6BRsSkLUq1fmfsY6TOpYzTwvwkg1/NRG85KBy3kq++A8LKQwX6lsu+aWad+2khvuXrqw=="],
 
     "zod": ["zod@3.25.76", "", {}, "sha512-gzUt/qt81nXsFGKIFcC3YnfEAx5NkunCfnDlvuBSSFS02bcXu4Lmea0AFIUwbLWxWPx3d9p8S5QoaujKcNQxcQ=="],
+
+    "@oh-my-pi/pi-ai/@oh-my-pi/omptype": ["@oh-my-pi/omptype@17.2.12", "", {}, "sha512-Y27VMnPbcUEOpK1DgYuvNIaVnGxEmOcEP2bYPfuAWkx2vc4PKXL0NCRzGLwYMjhwjjd9O/gn8lywZfxDCBytjA=="],
+
+    "@oh-my-pi/pi-catalog/@oh-my-pi/omptype": ["@oh-my-pi/omptype@17.2.12", "", {}, "sha512-Y27VMnPbcUEOpK1DgYuvNIaVnGxEmOcEP2bYPfuAWkx2vc4PKXL0NCRzGLwYMjhwjjd9O/gn8lywZfxDCBytjA=="],
+
+    "@oh-my-pi/pi-coding-agent/@oh-my-pi/omptype": ["@oh-my-pi/omptype@17.2.12", "", {}, "sha512-Y27VMnPbcUEOpK1DgYuvNIaVnGxEmOcEP2bYPfuAWkx2vc4PKXL0NCRzGLwYMjhwjjd9O/gn8lywZfxDCBytjA=="],
 
     "@opentelemetry/exporter-metrics-otlp-http/@opentelemetry/resources": ["@opentelemetry/resources@2.9.0", "", { "dependencies": { "@opentelemetry/core": "2.9.0", "@opentelemetry/semantic-conventions": "^1.29.0" }, "peerDependencies": { "@opentelemetry/api": ">=1.3.0 <1.10.0" } }, "sha512-jyA5MBLQ+Dkl3+JsZkUoUvL7yHvU64kLsvpXKarWm6347Sl1t1bXFTFykUePNpT5WH5pm9a2Qtt03iIYQhZ1Fg=="],
 
