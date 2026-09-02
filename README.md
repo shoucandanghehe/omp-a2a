@@ -223,13 +223,15 @@ Humans manage Projects, their own connection, and read-only views:
 
 Project deletion requires confirmation. Humans do not use send, broadcast, reply, Inbox, join, or leave protocol commands.
 
+`/a2a peers` lists every currently connected member, with the local Presence marked `(you)`.
+
 ## Model tools
 
 The model receives exactly three A2A tools through `xd://a2a_peers`, `xd://a2a_message`, and `xd://a2a_history`:
 
 ### `a2a_peers`
 
-Lists the names currently present in this Project. Missing names do not exist.
+Shows this Agent's roster name separately, then lists the other currently connected names that are valid direct-message targets. Missing names do not exist.
 
 ### `a2a_message`
 

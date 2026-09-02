@@ -67,7 +67,7 @@ The extension uses the injected ArkType module as the canonical schema authoring
 
 | Tool | Contract |
 | --- | --- |
-| `a2a_peers` | Returns current peer names from the connected Presence snapshot. |
+| `a2a_peers` | Returns the connected Agent's own roster name plus the other current Presence names that are valid direct-message targets. |
 | `a2a_message` | Requires a typed direct or Project target and text; accepts optional current-session `local://` attachment sources, `replyTo`, `messageId`, and local approval of the sending Agent's exact outbound Message. Approval review binds the current sending Presence, resolved `messageId`, target, content, causal parent, and attachments before dispatch. A receiver never asks its local user on the sender's behalf; it returns an unsigned approval-gated request with instructions to preserve target, content, causal parent, and attachments while using a new `messageId` and sender-local approval. Rejection returns the user's optional reason without sending and suppresses only an identical request from the same Presence for the Session. The tool forwards combined cancellation, fences the initiating connection, distinguishes new acceptance from replay, and keeps replies push-driven. |
 | `a2a_history` | Accepts `before`, `after`, `limit`, and `from`; rematerializes persisted attachments into the calling session; it is only for deliberate review of persisted context, never waiting for a new reply. |
 

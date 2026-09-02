@@ -289,8 +289,23 @@ test("model tools stay push-driven and forward history cancellation", async () =
 			throw new Error("a2a model tools were not registered");
 
 		expect(peersTool.description).toBe(
-			"List the exact A2A roster names currently addressable in this Project. Use only a returned name for target.type=agent.",
+			"Show this Agent's roster name and the exact other A2A roster names currently addressable in this Project. Use only addressable peer names for target.type=agent.",
 		);
+
+		await commandHandler("peers", context);
+		expect(notifications.at(-1)).toBe("Members:\n- api (you)\n- worker");
+
+		const peersResult = await peersTool.execute("peers", {} as never);
+		expect(peersResult.content).toEqual([
+			{
+				type: "text",
+				text: "Self: api\nAddressable peers:\n- worker",
+			},
+		]);
+		expect(peersResult.details).toMatchObject({
+			self: { name: "api" },
+			peers: [{ name: "worker" }],
+		});
 
 		expect(messageTool.description).toBe(
 			"Send to one current peer or all current peers. Use target.type=agent with a name from a2a_peers, or target.type=project for all current peers. Set replyTo to reply to an earlier Project message. Attachments must be current-session local:// regular files. If your exact outbound request requires user approval, set requestUserSignature=true to ask your own local OMP UI before sending. Rejection, cancellation, or unavailable UI sends nothing. Sending is fire-and-forget. Do not wait, sleep, or poll a2a_history for replies. Continue only with other already-requested, reply-independent work; if none remains, end the turn.",

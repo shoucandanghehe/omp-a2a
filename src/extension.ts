@@ -892,11 +892,15 @@ export default function a2aExtension(
 					return;
 				}
 				if (command === "peers") {
+					const self = runtime.self;
+					if (!self) throw new Error("A2A is not connected");
 					const peers = runtime.peers();
 					context.ui.notify(
-						peers.length === 0
-							? "No other Agents."
-							: peers.map((peer) => peer.name).join("\n"),
+						[
+							"Members:",
+							`- ${self.name} (you)`,
+							...peers.map((peer) => `- ${peer.name}`),
+						].join("\n"),
 						"info",
 					);
 					return;
@@ -956,22 +960,25 @@ export default function a2aExtension(
 		name: "a2a_peers",
 		label: "A2A Peers",
 		description:
-			"List the exact A2A roster names currently addressable in this Project. Use only a returned name for target.type=agent.",
+			"Show this Agent's roster name and the exact other A2A roster names currently addressable in this Project. Use only addressable peer names for target.type=agent.",
 		parameters: peersParameters,
 		async execute() {
 			try {
+				const self = runtime.self;
+				if (!self) throw new Error("A2A is not connected");
 				const peers = runtime.peers();
+				const addressablePeers =
+					peers.length === 0
+						? "No other Agents are present."
+						: peers.map((peer) => `- ${peer.name}`).join("\n");
 				return {
 					content: [
 						{
 							type: "text",
-							text:
-								peers.length === 0
-									? "No other Agents are present."
-									: peers.map((peer) => peer.name).join("\n"),
+							text: `Self: ${self.name}\nAddressable peers:\n${addressablePeers}`,
 						},
 					],
-					details: { peers },
+					details: { self, peers },
 				};
 			} catch (error) {
 				const message = error instanceof Error ? error.message : String(error);
