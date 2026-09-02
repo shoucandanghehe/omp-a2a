@@ -182,10 +182,8 @@ test("human commands and model tools expose separate A2A surfaces", async () => 
 	});
 	expect(commandOutput).toEqual({
 		message: {
-			customType: "a2a",
-			content: expect.stringContaining(
-				"`$ /a2a help`\n\nA2A anonymous realtime Agent chat",
-			),
+			customType: "/a2a help",
+			content: expect.stringContaining("A2A anonymous realtime Agent chat"),
 			display: true,
 		},
 		options: { triggerTurn: false },
@@ -199,7 +197,7 @@ test("human commands and model tools expose separate A2A surfaces", async () => 
 	if (!contextHandler) throw new Error("A2A context filter was not registered");
 	const commandMessage = {
 		role: "custom",
-		customType: "a2a",
+		customType: "/a2a help",
 		content: "human-only output",
 		display: true,
 	};
@@ -307,7 +305,7 @@ test("model tools stay push-driven and forward history cancellation", async () =
 				message: (typeof commandOutputs)[number]["message"],
 				options?: (typeof commandOutputs)[number]["options"],
 			) {
-				if (message.customType === "a2a")
+				if (message.customType?.startsWith("/a2a"))
 					commandOutputs.push({ message, options });
 			},
 			registerCommand(
@@ -325,8 +323,8 @@ test("model tools stay push-driven and forward history cancellation", async () =
 		await commandHandler("hub", context);
 		expect(commandOutputs.at(-1)).toEqual({
 			message: {
-				customType: "a2a",
-				content: `\`$ /a2a hub\`\n\nHub ${hub.listenUrl} protocol=${A2A_PROTOCOL_VERSION}`,
+				customType: "/a2a hub",
+				content: `Hub ${hub.listenUrl} protocol=${A2A_PROTOCOL_VERSION}`,
 				display: true,
 			},
 			options: { triggerTurn: false },
@@ -355,8 +353,8 @@ test("model tools stay push-driven and forward history cancellation", async () =
 		await commandHandler("peers", context);
 		expect(commandOutputs.at(-1)).toEqual({
 			message: {
-				customType: "a2a",
-				content: "`$ /a2a peers`\n\nMembers:\n- api (you)\n- worker",
+				customType: "/a2a peers",
+				content: "Members:\n- api (you)\n- worker",
 				display: true,
 			},
 			options: { triggerTurn: false },
@@ -1993,7 +1991,7 @@ test("manual Project switch cancels old in-flight attachment injection", async (
 				sendMessage(message: { customType?: string; content: string }) {
 					if (message.customType === "a2a-inbound")
 						injected.push(message.content);
-					if (message.customType === "a2a")
+					if (message.customType?.startsWith("/a2a"))
 						commandOutputs.push(message.content);
 				},
 				registerCommand(
@@ -2407,7 +2405,10 @@ test("name conflict restores the accepting Hub as reconnect intent", async () =>
 			on() {},
 			logger: { warn() {} },
 			sendMessage(message: { customType?: string; content?: string }) {
-				if (message.customType === "a2a" && message.content !== undefined)
+				if (
+					message.customType?.startsWith("/a2a") &&
+					message.content !== undefined
+				)
 					commandOutputs.push(message.content);
 			},
 			registerCommand(
@@ -2528,7 +2529,10 @@ test("invalid Session config blocks fallback Hub access until a successful reloa
 			},
 			logger: { warn() {} },
 			sendMessage(message: { customType?: string; content?: string }) {
-				if (message.customType === "a2a" && message.content !== undefined)
+				if (
+					message.customType?.startsWith("/a2a") &&
+					message.content !== undefined
+				)
 					commandOutputs.push(message.content);
 			},
 			registerCommand(

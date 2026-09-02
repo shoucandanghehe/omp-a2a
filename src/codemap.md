@@ -61,7 +61,7 @@ On `session_shutdown`, the extension aborts Session work, clears active and reco
 
 `completeA2aArguments` provides synchronous, context-sensitive completion. It preserves the full argument prefix in each returned value, removes already-used flags, and enforces the `before`/`after` mutual exclusion in suggestions.
 
-Read-only result commands (`help`, `hub`, `project list`, `status`, `peers`, and `history`) publish a visible `a2a` transcript card that echoes the trimmed `/a2a` invocation without triggering a model turn. The `context` hook removes only that custom message type before provider requests, preserving the contract that human command output stays outside model context. Mutating action results, connection lifecycle, Presence, delivery, and errors remain transient UI notifications.
+Read-only result commands (`help`, `hub`, `project list`, `status`, `peers`, and `history`) publish a visible transcript card whose custom-message title is the trimmed `/a2a` invocation, without triggering a model turn. The `context` hook removes only custom messages whose type is `/a2a` or starts with `/a2a ` before provider requests, preserving the contract that human command output stays outside model context. Mutating action results, connection lifecycle, Presence, delivery, and errors remain transient UI notifications.
 
 ## Model tool surface
 
