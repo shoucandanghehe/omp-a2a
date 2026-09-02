@@ -225,6 +225,8 @@ Project deletion requires confirmation. Humans do not use send, broadcast, reply
 
 `/a2a peers` lists every currently connected member, with the local Presence marked `(you)`.
 
+Read-only results from `help`, `hub`, `project list`, `status`, `peers`, and `history` are persisted in the transcript as command cards that echo the invoked `/a2a` command. These human-only cards are excluded from model context. Action results, connection and Presence events, delivery state, and errors remain transient notifications.
+
 ## Model tools
 
 The model receives exactly three A2A tools through `xd://a2a_peers`, `xd://a2a_message`, and `xd://a2a_history`:
