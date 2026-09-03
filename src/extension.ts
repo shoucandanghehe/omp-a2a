@@ -1121,6 +1121,7 @@ export default function a2aExtension(
 							attachments,
 						};
 						let decision: "Approve and send" | "Reject" | undefined;
+						let typedRejection: string | undefined;
 						if (localAskDialog) {
 							const approval = await localAskDialog.call(
 								context.ui,
@@ -1147,15 +1148,22 @@ export default function a2aExtension(
 								],
 								{ signal },
 							);
-							decision =
+							const answer =
 								approval?.kind === "submit"
-									? (approval.results.find(
+									? approval.results.find(
 											(result) => result.id === "a2a-user-approval",
-										)?.selectedOptions[0] as
-											| "Approve and send"
-											| "Reject"
-											| undefined)
+										)
 									: undefined;
+							const selectedOption = answer?.selectedOptions[0];
+							decision =
+								selectedOption === "Approve and send" ||
+								selectedOption === "Reject"
+									? selectedOption
+									: undefined;
+							if (decision === undefined && answer?.customInput !== undefined) {
+								decision = "Reject";
+								typedRejection = answer.customInput;
+							}
 						} else {
 							const review = formatApprovalDialog(reviewOptions, false);
 							// Original OMP confirm/input are host-local; only select,
@@ -1185,11 +1193,14 @@ export default function a2aExtension(
 							};
 						}
 						if (decision === "Reject") {
-							const rejection = await context.ui.input(
-								"Reject A2A outbound message",
-								"Optional reason; Enter rejects, Escape cancels",
-								{ signal },
-							);
+							const rejection =
+								typedRejection === undefined
+									? await context.ui.input(
+											"Reject A2A outbound message",
+											"Optional reason; Enter rejects, Escape cancels",
+											{ signal },
+										)
+									: typedRejection;
 							signal.throwIfAborted();
 							if (
 								sessionLifecycle.signal !== sessionToken ||

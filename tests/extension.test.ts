@@ -1362,15 +1362,16 @@ test("user approval rejection, cancellation, and headless requests fail closed p
 			details: { cancelled: true },
 			isError: true,
 		});
-		const retriedCancellation = await messageTool.execute(
-			"approval-cancel-2",
-			{ ...changedRequest, messageId: "approval-cancel-2" } as never,
+		const typedRejection = await messageTool.execute(
+			"approval-custom-rejection",
+			{ ...changedRequest, messageId: "approval-custom-rejection" } as never,
 			undefined,
 			undefined,
 			context,
 		);
-		expect(retriedCancellation).toMatchObject({
-			details: { cancelled: true },
+		expect(typedRejection).toMatchObject({
+			content: [{ type: "text", text: "discuss this instead" }],
+			details: { rejected: true, reason: "discuss this instead" },
 			isError: true,
 		});
 		const concurrentRequest = {
