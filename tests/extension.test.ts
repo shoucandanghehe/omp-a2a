@@ -951,7 +951,10 @@ test("a2a_message preserves user approval and attachments in delivery and histor
 		);
 		expect(sent.content[0]?.text).toContain("attachments=1");
 		expect(sent.details).toMatchObject({
-			message: { userApproval: { kind: "omp-ui" } },
+			message: {
+				messageId: "attachment-send",
+				userApproval: { kind: "omp-ui" },
+			},
 		});
 		expect(approvalDialogs).toHaveLength(1);
 		expect(approvalDialogs[0]?.signal?.aborted).toBe(false);
@@ -964,28 +967,18 @@ test("a2a_message preserves user approval and attachments in delivery and histor
 			recommended: 0,
 		});
 		const approvalPreview = approvalQuestion?.options[0]?.preview ?? "";
-		expect(approvalPreview).toContain("```json");
-		expect(approvalPreview).toContain(`"project": ${JSON.stringify(project)}`);
-		expect(approvalPreview).toContain('"name": "receiver"');
-		expect(approvalPreview).toContain(
-			'"text": "Use the attached training contract."',
-		);
-		expect(approvalPreview).toContain(
-			`"replyTo": ${JSON.stringify(`${project}:1`)}`,
-		);
-		expect(approvalPreview).toContain('"name": "training-handoff.md"');
-		expect(approvalPreview).toContain(
-			'"source": "local://training-handoff.md"',
-		);
 		const approvalJson = approvalPreview.match(/```json\n([\s\S]+)\n```/)?.[1];
 		if (!approvalJson) throw new Error("approval JSON review block missing");
-		const approvalValue = JSON.parse(approvalJson) as {
-			from?: { name?: unknown; presenceId?: unknown };
-			messageId?: unknown;
-		};
-		expect(approvalValue.from?.name).toBe("sender");
-		expect(typeof approvalValue.from?.presenceId).toBe("string");
-		expect(approvalValue.messageId).toBe("attachment-send");
+		expect(JSON.parse(approvalJson)).toEqual({
+			target: { type: "agent", name: "receiver" },
+			text: "Use the attached training contract.",
+			attachments: [
+				{
+					name: "training-handoff.md",
+					source: "local://training-handoff.md",
+				},
+			],
+		});
 		const received = await inbound.promise;
 		expect(inboundDelivery).toEqual({
 			deliverAs: "steer",
@@ -1396,13 +1389,18 @@ test("user approval rejection, cancellation, and headless requests fail closed p
 				)?.allowCustomInput,
 			).toBe(false);
 			const preview = question?.options[0]?.preview ?? "";
-			expect(preview).toContain("```json");
-			expect(preview).toContain(`"project": ${JSON.stringify(project)}`);
-			expect(preview).toContain('"name": "sender"');
-			expect(preview).toContain('"name": "worker"');
-			expect(preview).toContain('"messageId":');
-			expect(preview).toContain('"replyTo": null');
-			expect(preview).toContain('"attachments": []');
+			const previewJson = preview.match(/```json\n([\s\S]+)\n```/)?.[1];
+			if (!previewJson) throw new Error("approval JSON review block missing");
+			const previewValue = JSON.parse(previewJson) as Record<string, unknown>;
+			expect(Object.keys(previewValue)).toEqual([
+				"target",
+				"text",
+				"attachments",
+			]);
+			expect(previewValue).toMatchObject({
+				target: { type: "agent", name: "worker" },
+				attachments: [],
+			});
 		}
 		const escapedDialog =
 			approvalDialogs[6]?.questions[0]?.options[0]?.preview ?? "";
@@ -1451,19 +1449,14 @@ test("user approval rejection, cancellation, and headless requests fail closed p
 		expect(legacy.isError).not.toBe(true);
 		const legacyJson = legacyReview.match(/```json\n([\s\S]+)\n```/)?.[1];
 		if (!legacyJson) throw new Error("legacy approval JSON missing");
-		const legacyValue = JSON.parse(legacyJson) as {
-			from?: { name?: unknown };
-			messageId?: unknown;
-			text?: unknown;
-		};
-		expect(legacyValue).toMatchObject({
-			from: { name: "sender" },
+		expect(JSON.parse(legacyJson)).toEqual({
+			target: { type: "agent", name: "worker" },
 			text: "x".repeat(20_000),
+			attachments: [],
 		});
-		expect(typeof legacyValue.messageId).toBe("string");
 		expect(legacy.details).toMatchObject({
 			message: {
-				messageId: legacyValue.messageId,
+				messageId: expect.any(String),
 				userApproval: { kind: "omp-ui" },
 			},
 		});

@@ -369,12 +369,8 @@ function signatureFingerprint(options: {
 
 function formatApprovalDialog(
 	options: {
-		project: string;
-		from: Peer;
 		target: MessageRequestTarget;
 		text: string;
-		replyTo?: string;
-		messageId: string;
 		attachmentSources: string[];
 		attachments: EncodedAttachment[];
 	},
@@ -383,24 +379,14 @@ function formatApprovalDialog(
 	const attachments = options.attachments.map((attachment, index) => ({
 		name: attachment.name,
 		source: options.attachmentSources[index] ?? null,
-		encoding: attachment.payload.encoding,
-		payloadSha256: createHash("sha256")
-			.update(attachment.payload.data)
-			.digest("hex"),
 	}));
 	return [
-		"Approve A2A outbound message",
-		"Review the exact outbound JSON below. Approval applies only to this message and target.",
 		"```json",
 		safeJson(
 			{
-				project: options.project,
-				from: options.from,
 				target: options.target,
-				messageId: options.messageId,
-				replyTo: options.replyTo ?? null,
-				attachments,
 				text: options.text,
+				attachments,
 			},
 			pretty ? 2 : undefined,
 		),
@@ -1103,12 +1089,8 @@ export default function a2aExtension(
 					pendingSignatureRequests.set(fingerprint, pendingToken);
 					try {
 						const reviewOptions = {
-							project,
-							from,
 							target,
 							text: parameters.text,
-							replyTo: parameters.replyTo,
-							messageId,
 							attachmentSources,
 							attachments,
 						};
