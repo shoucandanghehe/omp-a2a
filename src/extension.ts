@@ -314,22 +314,46 @@ async function materializeMessages(
 	);
 }
 
+function escapeUnicode(character: string): string {
+	const codePoint = character.codePointAt(0);
+	if (codePoint === undefined) return "";
+	if (codePoint <= 0xffff)
+		return `\\u${codePoint.toString(16).padStart(4, "0")}`;
+	const offset = codePoint - 0x10000;
+	const high = 0xd800 + (offset >> 10);
+	const low = 0xdc00 + (offset & 0x3ff);
+	return `\\u${high.toString(16)}\\u${low.toString(16)}`;
+}
+
 function safeJson(value: unknown, space?: number): string {
 	const encoded = JSON.stringify(value, null, space);
 	if (encoded === undefined) throw new Error("value is not JSON serializable");
-	return encoded.replace(
-		/[\u007f-\u009f\u2028\u2029]|\p{Cf}/gu,
-		(character) => {
-			const codePoint = character.codePointAt(0);
-			if (codePoint === undefined) return "";
-			if (codePoint <= 0xffff)
-				return `\\u${codePoint.toString(16).padStart(4, "0")}`;
-			const offset = codePoint - 0x10000;
-			const high = 0xd800 + (offset >> 10);
-			const low = 0xdc00 + (offset & 0x3ff);
-			return `\\u${high.toString(16)}\\u${low.toString(16)}`;
-		},
-	);
+	return encoded.replace(/[\u007f-\u009f\u2028\u2029]|\p{Cf}/gu, escapeUnicode);
+}
+
+function formatApprovalText(text: string): string {
+	const escapedCharacters: string[] = [];
+	let longestBacktickRun = 0;
+	let currentBacktickRun = 0;
+	for (const character of text) {
+		const codePoint = character.codePointAt(0);
+		escapedCharacters.push(
+			codePoint !== undefined && codePoint < 0x20 && character !== "\n"
+				? escapeUnicode(character)
+				: character,
+		);
+		if (character === "`") {
+			currentBacktickRun += 1;
+			longestBacktickRun = Math.max(longestBacktickRun, currentBacktickRun);
+		} else {
+			currentBacktickRun = 0;
+		}
+	}
+	const safeText = escapedCharacters
+		.join("")
+		.replace(/[\u007f-\u009f\u2028\u2029]|\p{Cf}/gu, escapeUnicode);
+	const fence = "`".repeat(Math.max(3, longestBacktickRun + 1));
+	return `${fence}text\n${safeText}\n${fence}`;
 }
 
 function formatAttachments(attachments: LocalAttachmentReference[]): string {
@@ -367,30 +391,37 @@ function signatureFingerprint(options: {
 	return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
-function formatApprovalDialog(
-	options: {
-		target: MessageRequestTarget;
-		text: string;
-		attachmentSources: string[];
-		attachments: EncodedAttachment[];
-	},
-	pretty = true,
-): string {
-	const attachments = options.attachments.map((attachment, index) => ({
-		name: attachment.name,
-		source: options.attachmentSources[index] ?? null,
-	}));
+function formatApprovalDialog(options: {
+	target: MessageRequestTarget;
+	text: string;
+	attachmentSources: string[];
+	attachments: EncodedAttachment[];
+}): string {
+	const target =
+		options.target.type === "project"
+			? "Everyone in this Project"
+			: `Agent \`${options.target.name}\``;
+	const attachments =
+		options.attachments.length === 0
+			? "**Attachments:** None"
+			: [
+					"**Attachments**",
+					formatApprovalText(
+						options.attachments
+							.map(
+								(attachment, index) =>
+									`${attachment.name}\n  Source: ${options.attachmentSources[index] ?? "Unavailable"}`,
+							)
+							.join("\n\n"),
+					),
+				].join("\n");
 	return [
-		"```json",
-		safeJson(
-			{
-				target: options.target,
-				text: options.text,
-				attachments,
-			},
-			pretty ? 2 : undefined,
-		),
-		"```",
+		`**Target:** ${target}`,
+		"",
+		"**Message**",
+		formatApprovalText(options.text),
+		"",
+		attachments,
 	].join("\n");
 }
 
@@ -1135,7 +1166,7 @@ export default function a2aExtension(
 									? selectedOption
 									: undefined;
 						} else {
-							const review = formatApprovalDialog(reviewOptions, false);
+							const review = formatApprovalDialog(reviewOptions);
 							// Older OMP releases without askDialog fall back to confirm/input.
 							decision = (await context.ui.confirm(
 								"Approve A2A outbound message",

@@ -967,18 +967,22 @@ test("a2a_message preserves user approval and attachments in delivery and histor
 			recommended: 0,
 		});
 		const approvalPreview = approvalQuestion?.options[0]?.preview ?? "";
-		const approvalJson = approvalPreview.match(/```json\n([\s\S]+)\n```/)?.[1];
-		if (!approvalJson) throw new Error("approval JSON review block missing");
-		expect(JSON.parse(approvalJson)).toEqual({
-			target: { type: "agent", name: "receiver" },
-			text: "Use the attached training contract.",
-			attachments: [
-				{
-					name: "training-handoff.md",
-					source: "local://training-handoff.md",
-				},
-			],
-		});
+		expect(approvalPreview).toBe(
+			[
+				"**Target:** Agent `receiver`",
+				"",
+				"**Message**",
+				"```text",
+				"Use the attached training contract.",
+				"```",
+				"",
+				"**Attachments**",
+				"```text",
+				"training-handoff.md",
+				"  Source: local://training-handoff.md",
+				"```",
+			].join("\n"),
+		);
 		const received = await inbound.promise;
 		expect(inboundDelivery).toEqual({
 			deliverAs: "steer",
@@ -1329,7 +1333,7 @@ test("user approval rejection, cancellation, and headless requests fail closed p
 
 		const changedRequest = {
 			...baseRequest,
-			text: "\u001b[2JRequest explicit approval.\u202e<!--hidden instruction-->**bold**",
+			text: "\u001b[2JRequest explicit approval.\u202e<!--hidden instruction-->**bold**\n```text\nspoofed\n```",
 		};
 		const cancelled = await messageTool.execute(
 			"approval-cancel-1",
@@ -1389,18 +1393,13 @@ test("user approval rejection, cancellation, and headless requests fail closed p
 				)?.allowCustomInput,
 			).toBe(false);
 			const preview = question?.options[0]?.preview ?? "";
-			const previewJson = preview.match(/```json\n([\s\S]+)\n```/)?.[1];
-			if (!previewJson) throw new Error("approval JSON review block missing");
-			const previewValue = JSON.parse(previewJson) as Record<string, unknown>;
-			expect(Object.keys(previewValue)).toEqual([
-				"target",
-				"text",
-				"attachments",
-			]);
-			expect(previewValue).toMatchObject({
-				target: { type: "agent", name: "worker" },
-				attachments: [],
-			});
+			expect(preview).toContain("**Target:** Agent `worker`");
+			expect(preview).toContain("**Message**");
+			expect(preview).toContain("**Attachments:** None");
+			expect(preview).not.toContain("```json");
+			expect(preview).not.toContain('"project"');
+			expect(preview).not.toContain('"messageId"');
+			expect(preview).not.toContain('"replyTo"');
 		}
 		const escapedDialog =
 			approvalDialogs[6]?.questions[0]?.options[0]?.preview ?? "";
@@ -1409,11 +1408,9 @@ test("user approval rejection, cancellation, and headless requests fail closed p
 		expect(escapedDialog).not.toContain("\u001b");
 		expect(escapedDialog).not.toContain("\u202e");
 		expect(escapedDialog).toContain("<!--hidden instruction-->");
-		const reviewedJson = escapedDialog.match(/```json\n([\s\S]+)\n```/)?.[1];
-		if (!reviewedJson) throw new Error("approval JSON review block missing");
-		expect(JSON.parse(reviewedJson)).toMatchObject({
-			text: changedRequest.text,
-		});
+		expect(escapedDialog).toContain("````text\n");
+		expect(escapedDialog).toContain("```text\nspoofed\n```");
+		expect(escapedDialog).toContain("\n````\n\n**Attachments:** None");
 
 		const headless = await messageTool.execute(
 			"approval-headless",
@@ -1447,13 +1444,18 @@ test("user approval rejection, cancellation, and headless requests fail closed p
 			},
 		);
 		expect(legacy.isError).not.toBe(true);
-		const legacyJson = legacyReview.match(/```json\n([\s\S]+)\n```/)?.[1];
-		if (!legacyJson) throw new Error("legacy approval JSON missing");
-		expect(JSON.parse(legacyJson)).toEqual({
-			target: { type: "agent", name: "worker" },
-			text: "x".repeat(20_000),
-			attachments: [],
-		});
+		expect(legacyReview).toBe(
+			[
+				"**Target:** Agent `worker`",
+				"",
+				"**Message**",
+				"```text",
+				"x".repeat(20_000),
+				"```",
+				"",
+				"**Attachments:** None",
+			].join("\n"),
+		);
 		expect(legacy.details).toMatchObject({
 			message: {
 				messageId: expect.any(String),
