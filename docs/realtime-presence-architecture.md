@@ -48,7 +48,7 @@ Repository configuration uses `name` and `autoConnect`; Hub selection is explici
 
 ### Storage schema
 
-`messages.sqlite` has an independent storage version. New storage creates the complete current schema atomically. Existing storage must contain exactly the current version and non-internal schema objects; startup fails closed rather than converting an incompatible database.
+`messages.sqlite` has an independent storage version. New storage creates the complete current schema atomically. Existing storage must contain exactly the current version and non-internal schema objects; startup fails closed rather than converting an incompatible database. Version 2 storage is converted only by the explicit `scripts/migrate-storage.ts` operator script, never during Hub startup.
 
 ## Consequences
 
@@ -64,8 +64,8 @@ Repository configuration uses `name` and `autoConnect`; Hub selection is explici
 
 ## Verification
 
-The behavior suite and executable smoke scenarios cover duplicate names, immediate Presence removal, named-target failure, multi-target fan-out, `@all` snapshots, causal replies, single-attempt Delivery acknowledgements and failures, non-persistent Presence events, bounded teardown, attachment ownership and history, uncapped trusted payload and history paths, restart persistence, exact current storage guards, the model and human surfaces, and the Docker HTTP/WebSocket boundary.
+The behavior suite and executable smoke scenarios cover duplicate names, immediate Presence removal, named-target failure, multi-target fan-out, `@all` snapshots, causal replies, single-attempt Delivery acknowledgements and failures, non-persistent Presence events, bounded teardown, attachment ownership and history, uncapped trusted payload and history paths, restart persistence, exact current storage guards, version 2 storage migration, the model and human surfaces, and the Docker HTTP/WebSocket boundary.
 
 ## Deployment
 
-Deploy matching Hub and extension versions together. If persistent storage does not have the exact current schema and storage version, initialize an empty data directory instead of converting it.
+Deploy matching Hub and extension versions together. The Hub never converts storage on startup; an incompatible database fails closed. Convert version 2 storage explicitly with `bun run migrate:storage --data-dir <dir>` before starting the upgraded Hub, or initialize an empty data directory. The script holds the Hub data lock, converts in one transaction, and leaves any other storage version untouched.

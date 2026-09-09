@@ -316,6 +316,14 @@ Inbound messages are pushed automatically and processed serially in Hub-assigned
 
 The `messages.sqlite` schema has its own storage version, independent of the wire protocol version. A new database creates the complete current schema and records that version atomically. An existing database must contain exactly the current non-internal tables and index at the current storage version or Hub startup fails with `unsupported pre-release storage; start with an empty data directory`.
 
+The Hub never converts storage on startup. To keep version 2 history (wire protocol `4`) across the upgrade, convert it explicitly before starting the upgraded Hub:
+
+```bash
+bun run migrate:storage --data-dir ~/.omp/a2a
+```
+
+The script resolves the data directory exactly like the Hub (`--data-dir`, then `OMP_A2A_HUB_DATA_DIR`, then `~/.omp/a2a`), refuses to run while a Hub owns that directory, is a no-op on current storage, and prints `migrated`, `current`, or `absent`. It rewrites only the message target columns and target kind: Project metadata, sequences, attachments, approval receipts, and causal references are preserved. Any other storage version fails without writing.
+
 ## Verify
 
 ### Local release gate

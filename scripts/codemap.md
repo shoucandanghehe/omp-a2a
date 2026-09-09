@@ -2,7 +2,7 @@
 
 ## Responsibility
 
-`scripts/` contains executable boundary scenarios. These are not duplicate unit-test suites: each script starts or targets real project modules and proves a runnable path with explicit assertions.
+`scripts/` contains executable boundary scenarios and operator tools. Smoke scenarios are not duplicate unit-test suites: each script starts or targets real project modules and proves a runnable path with explicit assertions. Operator tools change deployment state and fail loudly instead of guessing.
 
 ## Entry points
 
@@ -11,6 +11,7 @@
 | `smoke.ts` | `bun run scripts/smoke.ts` | Canonical SQLite Project store in a temporary data directory. |
 | `smoke-hub.ts` | `bun run scripts/smoke-hub.ts` | Two real in-process HTTP/WebSocket Hubs with temporary persistent storage. |
 | `smoke-docker.ts` | `bun run smoke:docker` | Public HTTP and WebSocket interfaces of an already-running selected Hub. |
+| `migrate-storage.ts` | `bun run migrate:storage` | Version 2 `messages.sqlite` converted to the current storage version under the Hub data lock. |
 
 `bun run smoke` executes `bun test`, `smoke.ts`, then `smoke-hub.ts`. Docker is intentionally separate because it needs an already-running container boundary.
 
@@ -87,6 +88,26 @@ Cross the deployed process/network boundary rather than proving another in-proce
 
 `finally` closes any surviving sockets and retries Project deletion. The script never owns or stops the external Hub.
 
+## `migrate-storage.ts`
+
+### Goal
+
+Convert version 2 `messages.sqlite` storage to the current version without changing the Hub's fail-closed startup contract.
+
+### Scenario
+
+1. Resolve the data directory exactly like the Hub (`--data-dir`, `OMP_A2A_HUB_DATA_DIR`, then `~/.omp/a2a`) and report `absent` without creating anything when the database is missing.
+2. Acquire the Hub data lock so a running Hub blocks conversion.
+3. Rename the two target columns, rewrite `target_kind` values, and set the current `user_version` in one transaction.
+4. Reopen through `HubStore` so its schema guard proves the migrated database.
+5. Report `migrated` or `current`; any other storage version fails without writing.
+
+### Design rules
+
+- `ALTER TABLE ... RENAME COLUMN` preserves the stored schema text, so no table rebuild and no second copy of the current DDL.
+- Re-running on current storage is a no-op.
+- The migration is explicit operator work; `HubStore` never converts storage during startup.
+
 ## Verification matrix
 
 | Behavior | Unit/behavior tests | `smoke.ts` | `smoke-hub.ts` | `smoke-docker.ts` |
@@ -100,6 +121,7 @@ Cross the deployed process/network boundary rather than proving another in-proce
 | Persistent history/restart | yes | no | yes | history only |
 | Attachment wire/history bytes | yes | no | no | yes |
 | Current storage schema guard | yes | no | no | no |
+| Version 2 storage migration | yes | no | no | no |
 | Payload boundaries | yes | no | representative payload | representative payload |
 | Actual container/network process | no | no | no | yes |
 

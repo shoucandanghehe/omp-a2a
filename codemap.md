@@ -110,7 +110,7 @@ The sender Extension snapshots attachment bytes before sending and fences the fi
 
 | Asset | Responsibility |
 | --- | --- |
-| `package.json` | Bun metadata, pinned toolchain, OMP extension registration, Hub executable, build, check, and smoke scripts. |
+| `package.json` | Bun metadata, pinned toolchain, OMP extension registration, Hub executable, build, check, storage migration, and smoke scripts. |
 | `bun.lock` | Locked dependency graph. |
 | `biome.json` | Canonical formatting, lint, and import-organization policy. |
 | `tsconfig.json` | Strict TypeScript 7 no-emit project boundary for source, scripts, and tests. |

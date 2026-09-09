@@ -15,6 +15,7 @@
 	},
 	"scripts": {
 		"hub": "bun run src/hub/cli.ts",
+		"migrate:storage": "bun run scripts/migrate-storage.ts",
 		"format": "biome format --write .",
 		"lint": "biome lint .",
 		"typecheck": "tsc --noEmit",
