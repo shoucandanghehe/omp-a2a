@@ -58,11 +58,11 @@ Handshake failure, timeout, or cancellation terminates the unpublished socket an
 
 ### Message request
 
-The client sends `message` with `requestId`, opaque `messageId`, typed target, encoded text payload, ordered encoded attachments, and optional `replyTo`.
+The client sends `message` with `requestId`, opaque `messageId`, a non-empty target name list or `["@all"]`, encoded text payload, ordered encoded attachments, and optional `replyTo`.
 
-- A repeated, content-identical `messageId` returns the canonical stored Message as `replayed: true` without resolving or enumerating Presence and without delivery.
-- A new direct target resolves the current name and binds its `presenceId` before persistence; a missing target fails before persistence.
-- A new Project target is validated and atomically persisted before `PresenceRegistry` is enumerated exactly once into a local array excluding the sender.
+- A repeated, content-identical `messageId` returns the canonical stored Message as `replayed: true` without resolving or enumerating Presence and without delivery. Target names are canonicalized to a sorted unique set before comparison.
+- A new named target resolves every name and binds each resolved `presenceId` before persistence; any missing name, the sender's own name, an empty list, a duplicate, or mixing `@all` with names fails before persistence.
+- A new `@all` target is validated and atomically persisted before `PresenceRegistry` is enumerated exactly once into a local array excluding the sender.
 - `HubStore` validates the Project row, exact text and attachment wire shapes, canonical Base64, valid unique attachment basenames, decoded gzip data, and causal references, then atomically commits one immutable Message—including attachments—and the next Project sequence.
 - New acceptance sends `accepted` with `replayed: false`, the canonical Message, and selected recipient names. Replay sends `replayed: true` with no recipients field.
 - The Hub loops over the local array and immediately enqueues the canonical `message` frame to each concrete socket. Recipient arrays are never persisted.
@@ -109,7 +109,7 @@ WebSocket -> Presence
 - one immutable message row per accepted message;
 - globally idempotent `messageId` content comparison;
 - sender name and accepting `presenceId`;
-- direct/Project target, including resolved target Presence for direct messages;
+- the target name list or `@all`, including resolved target Presences for named targets;
 - canonical encoded text and ordered attachment names/content;
 - creation timestamp and optional same-Project causal parent sequence.
 
@@ -134,7 +134,7 @@ Project create/get/list/delete are synchronous store operations. Listing preserv
 
 ### Idempotency and causality
 
-Reusing `messageId` with the same Project, sender name, target kind/name, text encoding/data, ordered attachment names/encoding/data, and causal parent returns the canonical stored Message with `replayed: true`. A difference in any compared field raises `MessageIdConflictError`.
+Reusing `messageId` with the same Project, sender name, target kind/names, text encoding/data, ordered attachment names/encoding/data, and causal parent returns the canonical stored Message with `replayed: true`. A difference in any compared field raises `MessageIdConflictError`.
 
 `replyTo` must resolve to an existing message in the same Project or `UnknownReplyTargetError` is raised.
 

@@ -2,14 +2,17 @@ import { AGENT_NAME_RE, PROJECT_NAME_RE } from "../types";
 import { decodeTextPayload, parseEncodedAttachments } from "./payload";
 import type { EncodedAttachment, EncodedTextPayload } from "./types";
 
-export const A2A_PROTOCOL_VERSION = 4;
+export const A2A_PROTOCOL_VERSION = 5;
 export const DELIVERY_ACKNOWLEDGE_TIMEOUT_MS = 2_000;
 
 export const MESSAGE_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
 
+/** Magic target selecting every current Project Presence except the sender. */
+export const ALL_TARGET = "@all";
+
 const PEER_KEYS = ["name", "presenceId"] as const;
-const PROJECT_TARGET_KEYS = ["type"] as const;
-const AGENT_TARGET_KEYS = ["type", "name", "presenceId"] as const;
+const ALL_TARGET_KEYS = ["type"] as const;
+const AGENTS_TARGET_KEYS = ["type", "names", "presenceIds"] as const;
 const PAYLOAD_KEYS = ["encoding", "data"] as const;
 const ATTACHMENT_KEYS = ["name", "payload"] as const;
 const USER_APPROVAL_KEYS = ["kind"] as const;
@@ -86,6 +89,30 @@ function safeIntegerField(
 	return field;
 }
 
+function stringArrayField(
+	value: Record<string, unknown>,
+	key: string,
+	label: string,
+): string[] {
+	const field = value[key];
+	if (!Array.isArray(field))
+		throw new Error(`${label}.${key} must be an array`);
+	return field.map((entry) => {
+		if (typeof entry !== "string")
+			throw new Error(`${label}.${key} entries must be strings`);
+		return entry;
+	});
+}
+
+function optionalStringArrayField(
+	value: Record<string, unknown>,
+	key: string,
+	label: string,
+): string[] | undefined {
+	if (value[key] === undefined) return undefined;
+	return stringArrayField(value, key, label);
+}
+
 function decodePeer(value: unknown): Peer {
 	const peer = exactRecord(value, "message.from", PEER_KEYS);
 	const name = stringField(peer, "name", "message.from");
@@ -96,27 +123,69 @@ function decodePeer(value: unknown): Peer {
 	return { name, presenceId };
 }
 
+/**
+ * Canonicalizes one outbound target list: entries are current peer names, or the
+ * single magic value `@all`. Names are sorted so one recipient set has one
+ * canonical form; duplicates and mixing `@all` with names are rejected.
+ */
+export function normalizeRequestTarget(value: unknown): string[] {
+	if (!Array.isArray(value) || value.length === 0)
+		throw new Error(
+			`target must be a non-empty array of peer names or ["${ALL_TARGET}"]`,
+		);
+	const entries: string[] = [];
+	for (const entry of value) {
+		if (typeof entry !== "string")
+			throw new Error("target entries must be strings");
+		entries.push(entry);
+	}
+	if (entries.includes(ALL_TARGET)) {
+		if (entries.length > 1)
+			throw new Error(`target must not mix ${ALL_TARGET} with peer names`);
+		return [ALL_TARGET];
+	}
+	for (const name of entries) {
+		if (!AGENT_NAME_RE.test(name))
+			throw new Error(`invalid target name: ${name}`);
+	}
+	if (new Set(entries).size !== entries.length)
+		throw new Error("target names must be unique");
+	return entries.sort();
+}
+
 function decodeTarget(value: unknown): MessageTarget {
 	const candidate = record(value, "message.target");
 	const type = stringField(candidate, "type", "message.target");
-	const target = exactRecord(
-		candidate,
-		"message.target",
-		type === "project" ? PROJECT_TARGET_KEYS : AGENT_TARGET_KEYS,
-	);
-	if (type === "project") return { type };
-	if (type !== "agent") throw new Error("message.target.type is invalid");
-	const name = stringField(target, "name", "message.target");
-	if (!AGENT_NAME_RE.test(name))
-		throw new Error("message.target.name is invalid");
-	const presenceId = optionalStringField(
+	if (type === "all") {
+		exactRecord(candidate, "message.target", ALL_TARGET_KEYS);
+		return { type };
+	}
+	if (type !== "agents") throw new Error("message.target.type is invalid");
+	const target = exactRecord(candidate, "message.target", AGENTS_TARGET_KEYS);
+	const names = stringArrayField(target, "names", "message.target");
+	if (names.length === 0)
+		throw new Error("message.target.names must not be empty");
+	if (new Set(names).size !== names.length)
+		throw new Error("message.target.names must be unique");
+	for (const name of names) {
+		if (!AGENT_NAME_RE.test(name))
+			throw new Error("message.target.names is invalid");
+	}
+	const presenceIds = optionalStringArrayField(
 		target,
-		"presenceId",
+		"presenceIds",
 		"message.target",
 	);
-	if (presenceId === "")
-		throw new Error("message.target.presenceId is invalid");
-	return presenceId === undefined ? { type, name } : { type, name, presenceId };
+	if (presenceIds) {
+		if (presenceIds.length !== names.length)
+			throw new Error("message.target.presenceIds must match names");
+		for (const presenceId of presenceIds) {
+			if (!presenceId) throw new Error("message.target.presenceIds is invalid");
+		}
+	}
+	return presenceIds === undefined
+		? { type, names }
+		: { type, names, presenceIds };
 }
 
 function decodePayload(value: unknown): EncodedTextPayload {
@@ -236,13 +305,12 @@ export type Peer = {
 };
 
 export type MessageTarget =
-	| { type: "agent"; name: string; presenceId?: string }
-	| { type: "project" };
+	| { type: "all" }
+	| { type: "agents"; names: string[]; presenceIds?: string[] };
 export type UserApprovalReceipt = { kind: "omp-ui" };
 
-export type MessageRequestTarget =
-	| { type: "agent"; name: string }
-	| { type: "project" };
+/** Requested recipients: current peer names, or the single magic value `@all`. */
+export type MessageRequestTarget = string[];
 
 export type AcceptedMessage =
 	| {

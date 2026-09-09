@@ -21,7 +21,7 @@ omp-a2a-hub
 - **Extension:** a pure client. It never starts the Hub or reads the Hub data directory.
 - **Docker:** only keeps the Hub running. Users manage Projects and their own connection through `/a2a` commands.
 - **Multiple Hubs:** supported when each Hub has a different URL and data directory. Same-named Projects on different Hubs are unrelated.
-- **Wire protocol:** private protocol version `4`; Hub and extension reject mismatched versions. It is not the standard A2A protocol.
+- **Wire protocol:** private protocol version `5`; Hub and extension reject mismatched versions. It is not the standard A2A protocol.
 
 ## Domain model
 
@@ -54,11 +54,11 @@ billing:42
 
 Supported targets:
 
-- **Direct:** resolve one currently present name before persistence. Missing recipient fails immediately.
-- **Project:** persist the Message first, then enumerate the Project's current Presences once into a local array, excluding the sender, and enqueue to those concrete sockets. Later joiners do not receive it.
+- **Named:** resolve every requested name to a currently present Presence before persistence. A missing name or the sender's own name fails the whole Message immediately.
+- **Everyone:** the single magic target `@all` persists the Message first, then enumerates the Project's current Presences once into a local array, excluding the sender, and enqueues to those concrete sockets. Later joiners do not receive it.
 - **Reply:** `replyTo` points to an existing message in the same Project.
 
-A direct target is bound to the resolved `presenceId`. If it disconnects, the Message is never transferred to a future same-named connection. A Project broadcast does not persist its recipient array: there is no recipient table, outbox, offline queue, or durable delivery state.
+Requested names are a set: duplicates and mixing `@all` with names are rejected, and the canonical stored order is sorted, so replaying one `messageId` with reordered names still returns the canonical Message. Named targets are bound to their resolved `presenceId`s; if one disconnects, the Message is never transferred to a future same-named connection. An `@all` Message does not persist its recipient array: there is no recipient table, outbox, offline queue, or durable delivery state.
 
 An optional Message attachment is an immutable file-content value, not a durable object or a reference back to the sender. The sender Extension snapshots a current-session `local://` regular file before sending, and binds that snapshot work to the initiating Session and published connection so a Project switch cannot send it through a replacement connection. The Hub persists those bytes with the Message, and each receiving Extension materializes its own session-local copy. Cancellation or a Session/connection change stops attachment I/O and removes incomplete or otherwise uncommitted receiver/history output. Attachments share the Message lifecycle and disappear only when the Project is deleted.
 
@@ -80,7 +80,7 @@ ACK never deletes message history. A Hub restart retains accepted history but di
 
 History contains messages only, not Presence events. It is queried explicitly with stable cursors and is never replayed automatically when an Agent connects.
 
-Because this deployment has no accounts or durable identities, direct messaging is routing—not confidentiality. Any current Agent in the trusted Project can query Project history.
+Because this deployment has no accounts or durable identities, addressed messaging is routing—not confidentiality. Any current Agent in the trusted Project can query Project history.
 
 ## Trust model
 
@@ -233,33 +233,44 @@ The model receives exactly three A2A tools through `xd://a2a_peers`, `xd://a2a_m
 
 ### `a2a_peers`
 
-Shows this Agent's roster name separately, then lists the other currently connected names that are valid direct-message targets. Missing names do not exist.
+Shows this Agent's roster name separately, then lists the other currently connected names that are valid `a2a_message` targets. Missing names do not exist. The magic target `@all` addresses every current peer.
 
 ### `a2a_message`
 
-Direct message:
+Direct message to one peer:
 
 ```json
 {
-  "target": { "type": "agent", "name": "web" },
+  "target": ["web"],
   "text": "Check the login contract"
 }
 ```
 
-Project broadcast:
+One Message to several named peers:
 
 ```json
 {
-  "target": { "type": "project" },
+  "target": ["web", "training"],
   "text": "Freeze the contract"
 }
 ```
+
+Everyone in the Project:
+
+```json
+{
+  "target": ["@all"],
+  "text": "Freeze the contract"
+}
+```
+
+`target` is a non-empty array. Entries are peer names from `a2a_peers`, or the single magic value `@all`; every named peer must be present when the Message is accepted.
 
 Causal reply:
 
 ```json
 {
-  "target": { "type": "agent", "name": "web" },
+  "target": ["web"],
   "text": "Use the second option",
   "replyTo": "billing:42"
 }
@@ -269,7 +280,7 @@ Message with a session-local attachment:
 
 ```json
 {
-  "target": { "type": "agent", "name": "training" },
+  "target": ["training"],
   "text": "Use the frozen training contract",
   "attachments": ["local://v104-g1-training-handoff.md"]
 }

@@ -4,7 +4,7 @@
 
 `omp-a2a` provides anonymous realtime Agent chat between independent Oh My Pi (OMP) processes. A standalone Hub owns persistent Projects and message history, current WebSocket Presence, and realtime routing. The OMP extension is a pure client.
 
-The wire protocol is private version `4`. It is not the standard A2A protocol, requires matching Hub and extension versions, and assumes a fully trusted private network.
+The wire protocol is private version `5`. It is not the standard A2A protocol, requires matching Hub and extension versions, and assumes a fully trusted private network.
 
 ## System entry points
 
@@ -46,7 +46,7 @@ OMP session
 1. `A2aConnection` opens `/v1/connect`, sends a versioned `hello`, and waits at most 5 seconds (or until caller cancellation) for the claim. The first handshake outcome remains authoritative while the failed socket is torn down.
 2. `RealtimeHub` verifies the Project and atomically claims the name in `PresenceRegistry`.
 3. The client receives its `presenceId` and the current peer snapshot; current peers receive `presence_joined`.
-4. A direct request checks idempotency, resolves one current Presence, then persists. A Project broadcast persists first and, only for a new acceptance, enumerates current Project Presence once into a local array.
+4. A named target request checks idempotency, resolves every requested Presence, then persists. An `@all` request persists first and, only for a new acceptance, enumerates current Project Presence once into a local array.
 5. `HubStore` verifies the Project and atomically appends one immutable Message—including encoded attachment content—while assigning the next Project sequence; an identical existing `messageId` returns `replayed`.
 6. The Hub synchronously enqueues the Message once to each selected concrete socket and keeps one bounded in-memory ACK record per `(messageId, recipientPresenceId)`.
 7. Each receiver materializes attachments, injects the Message into OMP, then reports `delivered` or `delivery_failed`.
@@ -63,7 +63,7 @@ A same-named later connection is a new Presence and never inherits pending Deliv
 - Message references are `<project>:<sequence>` and sequence is monotonic per Project.
 - `messageId` is the persistent idempotency key; conflicting reuse fails and identical reuse returns the canonical Message as `replayed` without Presence enumeration or redelivery.
 - `replyTo` must resolve inside the same Project.
-- Direct messages are bound to the resolved `presenceId`; Project broadcasts persist before one local Presence enumeration and never persist their recipient array.
+- Named targets are bound to their resolved `presenceId`s; `@all` messages persist before one local Presence enumeration and never persist their recipient array.
 - History is append-only until Project deletion. Presence, recipient arrays, ACK trackers, and delivery events are not persisted.
 - Attachments are ordered immutable values inside a Message. Their names and bytes participate in `messageId` idempotency; they share the Message lifecycle.
 - `messages.sqlite` has an independent storage version. Startup accepts only the exact current version and complete set of current non-internal schema objects; unsupported storage fails closed.
@@ -95,8 +95,8 @@ The Hub runs locally with `bun run hub` or in Docker Compose. The CLI alone reso
 
 ### Model tools
 
-- `a2a_peers`: current Presence names in the connected Project.
-- `a2a_message`: direct message, Project broadcast, or causal reply, with optional current-session `local://` attachment sources; sending is fire-and-forget, so the model continues only other already-requested, reply-independent work or ends its turn.
+- `a2a_peers`: current Presence names in the connected Project, plus the magic `@all` target.
+- `a2a_message`: one or more named recipients, `@all`, or a causal reply, with optional current-session `local://` attachment sources; sending is fire-and-forget, so the model continues only other already-requested, reply-independent work or ends its turn.
 - `a2a_history`: deliberate lookup of already-persisted context, never a reply-waiting primitive.
 
 `a2a_message` can optionally request local OMP UI approval before sending. The proposing Agent owns that request and must obtain approval at its own sending endpoint; a receiver never asks its local user on the sender's behalf. For an unsigned approval-gated request, the receiver tells the sender to preserve target, text, causal parent, and attachments but use a new `messageId` and request approval at the sending endpoint; reusing the unsigned ID would conflict because the receipt changes persisted Message content. Forked OMP versions advertise `askDialogCapabilities.allowCustomInput` when `localAskDialog` can disable custom input; official OMP and older forks lack that marker and fall back to `confirm`/`input`, so every supported path hides Type. The UI reviews a human-readable summary containing only the target, text, and attachment names and source URLs. The Extension independently binds approval to the sending Presence, Project, exact `messageId`, target, text, causal parent, and snapshotted attachment names and bytes before adding a non-cryptographic `omp-ui` receipt. The receipt belongs only to that immutable Message and never propagates through replies, forwarding, or delegation. Rejection may return an exact user reason and suppresses an identical repeat for the same sending Presence and Message facts within the Session; cancellation sends nothing and is not cached. Model-visible inbound and history metadata labels the state as `senderUserApproval: "confirmed" | "unsigned"`.

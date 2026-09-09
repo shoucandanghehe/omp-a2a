@@ -63,7 +63,7 @@ try {
 		events: { onMessage: resolveMessage },
 	});
 	const accepted = await api.send({
-		target: { type: "agent", name: "web" },
+		target: ["web"],
 		text: "docker realtime",
 		attachments: [
 			{

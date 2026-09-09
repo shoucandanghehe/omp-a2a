@@ -344,7 +344,7 @@ describe("Hub Project control plane", () => {
 			name: "api",
 		});
 		const accepted = await connection.send({
-			target: { type: "project" },
+			target: ["@all"],
 			text: "must survive rejected deletion",
 			messageId: "active-history",
 		});
@@ -404,7 +404,7 @@ test("deleting and recreating a Project does not reuse its history", async () =>
 		name: "web",
 	});
 	await api.send({
-		target: { type: "agent", name: "web" },
+		target: ["web"],
 		text: "old history",
 		messageId: "old-history",
 	});

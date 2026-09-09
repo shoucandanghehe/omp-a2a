@@ -200,7 +200,7 @@ function acceptedFrame(
 			project: "room",
 			sequence: 1,
 			from: { name: "api", presenceId: "api-presence" },
-			target: { type: "project" },
+			target: { type: "all" },
 			payload: encodeTextPayload("accepted"),
 			attachments: [],
 			createdAt: 1,
@@ -319,7 +319,7 @@ test("Unicode Agent names connect and target by up to 32 characters", async () =
 			type: "message",
 			requestId: "unicode-direct",
 			messageId: "unicode-direct",
-			target: { type: "agent", name: "乙" },
+			target: ["乙"],
 			payload: encodeTextPayload("你好"),
 			attachments: [],
 		}),
@@ -328,7 +328,7 @@ test("Unicode Agent names connect and target by up to 32 characters", async () =
 		type: "message",
 		message: {
 			from: { name: senderName },
-			target: { type: "agent", name: "乙" },
+			target: { type: "agents", names: ["乙"] },
 		},
 	});
 
@@ -375,7 +375,7 @@ test("direct messages and broadcasts bind the current concrete Presences", async
 			type: "message",
 			requestId: "request-direct",
 			messageId: "direct-1",
-			target: { type: "agent", name: "web" },
+			target: ["web"],
 			payload: encodeTextPayload("check login"),
 			attachments: [],
 			userApproval: { kind: "omp-ui" },
@@ -413,7 +413,7 @@ test("direct messages and broadcasts bind the current concrete Presences", async
 			type: "message",
 			requestId: "request-broadcast",
 			messageId: "broadcast-1",
-			target: { type: "project" },
+			target: ["@all"],
 			payload: encodeTextPayload("freeze contract"),
 			attachments: [],
 		}),
@@ -432,7 +432,7 @@ test("direct messages and broadcasts bind the current concrete Presences", async
 		type: "accepted",
 		requestId: "request-broadcast",
 		replayed: false,
-		message: { messageRef: "chat:2", target: { type: "project" } },
+		message: { messageRef: "chat:2", target: { type: "all" } },
 		recipients: ["web", "test"],
 	});
 	web.socket.send(
@@ -458,7 +458,7 @@ test("direct messages and broadcasts bind the current concrete Presences", async
 			type: "message",
 			requestId: "request-disconnect",
 			messageId: "disconnect-1",
-			target: { type: "agent", name: "web" },
+			target: ["web"],
 			payload: encodeTextPayload("still there?"),
 			attachments: [],
 		}),
@@ -490,7 +490,7 @@ test("direct messages and broadcasts bind the current concrete Presences", async
 			type: "message",
 			requestId: "request-direct-replay",
 			messageId: "direct-1",
-			target: { type: "agent", name: "web" },
+			target: ["web"],
 			payload: encodeTextPayload("check login"),
 			attachments: [],
 			userApproval: { kind: "omp-ui" },
@@ -520,9 +520,9 @@ test("direct messages and broadcasts bind the current concrete Presences", async
 	const pendingMessage = history.find(
 		(message) => message.messageId === "disconnect-1",
 	);
-	if (pendingMessage?.target.type !== "agent")
+	if (pendingMessage?.target.type !== "agents")
 		throw new Error("expected direct target");
-	expect(pendingMessage.target.presenceId).not.toBe(
+	expect(pendingMessage.target.presenceIds?.[0]).not.toBe(
 		replacementClaimed.self.presenceId,
 	);
 	replacement.socket.close();
@@ -530,6 +530,173 @@ test("direct messages and broadcasts bind the current concrete Presences", async
 	api.socket.close();
 	// web closed above to prove pending delivery does not survive its Presence.
 	testPeer.socket.close();
+});
+
+test("one message fans out to several named Presences with one canonical target", async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-realtime-"));
+	roots.push(dataDir);
+	const hub = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir,
+	});
+	hubs.push(hub);
+	const client = new HubClient(hub.listenUrl);
+	await client.createProject({ name: "multi" });
+
+	const api = await connect(hub.listenUrl, "multi", "api");
+	await api.frames.next();
+	const web = await connect(hub.listenUrl, "multi", "web");
+	await web.frames.next();
+	await api.frames.next();
+	const testPeer = await connect(hub.listenUrl, "multi", "test");
+	await testPeer.frames.next();
+	await api.frames.next();
+	await web.frames.next();
+
+	api.socket.send(
+		JSON.stringify({
+			type: "message",
+			requestId: "request-multi",
+			messageId: "multi-1",
+			target: ["web", "test"],
+			payload: encodeTextPayload("both of you"),
+			attachments: [],
+		}),
+	);
+	expect(await web.frames.next()).toMatchObject({
+		type: "message",
+		message: {
+			messageId: "multi-1",
+			target: { type: "agents", names: ["test", "web"] },
+		},
+	});
+	expect(await testPeer.frames.next()).toMatchObject({
+		type: "message",
+		message: { messageId: "multi-1" },
+	});
+	expect(await api.frames.next()).toMatchObject({
+		type: "accepted",
+		requestId: "request-multi",
+		replayed: false,
+		message: {
+			messageRef: "multi:1",
+			target: { type: "agents", names: ["test", "web"] },
+		},
+		recipients: ["test", "web"],
+	});
+	web.socket.send(JSON.stringify({ type: "delivered", messageId: "multi-1" }));
+	testPeer.socket.send(
+		JSON.stringify({ type: "delivered", messageId: "multi-1" }),
+	);
+	const deliveries = [await api.frames.next(), await api.frames.next()];
+	expect(
+		deliveries
+			.map((frame) =>
+				frame.type === "delivery" ? `${frame.to}:${frame.status}` : frame.type,
+			)
+			.sort(),
+	).toEqual(["test:delivered", "web:delivered"]);
+
+	api.socket.send(
+		JSON.stringify({
+			type: "message",
+			requestId: "request-multi-replay",
+			messageId: "multi-1",
+			target: ["test", "web"],
+			payload: encodeTextPayload("both of you"),
+			attachments: [],
+		}),
+	);
+	expect(await api.frames.next()).toMatchObject({
+		type: "accepted",
+		requestId: "request-multi-replay",
+		replayed: true,
+		message: { messageRef: "multi:1" },
+	});
+
+	const history = (await client.history({ project: "multi" })).messages;
+	expect(history).toHaveLength(1);
+	const target = history[0]?.target;
+	if (target?.type !== "agents") throw new Error("expected agents target");
+	expect(target.names).toEqual(["test", "web"]);
+	expect(target.presenceIds).toHaveLength(2);
+
+	api.socket.close();
+	web.socket.close();
+	testPeer.socket.close();
+});
+
+test("named targets must all be present and uniquely named", async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-realtime-"));
+	roots.push(dataDir);
+	const hub = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir,
+	});
+	hubs.push(hub);
+	const client = new HubClient(hub.listenUrl);
+	await client.createProject({ name: "strict" });
+	const api = await connect(hub.listenUrl, "strict", "api");
+	await api.frames.next();
+	const web = await connect(hub.listenUrl, "strict", "web");
+	await web.frames.next();
+	await api.frames.next();
+
+	const rejected: Array<{
+		requestId: string;
+		target: unknown;
+		code: string;
+		message: string;
+	}> = [
+		{
+			requestId: "missing-peer",
+			target: ["web", "ghost"],
+			code: "recipient_not_present",
+			message: "recipient is not present: ghost",
+		},
+		{
+			requestId: "duplicate-name",
+			target: ["web", "web"],
+			code: "message_rejected",
+			message: "target names must be unique",
+		},
+		{
+			requestId: "empty-target",
+			target: [],
+			code: "message_rejected",
+			message: 'target must be a non-empty array of peer names or ["@all"]',
+		},
+		{
+			requestId: "mixed-all",
+			target: ["@all", "web"],
+			code: "message_rejected",
+			message: "target must not mix @all with peer names",
+		},
+	];
+	for (const scenario of rejected) {
+		api.socket.send(
+			JSON.stringify({
+				type: "message",
+				requestId: scenario.requestId,
+				messageId: scenario.requestId,
+				target: scenario.target,
+				payload: encodeTextPayload("must not persist"),
+				attachments: [],
+			}),
+		);
+		expect(await api.frames.next()).toMatchObject({
+			type: "error",
+			requestId: scenario.requestId,
+			code: scenario.code,
+			message: scenario.message,
+		});
+	}
+	expect((await client.history({ project: "strict" })).messages).toEqual([]);
+
+	api.socket.close();
+	web.socket.close();
 });
 
 test("the Hub rejects malformed user approval receipts without persistence", async () => {
@@ -557,7 +724,7 @@ test("the Hub rejects malformed user approval receipts without persistence", asy
 				type: "message",
 				requestId,
 				messageId: requestId,
-				target: { type: "project" },
+				target: ["@all"],
 				payload: encodeTextPayload("must not persist"),
 				attachments: [],
 				userApproval,
@@ -604,7 +771,7 @@ test("message history survives Hub restart while Presence does not", async () =>
 			type: "message",
 			requestId: "request-history",
 			messageId: "history-1",
-			target: { type: "agent", name: "web" },
+			target: ["web"],
 			payload: encodeTextPayload("persist this"),
 			attachments: [attachment],
 		}),
@@ -1011,7 +1178,7 @@ test("client termination bounds a close whose frames cannot reach the Hub", asyn
 	})();
 	const pendingOutcome = connection
 		.send(
-			{ target: { type: "project" }, text: "never receives an outcome" },
+			{ target: ["@all"], text: "never receives an outcome" },
 			{ timeoutMs: 500 },
 		)
 		.catch((error: unknown) => error);
@@ -1063,7 +1230,7 @@ test("aborted and timed out message requests ignore late acceptance and errors",
 
 	const controller = new AbortController();
 	const aborted = connection.send(
-		{ target: { type: "project" }, text: "abort", messageId: "abort-message" },
+		{ target: ["@all"], text: "abort", messageId: "abort-message" },
 		{ signal: controller.signal },
 	);
 	const abortedFrame = await transport.frames.next();
@@ -1077,7 +1244,7 @@ test("aborted and timed out message requests ignore late acceptance and errors",
 
 	const timedOut = connection.send(
 		{
-			target: { type: "project" },
+			target: ["@all"],
 			text: "timeout",
 			messageId: "timeout-message",
 		},
@@ -1097,7 +1264,7 @@ test("aborted and timed out message requests ignore late acceptance and errors",
 	);
 
 	const final = connection.send({
-		target: { type: "project" },
+		target: ["@all"],
 		text: "final",
 		messageId: "final-message",
 	});
@@ -1242,7 +1409,7 @@ test("malformed accepted frames reject the matching request", async () => {
 		const connection = await connecting;
 		const messageId = `malformed-acceptance-${index}`;
 		const pending = connection.send({
-			target: { type: "project" },
+			target: ["@all"],
 			text: malformed.name,
 			messageId,
 		});
@@ -1281,7 +1448,7 @@ test("message timeout overrides reject invalid and over-limit values before disp
 		const outcome = await connection
 			.send(
 				{
-					target: { type: "project" },
+					target: ["@all"],
 					text: "invalid timeout",
 					messageId: `invalid-timeout-${String(timeoutMs)}`,
 				},
@@ -1299,7 +1466,7 @@ test("message timeout overrides reject invalid and over-limit values before disp
 
 	const valid = connection.send(
 		{
-			target: { type: "project" },
+			target: ["@all"],
 			text: "valid timeout",
 			messageId: "valid-after-invalid",
 		},
@@ -1338,7 +1505,7 @@ test("delivery cleanup is fenced by recipient and sender Presence", async () => 
 			type: "message",
 			requestId: "recipient-disconnect-request",
 			messageId: "recipient-disconnect",
-			target: { type: "agent", name: "recipient" },
+			target: ["recipient"],
 			payload: encodeTextPayload("recipient leaves"),
 			attachments: [],
 		}),
@@ -1379,7 +1546,7 @@ test("delivery cleanup is fenced by recipient and sender Presence", async () => 
 			type: "message",
 			requestId: "sender-disconnect-request",
 			messageId: "sender-disconnect",
-			target: { type: "agent", name: "recipient" },
+			target: ["recipient"],
 			payload: encodeTextPayload("sender leaves"),
 			attachments: [],
 		}),
@@ -1404,7 +1571,7 @@ test("delivery cleanup is fenced by recipient and sender Presence", async () => 
 			type: "message",
 			requestId: "delivery-barrier-request",
 			messageId: "delivery-barrier",
-			target: { type: "agent", name: "sender" },
+			target: ["sender"],
 			payload: encodeTextPayload("barrier"),
 			attachments: [],
 		}),
@@ -1458,7 +1625,7 @@ test("broadcast snapshots current recipients once and replay does not redeliver"
 			type: "message",
 			requestId: "broadcast-order",
 			messageId: "broadcast-order",
-			target: { type: "project" },
+			target: ["@all"],
 			payload: encodeTextPayload("fan out"),
 			attachments: [],
 		}),
@@ -1489,7 +1656,7 @@ test("broadcast snapshots current recipients once and replay does not redeliver"
 			type: "message",
 			requestId: "broadcast-replay",
 			messageId: "broadcast-order",
-			target: { type: "project" },
+			target: ["@all"],
 			payload: encodeTextPayload("fan out"),
 			attachments: [],
 		}),
@@ -1522,7 +1689,7 @@ test("failed broadcast append sends no recipient frame", async () => {
 			type: "message",
 			requestId: "append-failure",
 			messageId: "append-failure",
-			target: { type: "project" },
+			target: ["@all"],
 			payload: encodeTextPayload("must persist first"),
 			attachments: [],
 		}),
@@ -1550,7 +1717,7 @@ test("missing acknowledgement fails once without redelivery", async () => {
 			type: "message",
 			requestId: "unconfirmed-request",
 			messageId: "unconfirmed-delivery",
-			target: { type: "agent", name: "recipient" },
+			target: ["recipient"],
 			payload: encodeTextPayload("send once"),
 			attachments: [],
 		}),
@@ -1610,7 +1777,7 @@ test("same-version clients carry large messages and arbitrary attachment counts"
 		}),
 	);
 	const accepted = await sender.send({
-		target: { type: "agent", name: "receiver" },
+		target: ["receiver"],
 		text: "large trusted payload",
 		attachments,
 		messageId: "large-trusted-payload",

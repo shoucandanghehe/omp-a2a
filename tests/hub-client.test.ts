@@ -12,6 +12,7 @@ import {
 	probeHub,
 	resolveHubUrl,
 } from "../src/hub/client";
+import { A2A_PROTOCOL_VERSION } from "../src/hub/realtime-types";
 
 const homes: string[] = [];
 
@@ -310,7 +311,7 @@ test("history rejects invalid sequences, references, attachments, and approval r
 		project: "client-test",
 		sequence: 1,
 		from: { name: "api", presenceId: "presence-api" },
-		target: { type: "project" },
+		target: { type: "all" },
 		payload: { encoding: "identity", data: "hello" },
 		attachments: [],
 		createdAt: 1,
@@ -376,7 +377,7 @@ test("history rejects invalid sequences, references, attachments, and approval r
 });
 
 const validMetadata = {
-	protocolVersion: 4,
+	protocolVersion: A2A_PROTOCOL_VERSION,
 };
 
 const validProject = {
@@ -402,7 +403,7 @@ function historyMessage(
 		project: "alpha",
 		sequence,
 		from: { name: "api", presenceId: "presence-api" },
-		target: { type: "project" },
+		target: { type: "all" },
 		payload: { encoding: "identity", data: "hello" },
 		attachments: [],
 		createdAt: sequence,
@@ -470,22 +471,22 @@ const exactKeyScenarios: ExactKeyScenario[] = [
 		request: (client) => client.history({ project: "alpha" }),
 	},
 	{
-		name: "Project message target",
+		name: "all message target",
 		response: {
 			messages: [
 				historyMessage(1, {
-					target: { type: "project", name: "api" },
+					target: { type: "all", name: "api" },
 				}),
 			],
 		},
 		request: (client) => client.history({ project: "alpha" }),
 	},
 	{
-		name: "agent message target",
+		name: "agents message target",
 		response: {
 			messages: [
 				historyMessage(1, {
-					target: { type: "agent", name: "api", unexpected: true },
+					target: { type: "agents", names: ["api"], unexpected: true },
 				}),
 			],
 		},

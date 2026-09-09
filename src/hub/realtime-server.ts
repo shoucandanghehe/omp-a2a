@@ -5,10 +5,12 @@ import { WebSocket, WebSocketServer } from "ws";
 import { NameInUseError, type Presence, PresenceRegistry } from "./presence";
 import {
 	A2A_PROTOCOL_VERSION,
+	ALL_TARGET,
 	type ClientFrame,
 	DELIVERY_ACKNOWLEDGE_TIMEOUT_MS,
 	decodeUserApprovalReceipt,
 	isExactGoodbyeFrame,
+	normalizeRequestTarget,
 	type ServerFrame,
 } from "./realtime-types";
 import {
@@ -291,16 +293,9 @@ export class RealtimeHub {
 					"requestId, messageId, target, payload and attachments are required",
 				);
 			}
-			if (frame.target.type !== "agent" && frame.target.type !== "project")
-				throw new Error("invalid message target");
 			if (frame.replyTo !== undefined && typeof frame.replyTo !== "string")
 				throw new Error("invalid replyTo");
-			if (
-				frame.target.type === "agent" &&
-				typeof frame.target.name !== "string"
-			) {
-				throw new Error("recipient name is required");
-			}
+			const target = normalizeRequestTarget(frame.target);
 			const userApproval =
 				frame.userApproval === undefined
 					? undefined
@@ -314,9 +309,9 @@ export class RealtimeHub {
 				project: presence.project,
 				from: { name: presence.name, presenceId: presence.presenceId },
 				target:
-					frame.target.type === "agent"
-						? { type: "agent", name: frame.target.name }
-						: { type: "project" },
+					target[0] === ALL_TARGET
+						? { type: "all" }
+						: { type: "agents", names: target },
 				payload: frame.payload,
 				attachments: frame.attachments,
 				createdAt: Date.now(),
@@ -325,7 +320,7 @@ export class RealtimeHub {
 			};
 			let recipients: Presence[];
 			let appended: MessageAppendResult;
-			if (draft.target.type === "agent") {
+			if (draft.target.type === "agents") {
 				const replayed = this.#store.replay(draft);
 				if (replayed) {
 					this.#send(presence.socket, {
@@ -336,26 +331,34 @@ export class RealtimeHub {
 					});
 					return;
 				}
-				const recipient = this.#presences.get(
-					presence.project,
-					draft.target.name,
-				);
-				if (!recipient) {
+				const resolved: Presence[] = [];
+				const missing: string[] = [];
+				for (const name of draft.target.names) {
+					const recipient = this.#presences.get(presence.project, name);
+					if (!recipient) {
+						missing.push(name);
+						continue;
+					}
+					if (recipient.presenceId === presence.presenceId)
+						throw new Error("cannot send to yourself");
+					resolved.push(recipient);
+				}
+				if (missing.length > 0) {
 					throw new RecipientNotPresentError(
-						`recipient is not present: ${draft.target.name}`,
+						missing.length === 1
+							? `recipient is not present: ${missing[0]}`
+							: `recipients are not present: ${missing.join(", ")}`,
 					);
 				}
-				if (recipient.presenceId === presence.presenceId)
-					throw new Error("cannot send to yourself");
 				appended = this.#store.append({
 					...draft,
 					target: {
-						type: "agent",
-						name: recipient.name,
-						presenceId: recipient.presenceId,
+						type: "agents",
+						names: resolved.map((recipient) => recipient.name),
+						presenceIds: resolved.map((recipient) => recipient.presenceId),
 					},
 				});
-				recipients = [recipient];
+				recipients = resolved;
 			} else {
 				appended = this.#store.append(draft);
 				if (appended.replayed) {

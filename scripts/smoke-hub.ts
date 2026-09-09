@@ -105,47 +105,72 @@ async function main() {
 		"Presence snapshot is current",
 	);
 
-	console.log("\n== direct message and delivery ==");
-	const direct = await api.send({
-		target: { type: "agent", name: "web" },
+	console.log("\n== named message and delivery ==");
+	const named = await api.send({
+		target: ["web"],
 		text: "hello",
 		messageId: "smoke-direct",
 	});
 	assert(
-		direct.message.messageRef === "mesh-demo:1",
-		"direct message receives Project sequence",
+		named.message.messageRef === "mesh-demo:1",
+		"named message receives Project sequence",
 	);
 	assert(
 		decodeTextPayload((await webMessages.next()).payload) === "hello",
-		"direct message arrives in realtime",
+		"named message arrives in realtime",
 	);
 	assert(
 		(await deliveries.next()).status === "delivered",
 		"receiver acknowledgment becomes delivery event",
 	);
 
-	console.log("\n== Project broadcast ==");
+	console.log("\n== @all message ==");
 	const broadcast = await api.send({
-		target: { type: "project" },
+		target: ["@all"],
 		text: "freeze contract",
 		messageId: "smoke-broadcast",
 	});
 	assert(
 		broadcast.replayed === false,
-		"new broadcast is not an idempotent replay",
+		"new @all message is not an idempotent replay",
 	);
 	assert(
 		broadcast.recipients.join(",") === "web,test",
-		"broadcast freezes the current Presence snapshot",
+		"@all freezes the current Presence snapshot",
 	);
 	assert(
 		decodeTextPayload((await webMessages.next()).payload) === "freeze contract",
-		"web receives broadcast",
+		"web receives @all message",
 	);
 	assert(
 		decodeTextPayload((await testMessages.next()).payload) ===
 			"freeze contract",
-		"test receives broadcast",
+		"test receives @all message",
+	);
+	await deliveries.next();
+	await deliveries.next();
+
+	console.log("\n== one message to several named peers ==");
+	const multi = await api.send({
+		target: ["web", "test"],
+		text: "both of you",
+		messageId: "smoke-multi",
+	});
+	assert(
+		multi.replayed === false,
+		"new multi-target message is not an idempotent replay",
+	);
+	assert(
+		multi.recipients.join(",") === "test,web",
+		"multi-target message reaches every named Presence",
+	);
+	assert(
+		decodeTextPayload((await webMessages.next()).payload) === "both of you",
+		"web receives the multi-target message",
+	);
+	assert(
+		decodeTextPayload((await testMessages.next()).payload) === "both of you",
+		"test receives the multi-target message",
 	);
 	await deliveries.next();
 	await deliveries.next();
@@ -166,7 +191,16 @@ async function main() {
 		project: "mesh-demo",
 		limit: 10,
 	});
-	assert(history.messages.length === 2, "history survives Hub restart");
+	assert(history.messages.length === 3, "history survives Hub restart");
+	const multiHistory = history.messages.find(
+		(message) => message.messageId === "smoke-multi",
+	);
+	assert(
+		multiHistory !== undefined &&
+			multiHistory.target.type === "agents" &&
+			multiHistory.target.names.join(",") === "test,web",
+		"multi-target history keeps the canonical sorted names",
+	);
 	const replacement = await A2aConnection.connect({
 		baseUrl: restarted.listenUrl,
 		project: "mesh-demo",

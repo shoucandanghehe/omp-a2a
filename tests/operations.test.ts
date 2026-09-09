@@ -78,7 +78,7 @@ test("one runtime path serves discovery, messaging, delivery, and history", asyn
 	expect(api.peers().map((peer) => peer.name)).toEqual(["web"]);
 
 	const accepted = await api.message({
-		target: { type: "agent", name: "web" },
+		target: ["web"],
 		text: "check login",
 		messageId: "runtime-message",
 		userApproval: { kind: "omp-ui" },
@@ -96,9 +96,9 @@ test("one runtime path serves discovery, messaging, delivery, and history", asyn
 		text: "check login",
 		userApproval: { kind: "omp-ui" },
 	});
-	await expect(
-		api.message({ target: { type: "agent", name: "api" }, text: "self" }),
-	).rejects.toThrow("cannot send to yourself");
+	await expect(api.message({ target: ["api"], text: "self" })).rejects.toThrow(
+		"cannot send to yourself",
+	);
 	expect(await delivered).toEqual({
 		messageId: "runtime-message",
 		to: "web",
@@ -114,7 +114,7 @@ test("one runtime path serves discovery, messaging, delivery, and history", asyn
 
 	await web.disconnect();
 	const replayed = await api.message({
-		target: { type: "agent", name: "web" },
+		target: ["web"],
 		text: "check login",
 		messageId: "runtime-message",
 		userApproval: { kind: "omp-ui" },
@@ -125,7 +125,7 @@ test("one runtime path serves discovery, messaging, delivery, and history", asyn
 	});
 	await expect(
 		api.message({
-			target: { type: "agent", name: "web" },
+			target: ["web"],
 			text: "are you there",
 		}),
 	).rejects.toThrow("recipient_not_present");
@@ -187,13 +187,13 @@ test("receiver injection completes in Hub message order", async () => {
 	await api.connect("runtime-order", "api");
 	await web.connect("runtime-order", "web");
 	await api.message({
-		target: { type: "agent", name: "web" },
+		target: ["web"],
 		text: "first",
 		messageId: "ordered-first",
 	});
 	await firstStarted.promise;
 	await api.message({
-		target: { type: "agent", name: "web" },
+		target: ["web"],
 		text: "second",
 		messageId: "ordered-second",
 	});
@@ -240,7 +240,7 @@ test("receiver injection failure produces a terminal failed delivery", async () 
 	await api.connect("runtime-failure", "api");
 	await web.connect("runtime-failure", "web");
 	const accepted = await api.message({
-		target: { type: "agent", name: "web" },
+		target: ["web"],
 		text: "persist despite failed injection",
 		messageId: "failed-delivery",
 	});
@@ -306,7 +306,7 @@ test("pre-dispatch message abort sends nothing to history", async () => {
 	await expect(
 		api.message(
 			{
-				target: { type: "project" },
+				target: ["@all"],
 				text: "must not persist",
 				messageId: "pre-aborted",
 			},
@@ -363,7 +363,7 @@ test("published connection keeps its Hub binding until a replacement succeeds", 
 	await conflict.connect("hub-binding", "worker");
 	await firstPeer.connect("hub-binding", "sender");
 	await firstPeer.message({
-		target: { type: "agent", name: "worker" },
+		target: ["worker"],
 		text: "first lifecycle",
 	});
 	const oldSignal = await firstSignal.promise;
@@ -389,7 +389,7 @@ test("published connection keeps its Hub binding until a replacement succeeds", 
 
 	await secondPeer.connect("hub-binding", "sender");
 	await secondPeer.message({
-		target: { type: "agent", name: "worker" },
+		target: ["worker"],
 		text: "second lifecycle",
 	});
 	const currentSignal = await secondSignal.promise;
@@ -642,9 +642,9 @@ test("only the latest connection transition can publish or emit events", async (
 				sequence: 1,
 				from: { name: "sender", presenceId: "sender-presence" },
 				target: {
-					type: "agent",
-					name: "slow",
-					presenceId: "slow-presence",
+					type: "agents",
+					names: ["slow"],
+					presenceIds: ["slow-presence"],
 				},
 				payload: {
 					encoding: "identity",

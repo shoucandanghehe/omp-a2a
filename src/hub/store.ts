@@ -18,7 +18,7 @@ import {
 } from "./realtime-types";
 import type { EncodedAttachment, EncodedTextPayload } from "./types";
 
-export const MESSAGE_STORAGE_VERSION = 2;
+export const MESSAGE_STORAGE_VERSION = 3;
 const UNSUPPORTED_STORAGE_MESSAGE =
 	"unsupported pre-release storage; start with an empty data directory";
 
@@ -49,8 +49,8 @@ type MessageRow = {
 	sender_name: string;
 	sender_presence_id: string;
 	target_kind: string;
-	target_name: string | null;
-	target_presence_id: string | null;
+	target_names: string | null;
+	target_presence_ids: string | null;
 	encoding: string;
 	data: string;
 	attachments: string;
@@ -94,8 +94,8 @@ const MESSAGES_SCHEMA = `
 		sender_name TEXT NOT NULL,
 		sender_presence_id TEXT NOT NULL,
 		target_kind TEXT NOT NULL,
-		target_name TEXT,
-		target_presence_id TEXT,
+		target_names TEXT,
+		target_presence_ids TEXT,
 		encoding TEXT NOT NULL,
 		data TEXT NOT NULL,
 		attachments TEXT NOT NULL,
@@ -111,6 +111,19 @@ const MESSAGES_PROJECT_SENDER_INDEX_SCHEMA =
 
 function normalizeSchema(sql: string): string {
 	return sql.replace(/\s+/g, " ").trim();
+}
+
+function storedStringArray(value: string | null, label: string): string[] {
+	if (value === null) throw new Error(`missing stored ${label}`);
+	const parsed: unknown = JSON.parse(value);
+	if (
+		!Array.isArray(parsed) ||
+		parsed.length === 0 ||
+		parsed.some((entry) => typeof entry !== "string" || entry === "")
+	) {
+		throw new Error(`invalid stored ${label}`);
+	}
+	return parsed as string[];
 }
 
 const CURRENT_SCHEMA = [
@@ -199,7 +212,7 @@ export class HubStore {
 			this.#insert = this.#database.query(`
 				INSERT INTO messages(
 					project, project_sequence, msg_id, sender_name, sender_presence_id,
-					target_kind, target_name, target_presence_id, encoding, data,
+					target_kind, target_names, target_presence_ids, encoding, data,
 					attachments, user_approved, created_at, reply_to_sequence
 				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			`);
@@ -256,9 +269,11 @@ export class HubStore {
 						draft.from.name,
 						draft.from.presenceId,
 						draft.target.type,
-						draft.target.type === "agent" ? draft.target.name : null,
-						draft.target.type === "agent"
-							? (draft.target.presenceId ?? null)
+						draft.target.type === "agents"
+							? JSON.stringify(draft.target.names)
+							: null,
+						draft.target.type === "agents" && draft.target.presenceIds
+							? JSON.stringify(draft.target.presenceIds)
 							: null,
 						draft.payload.encoding,
 						draft.payload.data,
@@ -484,11 +499,23 @@ export class HubStore {
 			throw new Error(`invalid sender name: ${draft.from.name}`);
 		if (!draft.from.presenceId)
 			throw new Error("sender presenceId is required");
-		if (
-			draft.target.type === "agent" &&
-			!AGENT_NAME_RE.test(draft.target.name)
-		) {
-			throw new Error(`invalid recipient name: ${draft.target.name}`);
+		if (draft.target.type === "agents") {
+			if (draft.target.names.length === 0)
+				throw new Error("target names are required");
+			if (new Set(draft.target.names).size !== draft.target.names.length)
+				throw new Error("target names must be unique");
+			for (const name of draft.target.names) {
+				if (!AGENT_NAME_RE.test(name))
+					throw new Error(`invalid recipient name: ${name}`);
+			}
+			const presenceIds = draft.target.presenceIds;
+			if (presenceIds) {
+				if (presenceIds.length !== draft.target.names.length)
+					throw new Error("target presenceIds must match names");
+				for (const presenceId of presenceIds) {
+					if (!presenceId) throw new Error("recipient presenceId is required");
+				}
+			}
 		}
 		if (!Number.isSafeInteger(draft.createdAt) || draft.createdAt < 0)
 			throw new Error("invalid createdAt");
@@ -509,8 +536,10 @@ export class HubStore {
 			row.project === draft.project &&
 			row.sender_name === draft.from.name &&
 			row.target_kind === draft.target.type &&
-			row.target_name ===
-				(draft.target.type === "agent" ? draft.target.name : null) &&
+			row.target_names ===
+				(draft.target.type === "agents"
+					? JSON.stringify(draft.target.names)
+					: null) &&
 			row.encoding === draft.payload.encoding &&
 			row.data === draft.payload.data &&
 			row.attachments === JSON.stringify(attachments) &&
@@ -520,17 +549,23 @@ export class HubStore {
 	}
 
 	#toMessage(row: MessageRow): RealtimeMessage {
-		if (row.target_kind !== "agent" && row.target_kind !== "project") {
+		if (row.target_kind !== "agents" && row.target_kind !== "all") {
 			throw new Error(`invalid stored target kind: ${row.target_kind}`);
 		}
 		const target: MessageTarget =
-			row.target_kind === "agent"
+			row.target_kind === "agents"
 				? {
-						type: "agent",
-						name: row.target_name ?? "",
-						presenceId: row.target_presence_id ?? undefined,
+						type: "agents",
+						names: storedStringArray(row.target_names, "target names"),
+						presenceIds:
+							row.target_presence_ids === null
+								? undefined
+								: storedStringArray(
+										row.target_presence_ids,
+										"target presenceIds",
+									),
 					}
-				: { type: "project" };
+				: { type: "all" };
 		const payload: EncodedTextPayload = {
 			encoding: row.encoding as EncodedTextPayload["encoding"],
 			data: row.data,

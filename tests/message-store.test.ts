@@ -26,7 +26,7 @@ function appendMessage(
 		messageId,
 		project,
 		from: { name: "api", presenceId: "presence-api" },
-		target: { type: "project" },
+		target: { type: "all" },
 		payload: encodeTextPayload(messageId),
 		attachments: [],
 		createdAt,
@@ -49,7 +49,7 @@ test("messages form one immutable sequence per Project", () => {
 		messageId: "message-1",
 		project: "billing",
 		from: { name: "api", presenceId: "presence-api" },
-		target: { type: "agent", name: "web", presenceId: "presence-web" },
+		target: { type: "agents", names: ["web"], presenceIds: ["presence-web"] },
 		payload: encodeTextPayload("check the login contract"),
 		attachments: [],
 		createdAt: 100,
@@ -59,7 +59,7 @@ test("messages form one immutable sequence per Project", () => {
 		messageId: "message-2",
 		project: "billing",
 		from: { name: "api", presenceId: "presence-api" },
-		target: { type: "project" },
+		target: { type: "all" },
 		payload: encodeTextPayload("freeze the contract"),
 		attachments: [],
 		createdAt: 101,
@@ -88,7 +88,11 @@ test("messages form one immutable sequence per Project", () => {
 		messageId: "message-1",
 		project: "billing",
 		from: { name: "api", presenceId: "another-presence" },
-		target: { type: "agent", name: "web", presenceId: "another-web-presence" },
+		target: {
+			type: "agents",
+			names: ["web"],
+			presenceIds: ["another-web-presence"],
+		},
 		payload: encodeTextPayload("check the login contract"),
 		attachments: [],
 		createdAt: 999,
@@ -100,7 +104,7 @@ test("messages form one immutable sequence per Project", () => {
 			messageId: "message-1",
 			project: "billing",
 			from: { name: "api", presenceId: "presence-api" },
-			target: { type: "agent", name: "web", presenceId: "presence-web" },
+			target: { type: "agents", names: ["web"], presenceIds: ["presence-web"] },
 			payload: encodeTextPayload("check the login contract"),
 			attachments: [],
 			createdAt: 100,
@@ -111,7 +115,7 @@ test("messages form one immutable sequence per Project", () => {
 			messageId: "message-1",
 			project: "billing",
 			from: { name: "api", presenceId: "presence-api" },
-			target: { type: "agent", name: "web", presenceId: "presence-web" },
+			target: { type: "agents", names: ["web"], presenceIds: ["presence-web"] },
 			payload: encodeTextPayload("different body"),
 			attachments: [],
 			createdAt: 100,
@@ -143,7 +147,7 @@ test("messages form one immutable sequence per Project", () => {
 });
 
 test("current storage schema is versioned and reopens", () => {
-	expect(MESSAGE_STORAGE_VERSION).toBe(2);
+	expect(MESSAGE_STORAGE_VERSION).toBe(3);
 	const root = mkdtempSync(join(tmpdir(), "omp-a2a-messages-"));
 	roots.push(root);
 	const databasePath = join(root, "messages.sqlite");
@@ -153,7 +157,7 @@ test("current storage schema is versioned and reopens", () => {
 		messageId: "current-schema",
 		project: "current",
 		from: { name: "api", presenceId: "presence-api" },
-		target: { type: "project" },
+		target: { type: "all" },
 		payload: encodeTextPayload("persist the current schema"),
 		attachments: [],
 		createdAt: 100,
@@ -190,7 +194,7 @@ test("history uses stable Project cursors and sender filters", () => {
 			messageId: `history-${index + 1}`,
 			project: "history",
 			from: { name: from, presenceId: `presence-${from}` },
-			target: { type: "project" },
+			target: { type: "all" },
 			payload: encodeTextPayload(`message ${index + 1}`),
 			attachments: [],
 			createdAt: index + 1,
@@ -230,7 +234,7 @@ test("history keeps its default page and accepts explicit large limits", () => {
 			messageId: `large-limit-${index}`,
 			project: "large-limit",
 			from: { name: "api", presenceId: "presence-api" },
-			target: { type: "project" },
+			target: { type: "all" },
 			payload: encodeTextPayload(`message ${index}`),
 			attachments: [],
 			createdAt: index,
@@ -366,7 +370,7 @@ test("attachment content participates in messageId idempotency", () => {
 		messageId: "attachment-idempotency",
 		project: "attachments",
 		from: { name: "api", presenceId: "presence-api" },
-		target: { type: "project" as const },
+		target: { type: "all" as const },
 		payload: encodeTextPayload("training contract"),
 		attachments: [
 			{

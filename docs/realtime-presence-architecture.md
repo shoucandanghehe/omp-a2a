@@ -21,11 +21,11 @@ Those mechanics did not match the actual product boundary: independent OMP sessi
 
 There is no offline, stale, durable member, recipient cursor, or offline-delivery state. A same-named later connection is a new Presence and inherits nothing from the old socket.
 
-Direct messaging resolves one current name and binds the target `presenceId`. Project broadcast freezes the current Presence snapshot when the Hub accepts the message, excludes the sender, and never backfills later joiners. `replyTo` provides causality inside the same Project history.
+A Message target is one non-empty list of peer names, or the single magic value `@all`. Named targets resolve every name to a current Presence and bind each resolved `presenceId`; any missing name fails the whole Message before persistence. `@all` freezes the current Presence snapshot when the Hub accepts the message, excludes the sender, and never backfills later joiners. `replyTo` provides causality inside the same Project history.
 
 ### Transport and persistence
 
-Private protocol version `4` reuses the Hub HTTP server:
+Private protocol version `5` reuses the Hub HTTP server:
 
 - WebSocket `/v1/connect` carries handshake, Presence events, Messages with inline attachment content, acknowledgments, and Delivery outcomes. Failed handshake teardown preserves whichever timeout, protocol, transport, or caller-cancellation outcome settled first.
 - HTTP carries Hub metadata, Project administration, and explicit history queries.
@@ -36,7 +36,7 @@ Text below 32 KiB stays identity encoded. Larger text uses gzip plus Base64 only
 
 ### Public interfaces
 
-Humans administer Projects and their own connection through `/a2a`. Models receive exactly `a2a_peers`, `a2a_message`, and `a2a_history`. Every model turn receives stable A2A tool, collaboration-authority, and approval-ownership guidance; the latest hidden `a2a-connection` message supplies current operational status, Project, and roster name. Connected models use only current peer results or inbound sender names for A2A addressing. Inbound messages are pushed into OMP serially in Hub-assigned Project sequence through `steer` delivery; there is no polling tool or user send/Inbox protocol surface.
+Humans administer Projects and their own connection through `/a2a`. Models receive exactly `a2a_peers`, `a2a_message`, and `a2a_history`. Every model turn receives stable A2A tool, collaboration-authority, and approval-ownership guidance; the latest hidden `a2a-connection` message supplies current operational status, Project, and roster name. Connected models address current peer results, inbound sender names, or the magic target `@all` for every current peer. Inbound messages are pushed into OMP serially in Hub-assigned Project sequence through `steer` delivery; there is no polling tool or user send/Inbox protocol surface.
 
 `a2a_message` accepts optional current-session `local://` regular-file sources. The sender Extension snapshots their bytes before sending; the Hub never resolves sender-local URLs. Receiving and history-querying Extensions materialize new `local://` copies inside their own sessions before exposing the Message.
 
@@ -53,18 +53,18 @@ Repository configuration uses `name` and `autoConnect`; Hub selection is explici
 ## Consequences
 
 - Presence state is simple and observable: a successfully claimed socket is present until Hub release; graceful release and bounded transport teardown are separate steps.
-- Missing direct recipients fail immediately instead of creating latent work.
+- Missing named recipients fail the whole Message immediately instead of creating latent work.
 - Hub restart clears Presence and delivery state but preserves message history.
 - `delivered` proves successful attachment materialization and injection into the receiving OMP extension, not model understanding or task completion. Materialization or injection errors produce `failed`; write errors, disconnects, and missing ACKs also produce `failed` with an explicit unconfirmed reason.
 - The Hub sends each Message frame once and retains no receiver outcome cache. An ACK lost after injection can therefore produce an unconfirmed failure even though the receiver injected successfully.
-- Direct routing is not confidential history. Without accounts and authorization, any trusted current Agent can query Project history.
-- Hub and extension must upgrade together because private protocol version `4` requires an exact match and has no compatibility path for version `3` Message frames.
+- Addressed routing is not confidential history. Without accounts and authorization, any trusted current Agent can query Project history.
+- Hub and extension must upgrade together because private protocol version `5` requires an exact match and has no compatibility path for version `4` Message frames.
 - Matching-version clients are trusted to produce valid internal payloads. Removing application payload and history resource caps keeps the path linear, while deployment resource isolation contains failures.
 - Project deletion is rejected while that Project has an active Presence, then removes its metadata, sequence, and message history in one SQLite transaction.
 
 ## Verification
 
-The behavior suite and executable smoke scenarios cover duplicate names, immediate Presence removal, direct-target failure, broadcast snapshots, causal replies, single-attempt Delivery acknowledgements and failures, non-persistent Presence events, bounded teardown, attachment ownership and history, uncapped trusted payload and history paths, restart persistence, exact current storage guards, the model and human surfaces, and the Docker HTTP/WebSocket boundary.
+The behavior suite and executable smoke scenarios cover duplicate names, immediate Presence removal, named-target failure, multi-target fan-out, `@all` snapshots, causal replies, single-attempt Delivery acknowledgements and failures, non-persistent Presence events, bounded teardown, attachment ownership and history, uncapped trusted payload and history paths, restart persistence, exact current storage guards, the model and human surfaces, and the Docker HTTP/WebSocket boundary.
 
 ## Deployment
 
