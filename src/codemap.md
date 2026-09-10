@@ -10,18 +10,20 @@ The central seam is `A2aRuntime`: extension callbacks and commands depend on one
 
 | File | Responsibility | Primary interface |
 | --- | --- | --- |
-| `extension.ts` | OMP registration, session lifecycle, UI notifications, reconnect policy, slash commands, completions, and model tools. | default extension factory |
+| `extension.ts` | OMP registration, session lifecycle, UI notifications, reconnect policy, slash commands, completions, and model tools. | `a2aExtension(pi, dependencies?)` |
 | `local-attachments.ts` | Cancellable snapshot of uncapped sender-session `local://` file bytes and leak-free materialization of validated attachment basenames into the calling session. | `snapshotLocalAttachments`, `materializeLocalAttachments` |
-| `operations.ts` | Connected runtime over one WebSocket plus HTTP Project/history operations. | `A2aRuntime`, `MessageView`, `RuntimeStatus` |
+| `operations.ts` | Connected runtime over one WebSocket plus HTTP Project/history operations. | `A2aRuntime`, `A2aRuntimeEvents`, `MessageView`, `AcceptedMessageView`, `RuntimeStatus` |
 | `config.ts` | Strict repository-local YAML/JSON connection defaults. | `loadLocalConfig` |
 | `config-document.ts` | Read YAML/JSON documents, apply an owner-supplied omptype schema, and report path-qualified errors. | `parseWithSchema` |
 | `paths.ts` | Hub SQLite storage, data-lock, and local config candidate paths. | path functions |
 | `types.ts` | Project/config domain shapes and name validation regexes. | `A2aProject`, `A2aLocalConfig` |
 | `hub/` | HTTP/WebSocket clients plus the Hub's canonical Project/message store. | [`hub/codemap.md`](hub/codemap.md) |
 
+`a2aExtension` (`src/extension.ts`) accepts optional `snapshotAttachments` and `materializeAttachments` dependency overrides; production defaults are `snapshotLocalAttachments` and `materializeLocalAttachments`. `A2aRuntime` (`src/operations.ts`) receives optional Presence, Message, Delivery, close, and error callbacks through `A2aRuntimeEvents`.
+
 ## Extension lifecycle
 
-`a2aExtension(pi)` owns the active OMP `ExtensionContext`, one Session lifecycle `AbortController`, one explicit `unloaded | invalid | ready` configuration state, the desired `{ hubUrl, client?, project, name }` reconnect target, and one bounded exponential reconnect timer from 500 ms to 10 seconds. `A2aRuntime`, not the Extension, owns connection transitions and published connection lifetime.
+`a2aExtension(pi, dependencies?)` owns the active OMP `ExtensionContext`, one Session lifecycle `AbortController`, one explicit `unloaded | invalid | ready` configuration state, the desired `{ hubUrl, client?, project, name }` reconnect target, and one bounded exponential reconnect timer from 500 ms to 10 seconds. `A2aRuntime`, not the Extension, owns connection transitions and published connection lifetime.
 
 On `session_start` and `session_switch`, the extension:
 
@@ -50,6 +52,7 @@ On `session_shutdown`, the extension aborts Session work, clears active and reco
 
 - `hub`
 - `project create <name>`
+- `project` (alias for `project list`)
 - `project list`
 - `project delete <name>` with UI confirmation
 - `connect <project> --as <name>`
@@ -57,11 +60,11 @@ On `session_shutdown`, the extension aborts Session work, clears active and reco
 - `status`
 - `peers`
 - `history [--before <ref> | --after <ref>] [--limit <n>] [--from <name>]`
-- `help`
+- `help` (also accepted as `--help` or `-h`)
 
 `completeA2aArguments` provides synchronous, context-sensitive completion. It preserves the full argument prefix in each returned value, removes already-used flags, and enforces the `before`/`after` mutual exclusion in suggestions.
 
-Read-only result commands (`help`, `hub`, `project list`, `status`, `peers`, and `history`) publish a visible transcript card whose custom-message title is the trimmed `/a2a` invocation, without triggering a model turn. The `context` hook removes only custom messages whose type is `/a2a` or starts with `/a2a ` before provider requests, preserving the contract that human command output stays outside model context. Mutating action results, connection lifecycle, Presence, delivery, and errors remain transient UI notifications.
+Read-only result commands (`help`/`--help`/`-h`, `hub`, `project`/`project list`, `status`, `peers`, and `history`) publish a visible transcript card whose custom-message title is the trimmed `/a2a` invocation, without triggering a model turn. The `context` hook removes only custom messages whose type is `/a2a` or starts with `/a2a ` before provider requests, preserving the contract that human command output stays outside model context. Mutating action results, connection lifecycle, Presence, delivery, and errors remain transient UI notifications.
 
 ## Model tool surface
 
@@ -80,18 +83,19 @@ Only Extension-injected model metadata with `senderUserApproval: "confirmed"` re
 ## Runtime interface
 
 `A2aRuntime` is the sole owner of published connection state. A published value binds one `A2aConnection`, the `HubClient` that admitted it, and a Runtime-owned message-lifecycle `AbortController`.
+Its public state includes `connected`, `project`, `name`, `self`, and `publishedTarget`; `connectionToken()` and `isPublishedConnection()` fence extension work to the currently published lifecycle.
 
-- `connect(project, name, client?)` starts a cancellable candidate while preserving the published value. Every connect waits the shared teardown barrier, aborts and awaits superseded candidates, and publishes only the latest successful transition. Candidate failure leaves the predecessor and its lifecycle signal unchanged; an identical target is reused only when its accepting Hub URL also matches. The underlying handshake has a 5-second default deadline, and the first timeout, protocol, transport, cancellation, or successful-claim outcome remains authoritative through teardown.
+- `connect(project, name, client?: HubClient | (() => Promise<HubClient>))` starts a cancellable candidate while preserving the published value. Every connect waits the shared teardown barrier, aborts and awaits superseded candidates, and publishes only the latest successful transition. Candidate failure leaves the predecessor and its lifecycle signal unchanged; an identical target is reused only when its accepting Hub URL also matches. The underlying handshake has a 5-second default deadline, and the first timeout, protocol, transport, cancellation, or successful-claim outcome remains authoritative through teardown.
 - Candidate and retired connections cannot forward Presence, Message, Delivery, close, or error events. A Message arriving there reports failed delivery rather than acknowledging work that never reached the published connection.
 - `disconnect()` is idempotent, supersedes pending connect work, aborts the published message lifecycle, clears the binding, and publishes one teardown barrier until candidate and socket closure complete. Concurrent close callers share one bounded goodbye/close Promise.
 - Replacing or closing a published connection aborts the token used to fence asynchronous inbound and outbound work.
-- `peers()` uses the published WebSocket. `message()` can require its initiating connection token, forwards caller cancellation, and returns a strong new/replayed acceptance union. Pre-dispatch abort sends nothing; abort, timeout, or close after dispatch reports an unknown acceptance outcome without caller retry.
+- `peers()` uses the published WebSocket. `message()` can require its initiating connection token, forwards caller cancellation, and returns `AcceptedMessageView`: a new acceptance has `replayed: false`, canonical `message`, and `recipients`; a replay has `replayed: true` and canonical `message` only. Pre-dispatch abort sends nothing; abort, timeout, or close after dispatch reports an unknown acceptance outcome without caller retry.
 - `history()` and connected `status()` use the bound `HubClient` and accept caller cancellation; Project create/list/delete and disconnected status use the currently selected client. Status reports the selected `HubClient.baseUrl`; metadata supplies only protocol compatibility and never replaces that URL.
 - Project create/list/delete are thin HTTP operations and do not require a Presence.
 
-Attachment snapshot and materialization combine caller, Session, and published-connection signals. Materialization returns explicit disposable/commit ownership so cancellation, a final fence failure, injection failure, or a failed history sibling removes every uncommitted output directory.
+Attachment snapshot and materialization combine caller, Session, and published-connection signals. `snapshotLocalAttachments` resolves only current-session `local://` regular files, checks pre/post size stability, validates unique basenames, and encodes bytes. `materializeLocalAttachments` validates all names before creating one session-local `a2a-*` directory, writes files with mode `0600`, and returns references with explicit commit/dispose ownership. Cancellation, a final fence failure, injection failure, or a failed history sibling removes every uncommitted output directory.
 
-`MessageView` is the persistent realtime Message shape with decoded text and attachment bytes replacing encoded wire payloads. Matching private-protocol clients are trusted; codecs fail loudly on malformed data and do not enforce application resource caps.
+`MessageView` is the persistent realtime Message shape with decoded text and attachment bytes replacing encoded wire payloads. Matching private-protocol clients use `A2A_PROTOCOL_VERSION` 5; codecs fail loudly on malformed data and do not enforce application resource caps.
 
 ## Configuration contract
 
@@ -105,7 +109,7 @@ Attachment snapshot and materialization combine caller, Session, and published-c
 
 The selected file is authoritative: read, syntax, and schema failures include its path and never fall through to a later candidate. The local omptype schema requires `project` and `name`, permits optional `hubUrl`, defaults `autoConnect` to enabled, trims strings, rejects blanks, narrows Project/name values through their regexes, and uses `"+": "reject"` for every undeclared field. Removed `agentId`/`agent_id` and `autoJoin`/`auto_join` error paths are rendered as explicit migration errors rather than aliases.
 
-Global client configuration uses the same authoritative candidate order under `~/.omp/a2a/`. Its owner schema trims and requires one nonblank string `hubUrl` and uses `"+": "reject"`; the former `hub_url`/`url` aliases therefore fail as undeclared fields.
+The global Hub URL resolver (`src/hub/client.ts:resolveHubUrl`) uses the same authoritative first-existing-file rule under `~/.omp/a2a/`, scanning `config.yml`, `config.yaml`, then `config.json`. Its owner schema trims and requires one nonblank string `hubUrl` and uses `"+": "reject"`; the former `hub_url`/`url` aliases therefore fail as undeclared fields, and the resolved URL has trailing slashes stripped.
 
 ## Project metadata
 
@@ -118,7 +122,7 @@ Global client configuration uses the same authoritative candidate order under `~
 - Project: starts alphanumeric, then `[a-zA-Z0-9._-]`, maximum 64 characters.
 - Agent name: starts with a Unicode letter or number, then Unicode letters, numbers, marks, or `._-`, maximum 32 characters.
 
-A name identifies only the lifetime of one current WebSocket Presence. It is not durable identity.
+A name identifies only the lifetime of one current WebSocket Presence. It is not durable identity. `A2aProject` (`src/types.ts`) contains `name` and `createdAt`, with optional `displayName`, `description`, and `createdByCwd`; `A2aLocalConfig` contains required `project` and `name`, with optional `hubUrl` and `autoConnect`.
 
 ## Data flow
 
@@ -139,8 +143,8 @@ OMP callbacks / slash / tools
 
 ## Tests touching this directory
 
-- `extension.test.ts`: registered surfaces, strict invalid-configuration isolation, help and ArkType contracts, multi-level completion, Presence notifications, attachment ownership, Session/Project-switch cancellation, outbound send fencing, stale UI suppression, and reconnect intent.
-- `local-attachments.test.ts`: materialization rejects unsafe or duplicate attachment names before writing files.
+- `extension.test.ts`: registered surfaces, strict invalid-configuration isolation, stable system-prompt/context filtering, help and ArkType contracts, multi-level completion, push-driven tools, Presence notifications, sender-owned approval/rejection and attachment ownership, Session/Project-switch cancellation, outbound send fencing, stale UI suppression, and reconnect intent.
+- `local-attachments.test.ts`: `materializeLocalAttachments` rejects unsafe, blank, path-like, control-character, and duplicate names.
 - `operations.test.ts`: published Hub bindings, shared transition teardown, peer snapshots, HTTP and realtime cancellation, new/replayed acceptance, ordered injection, Delivery outcomes, and disconnected-state errors.
 - `config.test.ts`: strict configuration parsing and migration failures.
 - `hub-client.test.ts`: strict global configuration parsing, exact fields, authoritative candidate selection, HTTP cancellation, and wire validation.

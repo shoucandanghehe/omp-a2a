@@ -16,6 +16,7 @@ The wire protocol is private version `5`. It is not the standard A2A protocol, r
 - `scripts/smoke.ts`: persistent SQLite Project-store smoke.
 - `scripts/smoke-hub.ts`: in-process HTTP/WebSocket/persistence smoke.
 - `scripts/smoke-docker.ts`: public boundary smoke against an already-running Hub.
+- `scripts/migrate-storage.ts`: explicit locked storage version 2 to 3 conversion; never part of Hub startup.
 
 ## Architecture
 
@@ -66,7 +67,8 @@ A same-named later connection is a new Presence and never inherits pending Deliv
 - Named targets are bound to their resolved `presenceId`s; `@all` messages persist before one local Presence enumeration and never persist their recipient array.
 - History is append-only until Project deletion. Presence, recipient arrays, ACK trackers, and delivery events are not persisted.
 - Attachments are ordered immutable values inside a Message. Their names and bytes participate in `messageId` idempotency; they share the Message lifecycle.
-- `messages.sqlite` has an independent storage version. Startup accepts only the exact current version and complete set of current non-internal schema objects; unsupported storage fails closed.
+- `messages.sqlite` has an independent storage version, currently `3`, with `projects`, `project_sequences`, and `messages` tables plus the sender-history index. Startup accepts only the exact current version and complete set of current non-internal schema objects; unsupported storage fails closed.
+- `bun run migrate:storage --data-dir <path>` explicitly converts version 2 target columns and values under `HubDataLock`, preserving other durable Message facts. Conversion commits before the CLI validates the resulting schema through `HubStore`; current-version storage returns without schema validation. Operators must stop the Hub and back up its data before migration.
 
 ### Payload contract
 
@@ -79,7 +81,7 @@ Hub URL precedence is:
 1. repository-local `.omp/a2a.yml`, `.yaml`, or `.json` through `hubUrl`;
 2. global `~/.omp/a2a/config.yml`, `.yaml`, or `.json`.
 
-Missing configuration fails explicitly. The resolved client URL is authoritative for HTTP and WebSocket connections. Hub metadata is exactly `{protocolVersion}` and only validates compatibility; health is exactly `{ok:true,service:"omp-a2a-hub"}`. Neither response advertises a route. In-process server callers receive a loopback-reachable `listenUrl`.
+Missing configuration fails explicitly. The resolved client URL is authoritative for HTTP and WebSocket connections. Hub metadata is exactly `{protocolVersion}` and only validates compatibility; health is exactly `{ok:true,service:"omp-a2a-hub"}`. Neither response advertises a route. In-process server callers receive a `listenUrl` that preserves an explicit bind host and maps wildcard IPv4/IPv6 binds to loopback.
 
 Repository-local connection defaults require `project` and `name`; `autoConnect` defaults to enabled. Removed `agentId` and `autoJoin` fields fail with an explicit migration error.
 
@@ -92,6 +94,8 @@ The Hub runs locally with `bun run hub` or in Docker Compose. The CLI alone reso
 ### Human commands
 
 `/a2a` provides Hub status, Project create/list/delete, connect/disconnect, current status, peer listing, and explicit history. Its synchronous completion tree covers root commands, Project subcommands, `connect --as`, and compatible history flags.
+
+Read-only results persist as visible `/a2a` transcript cards and are filtered out of model context. Action results, connection lifecycle, Presence, delivery, and errors remain transient UI notifications.
 
 ### Model tools
 
@@ -118,6 +122,7 @@ The sender Extension snapshots attachment bytes before sending and fences the fi
 | `.github/dependabot.yml` | Weekly Bun, GitHub Actions, and Docker dependency updates. |
 | `AGENTS.md` | Repository map, commit-message style, signing, and history-rewrite rules. |
 | `README.md` | Operator and user how-to plus public behavior contract. |
+| `.slim/codemap.json` | File/folder hashes and selection patterns for incremental codemap maintenance; not a runtime input. |
 | `config.example.yml` | Global Hub URL example. |
 | `.env.example` | Compose host-port and resource-limit defaults plus local CLI storage example. |
 | `Dockerfile` | Unprivileged standalone Hub image pinned to Bun `1.3.14` and an exact image digest, listening on fixed `0.0.0.0:4173`. |
@@ -129,8 +134,8 @@ The sender Extension snapshots attachment bytes before sending and fences the fi
 | --- | --- | --- |
 | `src/` | OMP adapter, runtime, configuration, Project domain names, and Hub storage paths. | [`src/codemap.md`](src/codemap.md) |
 | `src/hub/` | HTTP/WebSocket protocol, Presence, routing, canonical SQLite persistence, payloads, locking, and process lifecycle. | [`src/hub/codemap.md`](src/hub/codemap.md) |
-| `scripts/` | Executable SQLite-store, Hub, and Docker smoke scenarios. | [`scripts/codemap.md`](scripts/codemap.md) |
-| `tests/` | Bun behavior tests for configuration, payload codecs and structural validation, local attachment materialization, message history, realtime routing, control routes, runtime, and extension registration/completion. | Tests are excluded from generated map state. |
+| `scripts/` | Explicit storage migration and executable SQLite-store, Hub, and Docker smoke scenarios. | [`scripts/codemap.md`](scripts/codemap.md) |
+| `tests/` | Bun behavior tests for configuration, payload codecs and structural validation, local attachment materialization, message history, storage migration, realtime routing, control routes, runtime, and extension registration/completion. | Tests are excluded from generated map state. |
 | `docs/` | Implemented architecture decisions, dated CI research, and historical fixed-snapshot review material. | Documentation is excluded from generated map state. |
 
 ## Verification

@@ -35,12 +35,12 @@ A Presence starts when the Hub accepts `hello` and ends through one Hub-owned re
 
 - A connection claims one name in one Project.
 - Names are unique among current connections in that Project.
-- Graceful disconnect sends an exact `goodbye`; the Hub queues the acknowledgement, releases Presence, Delivery state, and the name, then starts a bounded WebSocket close/termination sequence. Presence can therefore be absent while transport teardown is still in progress.
+- Graceful disconnect sends an exact `goodbye`; the Hub releases Presence, Delivery state, and the name, broadcasts `presence_left`, then queues the acknowledgement and starts a bounded WebSocket close/termination sequence. Presence can therefore be absent while transport teardown is still in progress.
 - Transport close and heartbeat timeout use the same idempotent release path for older clients and failed connections.
 - Reusing the same name later creates a different Presence.
 - There is no `offline`, `stale`, durable member record, or offline delivery.
 
-The Hub broadcasts one `presence_joined` and one `presence_left` event per Presence. These events are realtime-only and never enter history.
+The Hub broadcasts `presence_joined` when a Presence is claimed and one `presence_left` on its ordinary departure. Hub shutdown instead clears runtime state and terminates sockets without broadcasting departures. These events are realtime-only and never enter history.
 
 ### Message
 
@@ -103,6 +103,8 @@ These are current implementation boundaries, not delivery guarantees. The most i
 
 ## Install
 
+Use Bun `>=1.3.14`; the repository toolchain and Docker image are pinned to `1.3.14`.
+
 ```bash
 cd ~/code/omp-a2a
 bun install
@@ -117,11 +119,13 @@ Restart OMP after linking.
 
 ```bash
 cd ~/code/omp-a2a
-docker compose up -d --build
+docker compose up -d --build --wait --wait-timeout 90
 curl -s http://127.0.0.1:4173/healthz
-bun run smoke:docker
+OMP_A2A_SMOKE_HUB_URL=http://127.0.0.1:4173 bun run smoke:docker
 docker compose logs -f hub
 ```
+
+These examples use host port `4173`. If you change the published port, update the health-check and smoke URLs too. Set the smoke URL explicitly so it cannot select another Hub from your normal client configuration.
 
 The container listener is fixed at `0.0.0.0:4173`; `OMP_A2A_HUB_PORT` changes only the published host port. The mapping publishes on all host interfaces by default. If only local OMP clients need access, bind it to loopback:
 
@@ -182,7 +186,7 @@ Hub URL precedence:
 
 If neither level defines `hubUrl`, client operations fail explicitly. The resolved URL is authoritative for HTTP and WebSocket connections. `/v1/meta` validates protocol compatibility but does not replace the configured route.
 
-`GET /v1/meta` returns exactly `{ "protocolVersion": 4 }`. `GET /healthz` returns exactly `{ "ok": true, "service": "omp-a2a-hub" }`; neither response advertises a client route or process/storage details. In-process callers use the server handle's loopback-reachable `listenUrl`.
+`GET /v1/meta` returns exactly `{ "protocolVersion": 5 }`. `GET /healthz` returns exactly `{ "ok": true, "service": "omp-a2a-hub" }`; neither response advertises a client route or process/storage details. In-process callers use the server handle's `listenUrl`, which preserves an explicit bind host and maps wildcard IPv4/IPv6 binds to loopback.
 
 Per-repository auto-connect example:
 
@@ -218,6 +222,8 @@ Humans manage Projects, their own connection, and read-only views:
 /a2a history --from web
 /a2a help
 ```
+
+`/a2a project` is shorthand for `/a2a project list`. Bare `/a2a`, `/a2a --help`, and `/a2a -h` show help without loading configuration.
 
 `/a2a` provides context-aware Tab completion for root commands, `project create|list|delete`, `connect ... --as`, and the remaining compatible `history` flags. `--before` and `--after` are never suggested together. Project names, Agent names, and message references remain explicit values.
 
@@ -314,15 +320,15 @@ Inbound messages are pushed automatically and processed serially in Hub-assigned
 - Project deletion atomically removes metadata, Project sequence, and complete history; it needs no deletion marker or reconciliation path.
 - The Hub data directory has an exclusive lock; two Hub processes cannot write the same data.
 
-The `messages.sqlite` schema has its own storage version, independent of the wire protocol version. A new database creates the complete current schema and records that version atomically. An existing database must contain exactly the current non-internal tables and index at the current storage version or Hub startup fails with `unsupported pre-release storage; start with an empty data directory`.
+The `messages.sqlite` schema has its own storage version, currently `3`, independent of wire protocol version `5`. A new database creates the three current tables (`projects`, `project_sequences`, and `messages`), the sender-history index, and the version atomically. An existing database must contain exactly the current non-internal tables and index at the current storage version or Hub startup fails with `unsupported pre-release storage; start with an empty data directory`.
 
-The Hub never converts storage on startup. To keep version 2 history (wire protocol `4`) across the upgrade, convert it explicitly before starting the upgraded Hub:
+The Hub never converts storage on startup. To keep version 2 history (wire protocol `4`) across the upgrade, stop the owning Hub, back up its data directory, and convert it explicitly before starting the upgraded Hub:
 
 ```bash
 bun run migrate:storage --data-dir ~/.omp/a2a
 ```
 
-The script resolves the data directory exactly like the Hub (`--data-dir`, then `OMP_A2A_HUB_DATA_DIR`, then `~/.omp/a2a`), refuses to run while a Hub owns that directory, is a no-op on current storage, and prints `migrated`, `current`, or `absent`. It rewrites only the message target columns and target kind: Project metadata, sequences, attachments, approval receipts, and causal references are preserved. Any other storage version fails without writing.
+The script resolves the data directory exactly like the Hub (`--data-dir`, then `OMP_A2A_HUB_DATA_DIR`, then `~/.omp/a2a`), refuses to run while a Hub owns that directory, is a no-op on current storage, and prints a JSON result with `outcome: "migrated" | "current" | "absent"`. In one transaction it renames the message target columns, converts single-name targets to arrays and Project targets to `all`, and advances the storage version. Project metadata, sequences, attachments, approval receipts, and causal references are preserved. Other storage versions are rejected without conversion. After a migration commits, the CLI reopens through `HubStore` to validate the resulting schema; this check does not roll back a committed migration. A `current` result checks only the version, not the complete schema; Hub startup still applies the full schema guard.
 
 ## Verify
 
@@ -341,13 +347,13 @@ docker compose --project-name omp-a2a-boundary-smoke config --quiet
 
 ```bash
 docker compose --project-name omp-a2a-boundary-smoke up -d --build --wait --wait-timeout 90
-bun run smoke:docker
+OMP_A2A_SMOKE_HUB_URL=http://127.0.0.1:4173 bun run smoke:docker
 docker compose --project-name omp-a2a-boundary-smoke down --volumes --remove-orphans
 ```
 
 The dedicated Compose project keeps this disposable smoke volume separate from the operator's normal Hub volume. CI uses the same project name for configuration, startup, failure logs, and unconditional teardown.
 
-`smoke:docker` uses `OMP_A2A_SMOKE_HUB_URL` only as its explicit test target, crosses the public HTTP and WebSocket boundary, verifies persisted history, and deletes its temporary Project. GitHub Actions runs source, production dependency audit, and container gates independently; pins third-party actions by commit SHA; grants read-only repository access; cancels superseded runs; and always removes container resources. Dependabot checks Bun, Actions, and Docker dependencies weekly.
+`smoke:docker` targets `OMP_A2A_SMOKE_HUB_URL` when set; otherwise it resolves the normal global client configuration. It crosses the public HTTP and WebSocket boundary, verifies persisted history, and deletes its temporary Project. GitHub Actions runs source, production dependency audit, and container gates independently; pins third-party actions by commit SHA; grants read-only repository access; cancels superseded runs; and always removes container resources. Dependabot checks Bun, Actions, and Docker dependencies weekly.
 
 The dated tool/version rationale and rejected alternatives are recorded in [`docs/ci-best-practices-2026-08-11.md`](docs/ci-best-practices-2026-08-11.md).
 
@@ -356,9 +362,12 @@ The dated tool/version rationale and rejected alternatives are recorded in [`doc
 ```text
 src/
   extension.ts             # human commands + three model tools
-  operations.ts            # canonical runtime shared by both adapters
+  operations.ts            # canonical runtime shared by commands and model tools
   local-attachments.ts     # sender local:// snapshots + receiver materialization
   config.ts                # repository connection defaults
+  config-document.ts       # shared YAML/JSON parsing and owner-supplied schema validation
+  paths.ts                 # Hub storage and configuration paths
+  types.ts                 # Project/config shapes and name validation
   hub/
     server.ts              # HTTP control/history + WebSocket attachment
     realtime-server.ts     # Presence, routing, broadcast, delivery
@@ -370,6 +379,12 @@ src/
     client.ts              # HTTP Project/history client
     data-lock.ts           # exclusive Hub data directory ownership
     cli.ts                 # standalone Hub process
+    types.ts               # metadata and encoded payload shapes
+scripts/
+  migrate-storage.ts       # explicit locked storage version 2 to 3 migration
+  smoke.ts                 # persistent SQLite Project-store scenario
+  smoke-hub.ts             # in-process HTTP/WebSocket Hub scenarios
+  smoke-docker.ts          # public boundary scenario against a selected running Hub
 ```
 
 Detailed repository maps are available in [`codemap.md`](codemap.md), [`src/codemap.md`](src/codemap.md), [`src/hub/codemap.md`](src/hub/codemap.md), and [`scripts/codemap.md`](scripts/codemap.md).

@@ -14,16 +14,16 @@
 
 | File | Responsibility | Primary interface |
 | --- | --- | --- |
-| `cli.ts` | Parse command/environment settings, start one Hub, and shut down on signals. | executable entry |
-| `server.ts` | Express routes, explicit HTTP listener lifecycle, storage ownership, and WebSocket attachment. | `startHubServer`, `HubServerHandle` |
-| `realtime-server.ts` | Upgrade handling, handshake, Presence events, routing, delivery tracking, heartbeat, and shutdown. | `RealtimeHub` |
-| `connection.ts` | Extension-side WebSocket protocol client. | `A2aConnection`, `A2aConnectionEvents` |
-| `presence.ts` | In-memory Project/name/socket indexes. | `PresenceRegistry`, `Presence` |
-| `store.ts` | Versioned SQLite Project metadata, sequences, Messages, history, atomic deletion, idempotency, and fail-closed schema guard. | `HubStore` |
-| `client.ts` | Hub URL resolution and HTTP meta/Project/history client. | `HubClient`, `connectHub`, `resolveHubUrl` |
-| `realtime-types.ts` | Versioned WebSocket frames, canonical realtime Message decoding, public realtime/history shapes, message identifiers, and canonical references. | protocol types, `decodeRealtimeMessage`, `A2A_PROTOCOL_VERSION`, message reference helpers |
+| `cli.ts` | Parse command/environment settings, start one Hub, and shut down on signals. | `parseHubCliOptions`, executable entry |
+| `server.ts` | Express routes, explicit HTTP listener lifecycle, storage ownership, and WebSocket attachment. | `startHubServer`, `HubServerHandle`, `HubDataDirInUseError` |
+| `realtime-server.ts` | Upgrade handling, handshake, Presence events, routing, delivery tracking, heartbeat, and shutdown. | `RealtimeHub`, `RealtimeHubOptions` |
+| `connection.ts` | Extension-side WebSocket protocol client, bounded handshakes/message requests, serial receive/ack, and graceful close. | `A2aConnection.connect`, `send`, `close`, `A2aConnectionEvents` |
+| `presence.ts` | In-memory Project/name/socket indexes. | `PresenceRegistry`, `Presence`, `NameInUseError` |
+| `store.ts` | Versioned SQLite Project metadata, sequences, Messages, history, atomic deletion, idempotency, and fail-closed schema guard. | `HubStore`, `MessageIdConflictError`, `ProjectConflictError`, `UnknownProjectError`, `UnknownReplyTargetError` |
+| `client.ts` | Hub URL resolution and HTTP meta/Project/history client. | `HubClient`, `probeHub`, `connectHub`, `resolveHubUrl`, HTTP error classes |
+| `realtime-types.ts` | Versioned WebSocket frames, canonical realtime Message decoding, tagged target/approval shapes, public realtime/history types, message identifiers, and canonical references. | protocol types, `decodeRealtimeMessage`, `decodeUserApprovalReceipt`, `A2A_PROTOCOL_VERSION`, reference helpers |
 | `payload.ts` | Exact payload/attachment wire parsing, canonical Base64 decoding, structural attachment-name validation, and text/binary codecs. | codecs, `parseEncodedAttachments`, `validateAttachmentName` |
-| `data-lock.ts` | Exclusive ownership of one Hub data directory. | `HubDataLock` |
+| `data-lock.ts` | Exclusive ownership of one Hub data directory. | `HubDataLock`, `HubDataDirInUseError` |
 | `types.ts` | Minimal Hub protocol metadata plus encoded text, binary, and attachment values. | `HubMeta`, encoded payload types |
 
 ## HTTP surface
@@ -44,7 +44,7 @@ Neither public response contains a route, PID, port, start time, or data-directo
 
 ## WebSocket protocol
 
-`A2A_PROTOCOL_VERSION` is `3`.
+`A2A_PROTOCOL_VERSION` is `5`.
 
 ### Handshake
 
@@ -58,9 +58,9 @@ Handshake failure, timeout, or cancellation terminates the unpublished socket an
 
 ### Message request
 
-The client sends `message` with `requestId`, opaque `messageId`, a non-empty target name list or `["@all"]`, encoded text payload, ordered encoded attachments, and optional `replyTo`.
+The client sends `message` with `requestId`, opaque `messageId`, a non-empty request target array of names or `["@all"]`, encoded text payload, ordered encoded attachments, optional `replyTo`, and optional `userApproval: {kind:"omp-ui"}`. Accepted/history Messages use tagged targets: `{type:"agents", names, presenceIds?}` for named delivery or `{type:"all"}` for `@all`.
 
-- A repeated, content-identical `messageId` returns the canonical stored Message as `replayed: true` without resolving or enumerating Presence and without delivery. Target names are canonicalized to a sorted unique set before comparison.
+- A repeated, content-identical `messageId` (including user-approval receipt presence/value) returns the canonical stored Message as `replayed: true` without resolving or enumerating Presence and without delivery. Target names are canonicalized to a sorted unique set before comparison.
 - A new named target resolves every name and binds each resolved `presenceId` before persistence; any missing name, the sender's own name, an empty list, a duplicate, or mixing `@all` with names fails before persistence.
 - A new `@all` target is validated and atomically persisted before `PresenceRegistry` is enumerated exactly once into a local array excluding the sender.
 - `HubStore` validates the Project row, exact text and attachment wire shapes, canonical Base64, valid unique attachment basenames, decoded gzip data, and causal references, then atomically commits one immutable Message—including attachments—and the next Project sequence.
@@ -73,7 +73,7 @@ The client waits 15 seconds by default for `accepted` or request-scoped `error`;
 
 The Hub owns exactly one in-memory pending record per `(messageId, recipientPresenceId)`. It stores the original sender socket and selected recipient socket/Presence for at most two seconds. The Message frame is written once. A receiver `delivered` or `delivery_failed` frame terminalizes the record; a write callback error, recipient departure, or ACK timeout reports `failed` with an explicit unconfirmed reason.
 
-Receiver `A2aConnection` processes distinct Message frames serially in Project sequence, invokes `onMessage` once per frame, and immediately returns `delivered` or `delivery_failed`. It keeps no duplicate cache because the Hub never retries.
+Receiver `A2aConnection` queues received Message frames serially in arrival order, invokes `onMessage` once per frame, and returns `delivered` or `delivery_failed` after the callback settles. It keeps no duplicate cache because the Hub never retries.
 
 `delivered` proves attachment materialization and injection into the receiving OMP extension. `failed` records either an explicit receiver failure or an unconfirmed write, disconnect, or timeout. Because an ACK can be lost after successful injection, unconfirmed failure does not prove the receiver missed the Message. Neither result proves model comprehension or task completion.
 
@@ -81,9 +81,9 @@ Receiver result, either Presence leaving, graceful goodbye, heartbeat cleanup, t
 
 ### Presence lifetime
 
-Graceful client close sends one exact `goodbye`. The Hub queues its acknowledgement, atomically removes the Presence, cleans related Delivery entries, broadcasts one `presence_left`, and then starts its own bounded transport close/termination. The client waits at most 1 second for the acknowledgement, begins WebSocket close, and terminates after at most another 2 seconds if close stalls. Native close and that deadline enter one idempotent client finalizer for pending requests, the goodbye barrier, `onClose`, and the shared close Promise. A deadline with no native close reports abnormal code `1006` and its timeout reason; any later native close is ignored. Presence release is distinct from transport teardown, so the name can be reused while the old socket is still closing. Concurrent close calls share this one flow. An unpublished socket terminates directly.
+Graceful client close sends one exact `goodbye`. The Hub first marks that socket departed, removes its Presence, cleans related Delivery entries, and broadcasts one `presence_left`; it then sends the `goodbye` acknowledgement and starts `close(1000, "goodbye acknowledged")` with a bounded 2-second terminate fallback. The client waits at most 1 second for the acknowledgement, begins WebSocket close, and terminates after at most another 2 seconds if close stalls. Native close and that deadline enter one idempotent client finalizer for pending requests, the goodbye barrier, `onClose`, and the shared close Promise. A deadline with no native close reports abnormal code `1006` and its timeout reason; any later native close is ignored. Presence release is distinct from transport teardown, so the name can be reused while the old socket is still closing. Concurrent close calls share this one flow. An unpublished socket terminates directly.
 
-Legacy transport close and heartbeat timeout enter the same idempotent Hub release path, so a later close callback cannot repeat Presence or Delivery events. Hub shutdown clears all remaining Presence and Delivery state with the distinct `hub_shutdown` reason.
+Legacy transport close and heartbeat timeout enter the same idempotent Hub release path, so a later close callback cannot repeat Presence or Delivery events. Hub shutdown stops heartbeat and upgrades, clears Presence and pending Delivery state, marks sockets for `hub_shutdown` teardown, suppresses `presence_left` broadcasts, terminates sockets, and waits for WebSocketServer close.
 
 Presence and Delivery events are realtime-only and never enter `HubStore`.
 
@@ -109,9 +109,10 @@ WebSocket -> Presence
 - one immutable message row per accepted message;
 - globally idempotent `messageId` content comparison;
 - sender name and accepting `presenceId`;
-- the target name list or `@all`, including resolved target Presences for named targets;
+- the canonical target kind (`all` for `@all`, or `agents` with sorted target names and resolved target `presenceId`s);
 - canonical encoded text and ordered attachment names/content;
-- creation timestamp and optional same-Project causal parent sequence.
+- creation timestamp and optional same-Project causal parent sequence;
+- optional `userApproval: {kind:"omp-ui"}` receipt.
 
 Project recipient arrays, pending ACK records, and Delivery events are not durable facts.
 
@@ -134,15 +135,15 @@ Project create/get/list/delete are synchronous store operations. Listing preserv
 
 ### Idempotency and causality
 
-Reusing `messageId` with the same Project, sender name, target kind/names, text encoding/data, ordered attachment names/encoding/data, and causal parent returns the canonical stored Message with `replayed: true`. A difference in any compared field raises `MessageIdConflictError`.
+Reusing `messageId` with the same Project, sender name, target kind/names, text encoding/data, ordered attachment names/encoding/data, causal parent, and user-approval receipt presence/value returns the canonical stored Message with `replayed: true`. A difference in any compared field raises `MessageIdConflictError`.
 
 `replyTo` must resolve to an existing message in the same Project or `UnknownReplyTargetError` is raised.
 
 ### Storage schema
 
-`messages.sqlite` carries `MESSAGE_STORAGE_VERSION`, which is independent of `A2A_PROTOCOL_VERSION`. A new database creates both current tables, the sender-history index, and the storage version in one transaction.
+`messages.sqlite` carries `MESSAGE_STORAGE_VERSION = 3`, independent of `A2A_PROTOCOL_VERSION`. A new database creates exactly four current non-internal schema objects in one transaction: tables `projects`, `project_sequences`, and `messages`, plus index `messages_project_sender`; it sets `PRAGMA user_version` to `3`. The `messages` table includes target `presenceId`s and the user-approval flag alongside canonical payload and attachments.
 
-Opening an existing database requires the exact current storage version and the complete, exclusive set of current non-internal tables and indexes. Any missing, changed, or unexpected schema object fails startup with `unsupported pre-release storage; start with an empty data directory`; no schema conversion or fallback runs. SQLite-owned autoindexes remain valid.
+Opening an existing database requires the exact current storage version and exact four-object set of current non-internal tables and indexes. Any missing, changed, or unexpected schema object fails startup with `unsupported pre-release storage; start with an empty data directory`; no schema conversion or fallback runs. SQLite-owned autoindexes remain valid.
 
 ## Payload codec
 
@@ -169,7 +170,7 @@ Opening an existing database requires the exact current storage version and the 
 2. acquires `HubDataLock` through an exclusive SQLite transaction;
 3. opens `HubStore`, creating or validating the complete current versioned schema;
 4. starts Express and attaches `RealtimeHub` to the same HTTP server;
-5. returns a handle containing only the loopback-reachable `listenUrl` and an idempotent `stop`.
+5. returns a handle containing the resolved `listenUrl` (wildcard bind hosts are represented as loopback; explicit hosts are preserved) and an idempotent `stop`.
 
 `HubDataLock` is the only runtime ownership record. No Hub JSON or PID metadata files are written. Startup failure and every concurrent `stop` call reuse one cleanup Promise. Cleanup attempts every acquired resource in reverse order, retains the first error, and releases realtime sockets, the HTTP listener, `HubStore`, and the directory lock.
 

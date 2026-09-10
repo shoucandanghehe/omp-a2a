@@ -57,7 +57,7 @@ Exercise the actual HTTP server, WebSocket protocol, realtime Presence, message 
 4. **Direct message**: send from `api` to current `web`, observe accepted Project sequence, realtime payload, and sender delivery result.
 5. **Project broadcast**: connect another peer, freeze the recipient snapshot, and observe one message plus delivery outcome per selected Presence.
 6. **Persistent history**: query accepted messages through HTTP and prove history survives Hub stop/restart while Presence does not.
-7. **Safe Project deletion**: close Presence, delete the Project and its history, and verify name reuse starts empty.
+7. **Safe Project deletion**: close Presence, delete the Project and its history, and verify repeated deletion is idempotent.
 
 ### Cleanup
 
@@ -71,8 +71,8 @@ Cross the deployed process/network boundary rather than proving another in-proce
 
 ### Preconditions
 
-- A Hub is already reachable at the explicit `OMP_A2A_SMOKE_HUB_URL`, or through normal project/global client configuration.
-- For Compose, run `docker compose --project-name omp-a2a-boundary-smoke up -d --build` first and use the same project name for teardown.
+- A Hub is already reachable at the explicit `OMP_A2A_SMOKE_HUB_URL`, or through `HubClient`'s global configuration fallback (`~/.omp/a2a/config.yml`, `.yaml`, or `.json`).
+- For Compose, run `docker compose --project-name omp-a2a-boundary-smoke up -d --build --wait --wait-timeout 90` first, then tear down with `docker compose --project-name omp-a2a-boundary-smoke down --volumes --remove-orphans`.
 
 ### Scenario
 
@@ -97,22 +97,24 @@ Convert version 2 `messages.sqlite` storage to the current version without chang
 ### Scenario
 
 1. Resolve the data directory exactly like the Hub (`--data-dir`, `OMP_A2A_HUB_DATA_DIR`, then `~/.omp/a2a`) and report `absent` without creating anything when the database is missing.
-2. Acquire the Hub data lock so a running Hub blocks conversion.
-3. Rename the two target columns, rewrite `target_kind` values, and set the current `user_version` in one transaction.
-4. Reopen through `HubStore` so its schema guard proves the migrated database.
-5. Report `migrated` or `current`; any other storage version fails without writing.
+2. When the database exists, acquire the Hub data lock so a running Hub blocks conversion.
+3. In one transaction, rename `target_name` to `target_names` and `target_presence_id` to `target_presence_ids`, convert `project` targets to `all` while clearing target columns, convert `agent` targets to `agents` with JSON-wrapped names and optional presence IDs, and set the current `user_version`.
+4. After a `migrated` result, reopen through `HubStore` so its schema guard validates the converted schema; a `current` result is already a no-op and skips reopening.
+5. Report `migrated` or `current`; any other storage version fails before the conversion transaction and therefore without writing.
 
 ### Design rules
 
 - `ALTER TABLE ... RENAME COLUMN` preserves the stored schema text, so no table rebuild and no second copy of the current DDL.
 - Re-running on current storage is a no-op.
 - The migration is explicit operator work; `HubStore` never converts storage during startup.
+- The migration transaction preserves Project metadata, sequences, payloads, attachments, approval receipts, timestamps, and causal references; it changes only the legacy target columns/kinds and storage version. Other target-kind values are not rewritten.
+- The post-migration `HubStore` reopen is a schema check after the conversion transaction commits; if that check rejects the database, the committed conversion is not rolled back.
 
 ## Verification matrix
 
 | Behavior | Unit/behavior tests | `smoke.ts` | `smoke-hub.ts` | `smoke-docker.ts` |
 | --- | --- | --- | --- | --- |
-| SQLite Project persistence | yes | yes | yes | yes |
+| SQLite Project persistence | yes | yes | yes | CRUD only; no reopen |
 | Independent Hub state | yes | no | yes | no |
 | WebSocket handshake/Presence | yes | no | yes | yes |
 | Direct realtime routing | yes | no | yes | yes |
