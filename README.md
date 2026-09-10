@@ -1,5 +1,7 @@
 # omp-a2a
 
+English | [简体中文](README.zh-CN.md)
+
 Anonymous realtime Agent chat for OMP.
 
 > Project is a persistent room. A WebSocket connection is an anonymous Agent. Its name is a temporary handle. Project metadata and Messages are durable Hub facts.
