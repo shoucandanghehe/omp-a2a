@@ -310,6 +310,41 @@ autoConnect: true
 
 入站消息会自动推送，并按 Hub 分配的 Project 序号串行处理。模型空闲时，不会逐条追加 Presence 变动事件：扩展将上一次终止轮次的 `agent_end` 时的成员列表与当前列表比较，在下一条入站 Message 或模型轮次之前最多发出一条隐藏的 `a2a-presence` 差异消息。没有产生成员净变化的加入／离开事件对会被消除。模型忙碌时，每次 Presence 变化都会通过 `steer` 排入当前轮次。入站 Message 会在空闲时启动一个轮次，或通过 `steer` 加入当前轮次；只有附件已生成本地文件且消息成功注入后，才会确认接收。发送采用发后即走（fire-and-forget）方式：模型只能继续执行用户已经要求、且不依赖回复的其他工作，或结束当前轮次；绝不通过等待、休眠或轮询 `a2a_history` 来等待回复。
 
+## Claude Code
+
+`claude-code/` 是一个 Claude Code 插件，让 Claude Code 会话作为普通 Presence 加入同一个 Hub。它的 MCP 服务器复用本仓库的 Hub 协议代码，并通过 [Channels](https://code.claude.com/docs/en/channels) 把入站 Message 推入会话，所以对等 Agent 发来消息时，空闲的会话也会被唤醒。
+
+要求：
+
+- `PATH` 中有 Bun，且已在本仓库执行 `bun install`；插件就地加载，直接运行源码。
+- 使用 claude.ai 或 Console 登录。Channels 是由远程功能开关控制的研究预览功能，因此不能设置 `DISABLE_TELEMETRY` 和 `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC`；设置任意一个，Claude Code 都会提示 "Channels are not currently available" 并忽略该 channel。
+- 自定义 channel 不在 Anthropic 白名单中，因此每个会话都需要 `--dangerously-load-development-channels`，并在启动时确认。
+
+单次会话运行：
+
+```bash
+claude --plugin-dir ~/code/omp-a2a/claude-code \
+  --dangerously-load-development-channels plugin:omp-a2a@inline
+```
+
+或从仓库内的 marketplace 安装（仍然就地加载）：
+
+```bash
+claude plugin marketplace add ~/code/omp-a2a
+claude plugin install omp-a2a@omp-a2a
+claude --dangerously-load-development-channels plugin:omp-a2a@omp-a2a
+```
+
+插件以会话的项目根目录为准，读取与 OMP 相同的 `.omp/a2a.yml` 和全局 Hub 配置。设置 `A2A_NAME` 可覆盖配置中的成员名称，避免同一仓库中的 OMP 会话与 Claude Code 会话重名（`name_in_use` 不会重试）。没有本地配置时，使用 `/a2a connect <project> --as <name>` 连接。审批弹窗的语言依次取 `A2A_LANG`、`LC_ALL`、`LC_MESSAGES`、`LANG`：以 `zh` 开头显示中文，否则显示英文。Accept/Decline 按钮由 Claude Code 绘制，始终为英文。
+
+与 OMP 扩展的行为差异：
+
+- 入站 Message 以 `<channel from ref target reply_to sender_user_approval attachments>` 事件到达。附件写入插件数据目录并以路径引用；出站 `attachments` 是相对于项目根目录的文件路径。
+- Claude Code 不确认 channel 事件，因此 `delivered` 表示事件已写入会话。未加 channel 参数时，事件会被静默丢弃，但仍报告为已投递。
+- `requestUserSignature=true` 会打开 MCP elicitation 弹窗。Accept 附带 `omp-ui` 回执发送；Decline 拒绝并打开可选的拒绝理由弹窗（在其中按 Accept 提交理由，按 Decline 丢弃已填写内容）；Esc 取消。弹窗会折叠长文本，完整请求可在展开的工具调用中查看（`ctrl+o`）。
+- Presence 的加入和离开不会推入模型上下文；由模型调用 `a2a_peers` 查看。
+- `/a2a` 让模型调用 `a2a_control` 或 `a2a_history`，因此其结果会经过模型上下文。
+
 ## 载荷与持久化
 
 - 小于 32 KiB 的文本采用原样编码；更大的文本仅在压缩后更小时使用 gzip + Base64。
@@ -362,6 +397,7 @@ docker compose --project-name omp-a2a-boundary-smoke down --volumes --remove-orp
 ## 目录结构
 
 ```text
+claude-code/               # Claude Code plugin (manifest, /a2a command, entry)
 src/
   extension.ts             # human commands + three model tools
   operations.ts            # canonical runtime shared by commands and model tools
@@ -370,6 +406,11 @@ src/
   config-document.ts       # shared YAML/JSON parsing and owner-supplied schema validation
   paths.ts                 # Hub storage and configuration paths
   types.ts                 # Project/config shapes and name validation
+  claude-code/
+    bridge.ts              # MCP server: channel delivery, tools, approval dialogs
+    attachments.ts         # file-path attachment snapshots + inbox copies
+    dialogs.ts             # localized approval dialog text
+    main.ts                # stdio entry used by the plugin
   hub/
     server.ts              # HTTP control/history + WebSocket attachment
     realtime-server.ts     # Presence, routing, broadcast, delivery
