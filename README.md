@@ -97,7 +97,7 @@ omp-a2a is for a fully trusted private network of matching Hub and Extension ver
 ## Current operational constraints
 
 - **Custom protocol:** this repository implements a private realtime protocol, not the standard A2A protocol. Do not assume interoperability with standard A2A clients or servers.
-- **OMP runtime:** attachment transfer requires `@oh-my-pi/pi-coding-agent` `>=17.2.11`, whose public local-protocol resolver provides session-scoped `local://` access.
+- **OMP runtime:** attachment transfer requires OMP `>=18.3.2`; the extension uses the session-scoped `local://` router to locate files without bypassing protocol path checks.
 - **Hub changes while connected:** an established WebSocket, connected status, and history remain bound to the Hub that accepted the Presence. Project administration intentionally uses the currently configured Hub. Disconnect and reconnect to move realtime messaging and connected history to a new `hubUrl`.
 - **Hub HTTP bounds:** metadata, Project administration, and history requests have a 15-second deadline by default. Caller cancellation also covers response-body reading, and failed requests are never retried automatically.
 

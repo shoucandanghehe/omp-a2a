@@ -1,8 +1,18 @@
 import { expect, test } from "bun:test";
-import { mkdtempSync, rmSync } from "node:fs";
+import {
+	mkdirSync,
+	mkdtempSync,
+	rmSync,
+	symlinkSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { materializeLocalAttachments } from "../src/local-attachments";
+import { decodeBinaryPayload } from "../src/hub/payload";
+import {
+	materializeLocalAttachments,
+	snapshotLocalAttachments,
+} from "../src/local-attachments";
 
 test("attachment materialization rejects unsafe and duplicate names", async () => {
 	const artifacts = mkdtempSync(join(tmpdir(), "omp-a2a-materialization-"));
@@ -38,6 +48,37 @@ test("attachment materialization rejects unsafe and duplicate names", async () =
 				localProtocolOptions,
 			),
 		).rejects.toThrow();
+	} finally {
+		rmSync(artifacts, { recursive: true, force: true });
+	}
+});
+
+test("attachment snapshots use session-local files without following links outside the root", async () => {
+	const artifacts = mkdtempSync(join(tmpdir(), "omp-a2a-snapshot-"));
+	const localRoot = join(artifacts, "local");
+	const localProtocolOptions = {
+		getArtifactsDir: () => artifacts,
+		getSessionId: () => "snapshot-test",
+	};
+	try {
+		mkdirSync(localRoot);
+		writeFileSync(join(localRoot, "binary.dat"), Buffer.from([0, 255, 42]));
+		const attachments = await snapshotLocalAttachments(
+			["local://binary.dat"],
+			localProtocolOptions,
+		);
+		const [attachment] = attachments;
+		if (!attachment) throw new Error("attachment snapshot missing");
+		expect(attachment.name).toBe("binary.dat");
+		expect(decodeBinaryPayload(attachment.payload)).toEqual(
+			Buffer.from([0, 255, 42]),
+		);
+
+		writeFileSync(join(artifacts, "outside.dat"), "private");
+		symlinkSync(join(artifacts, "outside.dat"), join(localRoot, "escape.dat"));
+		await expect(
+			snapshotLocalAttachments(["local://escape.dat"], localProtocolOptions),
+		).rejects.toThrow("escapes");
 	} finally {
 		rmSync(artifacts, { recursive: true, force: true });
 	}

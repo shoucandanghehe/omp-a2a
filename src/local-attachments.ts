@@ -9,9 +9,9 @@ import {
 import * as path from "node:path";
 import {
 	type LocalProtocolOptions,
-	resolveLocalUrlToFile,
 	resolveLocalUrlToPath,
 } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import { encodeBinaryPayload, validateAttachmentName } from "./hub/payload";
 import type { EncodedAttachment } from "./hub/types";
 import type { MessageAttachment } from "./operations";
@@ -80,15 +80,14 @@ export async function snapshotLocalAttachments(
 		if (!source.startsWith("local://"))
 			throw new Error(`attachment source must use local://: ${source}`);
 		signal?.throwIfAborted();
-		const resolved = await resolveLocalUrlToFile(source, {
+		const filePath = await InternalUrlRouter.instance().locate(source, {
 			localProtocolOptions,
 		});
 		signal?.throwIfAborted();
-		if (!resolved)
-			throw new Error(`attachment source must be a regular file: ${source}`);
-		const bytes = await readStableFile(resolved.path, source, signal);
+		if (!filePath) throw new Error(`Local file not found: ${source}`);
+		const bytes = await readStableFile(filePath, source, signal);
 		signal?.throwIfAborted();
-		const name = validateAttachmentName(path.basename(resolved.path), names);
+		const name = validateAttachmentName(path.basename(filePath), names);
 		attachments.push({
 			name,
 			payload: encodeBinaryPayload(bytes),

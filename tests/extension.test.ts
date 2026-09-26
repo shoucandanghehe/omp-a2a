@@ -18,7 +18,7 @@ import type {
 	ExtensionAskDialogQuestion,
 	ExtensionAskDialogResult,
 } from "@oh-my-pi/pi-coding-agent";
-import { resolveLocalUrlToFile } from "@oh-my-pi/pi-coding-agent/internal-urls/local-protocol";
+import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
 import type WebSocket from "ws";
 import { WebSocketServer } from "ws";
 import a2aExtension from "../src/extension";
@@ -930,11 +930,11 @@ test("a2a_message preserves user approval and attachments in delivery and histor
 		).toHaveLength(1);
 		expect(receiverApprovalPrompts).toBe(0);
 
-		await expect(
-			resolveLocalUrlToFile("local://training-handoff.md", {
+		expect(
+			await InternalUrlRouter.instance().locate("local://training-handoff.md", {
 				localProtocolOptions: receiverContext.localProtocolOptions,
 			}),
-		).rejects.toThrow("Local file not found");
+		).toBeNull();
 
 		const sent = await messageTool.execute(
 			"attachment-send",
@@ -996,11 +996,14 @@ test("a2a_message preserves user approval and attachments in delivery and histor
 		expect(receiverApprovalPrompts).toBe(0);
 		const receivedUrl = received.content.match(/local:\/\/[^"]+/)?.[0];
 		if (!receivedUrl) throw new Error("inbound attachment URL missing");
-		const receivedFile = await resolveLocalUrlToFile(receivedUrl, {
-			localProtocolOptions: receiverContext.localProtocolOptions,
-		});
+		const receivedFile = await InternalUrlRouter.instance().locate(
+			receivedUrl,
+			{
+				localProtocolOptions: receiverContext.localProtocolOptions,
+			},
+		);
 		if (!receivedFile) throw new Error("inbound attachment did not resolve");
-		expect(readFileSync(receivedFile.path, "utf8")).toBe(
+		expect(readFileSync(receivedFile, "utf8")).toBe(
 			"# Training handoff\nseed=20\n",
 		);
 
@@ -1023,7 +1026,7 @@ test("a2a_message preserves user approval and attachments in delivery and histor
 		).toHaveLength(2);
 		const historyUrl = historyText.match(/local:\/\/[^"]+/)?.[0];
 		if (!historyUrl) throw new Error("history attachment URL missing");
-		const historyFile = await resolveLocalUrlToFile(historyUrl, {
+		const historyFile = await InternalUrlRouter.instance().locate(historyUrl, {
 			localProtocolOptions: receiverContext.localProtocolOptions,
 		});
 		if (!historyFile) throw new Error("history attachment did not resolve");
@@ -1085,7 +1088,7 @@ test("a2a_message preserves user approval and attachments in delivery and histor
 				(message) => message.messageId,
 			),
 		).toEqual(["unsigned-send", "attachment-send"]);
-		expect(readFileSync(historyFile.path, "utf8")).toBe(
+		expect(readFileSync(historyFile, "utf8")).toBe(
 			"# Training handoff\nseed=20\n",
 		);
 	} finally {
