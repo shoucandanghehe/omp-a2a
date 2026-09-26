@@ -15,5 +15,10 @@
 		"verbatimModuleSyntax": true,
 		"types": ["bun"]
 	},
-	"include": ["src/**/*.ts", "scripts/**/*.ts", "tests/**/*.ts"]
+	"include": [
+		"src/**/*.ts",
+		"scripts/**/*.ts",
+		"tests/**/*.ts",
+		"claude-code/**/*.ts"
+	]
 }

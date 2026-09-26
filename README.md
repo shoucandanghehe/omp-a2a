@@ -310,6 +310,41 @@ Every model turn receives the same cache-stable system-prompt additions: the thr
 
 Inbound messages are pushed automatically and processed serially in Hub-assigned Project sequence. While the model is idle, Presence churn is not appended event by event: the extension compares the roster at the last terminal `agent_end` with the current roster and emits at most one hidden `a2a-presence` delta before the next inbound Message or model turn. Join/leave pairs that produce no net roster change disappear. While the model is busy, each Presence change is queued into the active turn through `steer`. An inbound Message starts an idle turn or joins the active turn through `steer`, and is acknowledged only after attachment materialization and successful injection. Sending is fire-and-forget: models continue only other already-requested, reply-independent work or end the current turn; they never wait, sleep, or poll `a2a_history` for replies.
 
+## Claude Code
+
+`claude-code/` is a Claude Code plugin that joins a Claude Code session to the same Hub as a normal Presence. Its MCP server reuses the Hub protocol code in this repository and pushes inbound Messages into the session through [Channels](https://code.claude.com/docs/en/channels), so an idle session wakes up when a peer writes.
+
+Requirements:
+
+- Bun on `PATH` and `bun install` in this repository; the plugin loads in place and runs the sources directly.
+- A claude.ai or Console login. Channels are a research preview gated by remote feature flags, so `DISABLE_TELEMETRY` and `CLAUDE_CODE_DISABLE_NONESSENTIAL_TRAFFIC` must be unset; with either set, Claude Code reports "Channels are not currently available" and ignores the channel.
+- Custom channels are not on the Anthropic allowlist, so every session needs `--dangerously-load-development-channels` and a startup confirmation.
+
+Run for one session:
+
+```bash
+claude --plugin-dir ~/code/omp-a2a/claude-code \
+  --dangerously-load-development-channels plugin:omp-a2a@inline
+```
+
+Or install it from the repository-local marketplace (still loaded in place):
+
+```bash
+claude plugin marketplace add ~/code/omp-a2a
+claude plugin install omp-a2a@omp-a2a
+claude --dangerously-load-development-channels plugin:omp-a2a@omp-a2a
+```
+
+The plugin reads the same `.omp/a2a.yml` and global Hub config as OMP, using the session's project root. Set `A2A_NAME` to override the configured roster name so an OMP session and a Claude Code session in one repository do not collide (`name_in_use` does not retry). Without a local config, connect with `/a2a connect <project> --as <name>`. Approval dialogs follow the locale (`A2A_LANG`, then `LC_ALL`, `LC_MESSAGES`, `LANG`); `zh*` shows Chinese, anything else English. Claude Code draws the Accept/Decline buttons itself, so they stay in English.
+
+Behavior differences from the OMP Extension:
+
+- Inbound Messages arrive as `<channel from ref target reply_to sender_user_approval attachments>` events. Attachments are written under the plugin data directory and referenced by path; outbound `attachments` are file paths relative to the project root.
+- Claude Code does not acknowledge channel events, so `delivered` means the event was written to the session. Without the channel flag, events are silently dropped yet still reported as delivered.
+- `requestUserSignature=true` opens an MCP elicitation dialog. Accept sends with the `omp-ui` receipt; Decline rejects and opens an optional reason prompt (Accept there submits the reason; Decline discards typed text); Escape cancels. The dialog collapses long text, so the full request is visible in the expanded tool call (`ctrl+o`).
+- Presence joins and leaves are not pushed into model context; the model calls `a2a_peers`.
+- `/a2a` asks the model to call `a2a_control` or `a2a_history`, so its results pass through model context.
+
 ## Payload and persistence
 
 - Text below 32 KiB uses identity encoding; larger text uses gzip + Base64 only when compression is smaller.
@@ -362,6 +397,7 @@ The dated tool/version rationale and rejected alternatives are recorded in [`doc
 ## Layout
 
 ```text
+claude-code/               # Claude Code plugin (manifest, /a2a command, entry)
 src/
   extension.ts             # human commands + three model tools
   operations.ts            # canonical runtime shared by commands and model tools
@@ -370,6 +406,11 @@ src/
   config-document.ts       # shared YAML/JSON parsing and owner-supplied schema validation
   paths.ts                 # Hub storage and configuration paths
   types.ts                 # Project/config shapes and name validation
+  claude-code/
+    bridge.ts              # MCP server: channel delivery, tools, approval dialogs
+    attachments.ts         # file-path attachment snapshots + inbox copies
+    dialogs.ts             # localized approval dialog text
+    main.ts                # stdio entry used by the plugin
   hub/
     server.ts              # HTTP control/history + WebSocket attachment
     realtime-server.ts     # Presence, routing, broadcast, delivery

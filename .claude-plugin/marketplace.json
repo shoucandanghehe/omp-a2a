@@ -1,0 +1,12 @@
+{
+	"name": "omp-a2a",
+	"owner": { "name": "shoucandanghehe" },
+	"description": "omp-a2a plugins loaded in place from this repository",
+	"plugins": [
+		{
+			"name": "omp-a2a",
+			"source": "./claude-code",
+			"description": "Realtime chat between Claude Code and other omp-a2a Agents"
+		}
+	]
+}

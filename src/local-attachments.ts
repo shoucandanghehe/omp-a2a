@@ -1,11 +1,4 @@
-import {
-	mkdir,
-	mkdtemp,
-	open,
-	realpath,
-	rm,
-	writeFile,
-} from "node:fs/promises";
+import { mkdir, mkdtemp, realpath, rm, writeFile } from "node:fs/promises";
 import * as path from "node:path";
 import {
 	type LocalProtocolOptions,
@@ -15,6 +8,7 @@ import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/route
 import { encodeBinaryPayload, validateAttachmentName } from "./hub/payload";
 import type { EncodedAttachment } from "./hub/types";
 import type { MessageAttachment } from "./operations";
+import { readStableFile } from "./stable-file";
 
 export type LocalAttachmentReference = {
 	name: string;
@@ -26,43 +20,6 @@ export type MaterializedLocalAttachments = {
 	commit(): void;
 	dispose(): Promise<void>;
 };
-
-async function readStableFile(
-	filePath: string,
-	source: string,
-	signal?: AbortSignal,
-): Promise<Buffer> {
-	signal?.throwIfAborted();
-	const file = await open(filePath, "r");
-	try {
-		signal?.throwIfAborted();
-		const before = await file.stat();
-		signal?.throwIfAborted();
-		if (!before.isFile())
-			throw new Error(`attachment source must be a regular file: ${source}`);
-		const buffer = Buffer.allocUnsafe(before.size);
-		let offset = 0;
-		while (offset < buffer.byteLength) {
-			signal?.throwIfAborted();
-			const { bytesRead } = await file.read(
-				buffer,
-				offset,
-				buffer.byteLength - offset,
-				offset,
-			);
-			signal?.throwIfAborted();
-			if (bytesRead === 0) break;
-			offset += bytesRead;
-		}
-		const after = await file.stat();
-		signal?.throwIfAborted();
-		if (offset !== before.size || after.size !== before.size)
-			throw new Error(`attachment changed while being read: ${source}`);
-		return buffer;
-	} finally {
-		await file.close();
-	}
-}
 
 export async function snapshotLocalAttachments(
 	sources: string[],

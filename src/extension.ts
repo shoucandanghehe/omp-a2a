@@ -1,16 +1,16 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
 import type {
 	ExtensionAPI,
 	ExtensionContext,
 	ExtensionUIContext,
 } from "@oh-my-pi/pi-coding-agent";
+import { signatureFingerprint } from "./approval";
 import { loadLocalConfig } from "./config";
 import { HubClient, resolveHubUrl } from "./hub/client";
 import {
 	ALL_TARGET,
 	type MessageRequestTarget,
 	normalizeRequestTarget,
-	type Peer,
 } from "./hub/realtime-types";
 import type { EncodedAttachment } from "./hub/types";
 import {
@@ -19,6 +19,7 @@ import {
 	snapshotLocalAttachments,
 } from "./local-attachments";
 import { A2aRuntime, type MessageView } from "./operations";
+import { escapeUnicode, safeJson } from "./safe-json";
 import { type A2aLocalConfig, AGENT_NAME_RE, PROJECT_NAME_RE } from "./types";
 
 const ASYNC_REPLY_GUIDANCE =
@@ -327,23 +328,6 @@ async function materializeMessages(
 	);
 }
 
-function escapeUnicode(character: string): string {
-	const codePoint = character.codePointAt(0);
-	if (codePoint === undefined) return "";
-	if (codePoint <= 0xffff)
-		return `\\u${codePoint.toString(16).padStart(4, "0")}`;
-	const offset = codePoint - 0x10000;
-	const high = 0xd800 + (offset >> 10);
-	const low = 0xdc00 + (offset & 0x3ff);
-	return `\\u${high.toString(16)}\\u${low.toString(16)}`;
-}
-
-function safeJson(value: unknown, space?: number): string {
-	const encoded = JSON.stringify(value, null, space);
-	if (encoded === undefined) throw new Error("value is not JSON serializable");
-	return encoded.replace(/[\u007f-\u009f\u2028\u2029]|\p{Cf}/gu, escapeUnicode);
-}
-
 function formatApprovalText(text: string): string {
 	const escapedCharacters: string[] = [];
 	let longestBacktickRun = 0;
@@ -373,31 +357,6 @@ function formatAttachments(attachments: LocalAttachmentReference[]): string {
 	return attachments.length === 0
 		? ""
 		: `\nattachments=${safeJson(attachments)}`;
-}
-
-function signatureFingerprint(options: {
-	project: string;
-	from: Peer;
-	target: MessageRequestTarget;
-	text: string;
-	replyTo?: string;
-	messageId: string;
-	attachments: EncodedAttachment[];
-}): string {
-	const value = [
-		options.project,
-		[options.from.name, options.from.presenceId],
-		options.target,
-		options.text,
-		options.replyTo ?? null,
-		options.messageId,
-		options.attachments.map((attachment) => [
-			attachment.name,
-			attachment.payload.encoding,
-			attachment.payload.data,
-		]),
-	];
-	return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
 
 function formatApprovalDialog(options: {

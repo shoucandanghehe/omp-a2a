@@ -1,0 +1,14 @@
+{
+	"name": "omp-a2a",
+	"displayName": "omp-a2a",
+	"description": "Realtime chat between this Claude Code session and other omp-a2a Agents through a shared Hub",
+	"author": { "name": "shoucandanghehe" },
+	"license": "MIT",
+	"mcpServers": {
+		"a2a": {
+			"command": "bun",
+			"args": ["${CLAUDE_PLUGIN_ROOT}/server.ts"]
+		}
+	},
+	"channels": [{ "server": "a2a", "displayName": "omp-a2a" }]
+}
