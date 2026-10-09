@@ -19,6 +19,16 @@ import {
 	snapshotLocalAttachments,
 } from "./local-attachments";
 import { A2aRuntime, type MessageView } from "./operations";
+import {
+	describeHistory,
+	describeMessageCall,
+	describePeers,
+	describeToolText,
+	type HistoryDetails,
+	type MaterializedMessageView,
+	type PeersDetails,
+	renderInboundMessage,
+} from "./presentation";
 import { escapeUnicode, safeJson } from "./safe-json";
 import { type A2aLocalConfig, AGENT_NAME_RE, PROJECT_NAME_RE } from "./types";
 
@@ -228,10 +238,6 @@ function usage(): string {
 	].join("\n");
 }
 
-type MaterializedMessageView = Omit<MessageView, "attachments"> & {
-	attachments: LocalAttachmentReference[];
-};
-
 type AttachmentMaterializer = typeof materializeLocalAttachments;
 type PendingMaterializedMessage = {
 	value: MaterializedMessageView;
@@ -425,6 +431,7 @@ export default function a2aExtension(
 ) {
 	const type = pi.arktype;
 	pi.setLabel("A2A Realtime Chat");
+	pi.registerMessageRenderer("a2a-inbound", renderInboundMessage);
 	const materializeAttachments =
 		dependencies.materializeAttachments ?? materializeLocalAttachments;
 	const snapshotAttachments =
@@ -963,11 +970,13 @@ export default function a2aExtension(
 	});
 
 	const peersParameters = type({});
-	pi.registerTool<typeof peersParameters>({
+	pi.registerTool<typeof peersParameters, PeersDetails>({
 		name: "a2a_peers",
 		label: "A2A Peers",
 		description: `Show this Agent's roster name and the exact other A2A roster names currently addressable in this Project. Use only these names as a2a_message target entries, or the magic target ${ALL_TARGET} for every current peer.`,
 		parameters: peersParameters,
+		describeCall: () => ({ tool: { title: "A2A Peers" } }),
+		describeResult: describePeers,
 		async execute() {
 			try {
 				const self = runtime.self;
@@ -1010,6 +1019,8 @@ export default function a2aExtension(
 		label: "A2A Message",
 		description: `Send to one or more current peers, or everyone. target is a non-empty array of names from a2a_peers, or ["${ALL_TARGET}"] for every current peer; every named peer must be present. Set replyTo to reply to an earlier Project message. Attachments must be current-session local:// regular files. If your exact outbound request requires user approval, set requestUserSignature=true to ask your own local OMP UI before sending. Rejection, cancellation, or unavailable UI sends nothing. ${ASYNC_REPLY_GUIDANCE}`,
 		parameters: messageParameters,
+		describeCall: describeMessageCall,
+		describeResult: describeToolText,
 		async execute(_id, parameters, callerSignal, _onUpdate, context) {
 			try {
 				const approvalUi = parameters.requestUserSignature
@@ -1261,12 +1272,24 @@ export default function a2aExtension(
 		"limit?": "number",
 		"from?": "string",
 	});
-	pi.registerTool<typeof historyParameters>({
+	pi.registerTool<typeof historyParameters, HistoryDetails>({
 		name: "a2a_history",
 		label: "A2A History",
 		description:
 			"Review earlier Project messages using before, after, limit, or from. Returned attachment links are valid in the current session. Use only for past context; never wait or poll for new replies.",
 		parameters: historyParameters,
+		describeCall: (args) => ({
+			tool: {
+				title: "A2A History",
+				target: args.from,
+				meta: [
+					args.before ? `Before ${args.before}` : undefined,
+					args.after ? `After ${args.after}` : undefined,
+					args.limit !== undefined ? `Limit ${args.limit}` : undefined,
+				].filter((value): value is string => value !== undefined),
+			},
+		}),
+		describeResult: describeHistory,
 		async execute(_id, parameters, callerSignal, _onUpdate, context) {
 			try {
 				const sessionToken = sessionLifecycle.signal;

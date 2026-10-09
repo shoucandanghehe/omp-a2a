@@ -11,6 +11,7 @@ The central seam is `A2aRuntime`: extension callbacks and commands depend on one
 | File | Responsibility | Primary interface |
 | --- | --- | --- |
 | `extension.ts` | OMP registration, session lifecycle, UI notifications, reconnect policy, slash commands, completions, and model tools. | `a2aExtension(pi, dependencies?)` |
+| `presentation.ts` | Native TSP descriptions for inbound messages and tool calls/results, with ANSI inbound rendering through OMP components. | `renderInboundMessage`, `describeMessageCall`, `describePeers`, `describeHistory` |
 | `local-attachments.ts` | Cancellable snapshot of uncapped sender-session `local://` file bytes and leak-free materialization of validated attachment basenames into the calling session. | `snapshotLocalAttachments`, `materializeLocalAttachments` |
 | `operations.ts` | Connected runtime over one WebSocket plus HTTP Project/history operations. | `A2aRuntime`, `A2aRuntimeEvents`, `MessageView`, `AcceptedMessageView`, `RuntimeStatus` |
 | `config.ts` | Strict repository-local YAML/JSON connection defaults. | `loadLocalConfig` |
@@ -65,6 +66,8 @@ On `session_shutdown`, the extension aborts Session work, clears active and reco
 `completeA2aArguments` provides synchronous, context-sensitive completion. It preserves the full argument prefix in each returned value, removes already-used flags, and enforces the `before`/`after` mutual exclusion in suggestions.
 
 Read-only result commands (`help`/`--help`/`-h`, `hub`, `project`/`project list`, `status`, `peers`, and `history`) publish a visible transcript card whose custom-message title is the trimmed `/a2a` invocation, without triggering a model turn. The `context` hook removes only custom messages whose type is `/a2a` or starts with `/a2a ` before provider requests, preserving the contract that human command output stays outside model context. Mutating action results, connection lifecycle, Presence, delivery, and errors remain transient UI notifications.
+
+`presentation.ts` supplies the inbound renderer's `describe()` and the three tools' `describeCall`/`describeResult` hooks. Native views retain message text, causal references, approval provenance, Presence identities, ordered history, and local attachment URLs without changing model content. The OMP backend owns TSP negotiation, framing, input, and existing slash-output cards, notifications, and approval dialogs. Runtime imports use the public TUI root rather than internal native/chat modules so compiled OMP forks can resolve them.
 
 ## Model tool surface
 
@@ -144,6 +147,7 @@ OMP callbacks / slash / tools
 ## Tests touching this directory
 
 - `extension.test.ts`: registered surfaces, strict invalid-configuration isolation, stable system-prompt/context filtering, help and ArkType contracts, multi-level completion, push-driven tools, Presence notifications, sender-owned approval/rejection and attachment ownership, Session/Project-switch cancellation, outbound send fencing, stale UI suppression, and reconnect intent.
+- `presentation.test.ts`: registered renderers through the real OMP native backend and TSP document applier; checks literal message text, metadata, attachment references, roster identity, ordered history, approval-request previews, error fallback, and ANSI/model-content preservation.
 - `local-attachments.test.ts`: `materializeLocalAttachments` rejects unsafe, blank, path-like, control-character, and duplicate names.
 - `operations.test.ts`: published Hub bindings, shared transition teardown, peer snapshots, HTTP and realtime cancellation, new/replayed acceptance, ordered injection, Delivery outcomes, and disconnected-state errors.
 - `config.test.ts`: strict configuration parsing and migration failures.

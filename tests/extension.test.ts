@@ -126,6 +126,7 @@ test("human commands and model tools expose separate A2A surfaces", async () => 
 		arktype(definition: unknown) {
 			return definition;
 		},
+		registerMessageRenderer() {},
 		setLabel() {},
 		on(event: string, handler: unknown) {
 			if (event === "before_agent_start")
@@ -295,6 +296,7 @@ test("model tools stay push-driven and forward history cancellation", async () =
 			arktype(definition: unknown) {
 				return definition;
 			},
+			registerMessageRenderer() {},
 			setLabel() {},
 			on(event: string, handler: unknown) {
 				if (event === "before_agent_start")
@@ -472,6 +474,7 @@ test("connection changes append context while the system prompt stays stable", a
 			arktype(definition: unknown) {
 				return definition;
 			},
+			registerMessageRenderer() {},
 			setLabel() {},
 			on(event: string, handler: unknown) {
 				if (event === "before_agent_start")
@@ -616,6 +619,7 @@ test("idle Presence changes collapse to the roster delta before the next message
 			arktype(definition: unknown) {
 				return definition;
 			},
+			registerMessageRenderer() {},
 			setLabel() {},
 			on(event: string, handler: unknown) {
 				if (event === "before_agent_start")
@@ -856,6 +860,7 @@ test("a2a_message preserves user approval and attachments in delivery and histor
 				arktype(definition: unknown) {
 					return definition;
 				},
+				registerMessageRenderer() {},
 				setLabel() {},
 				on() {},
 				logger: { warn() {} },
@@ -1217,6 +1222,7 @@ test("user approval rejection, cancellation, and headless requests fail closed p
 			arktype(definition: unknown) {
 				return definition;
 			},
+			registerMessageRenderer() {},
 			setLabel() {},
 			on(event: string, handler: unknown) {
 				if (event === "session_start")
@@ -1518,6 +1524,7 @@ test("a2a_message cannot cross a Project switch after a slow snapshot", async ()
 				arktype(definition: unknown) {
 					return definition;
 				},
+				registerMessageRenderer() {},
 				setLabel() {},
 				on() {},
 				logger: { warn() {} },
@@ -1641,6 +1648,7 @@ test("history materialization disposes successful siblings when one fails", asyn
 				arktype(definition: unknown) {
 					return definition;
 				},
+				registerMessageRenderer() {},
 				setLabel() {},
 				on() {},
 				logger: { warn() {} },
@@ -1760,6 +1768,7 @@ test("session shutdown aborts slash history and suppresses stale UI", async () =
 				arktype(definition: unknown) {
 					return definition;
 				},
+				registerMessageRenderer() {},
 				setLabel() {},
 				on(event: string, handler: unknown) {
 					if (event === "session_shutdown")
@@ -1879,6 +1888,7 @@ test("session switch cancels an in-flight inbound injection", async () => {
 			arktype(definition: unknown) {
 				return definition;
 			},
+			registerMessageRenderer() {},
 			setLabel() {},
 			on(event: string, handler: unknown) {
 				if (event === "session_switch")
@@ -1978,6 +1988,7 @@ test("manual Project switch cancels old in-flight attachment injection", async (
 				arktype(definition: unknown) {
 					return definition;
 				},
+				registerMessageRenderer() {},
 				setLabel() {},
 				on() {},
 				logger: { warn() {} },
@@ -2086,6 +2097,7 @@ test("ordinary command contexts do not cancel same-session inbound injection", a
 				arktype(definition: unknown) {
 					return definition;
 				},
+				registerMessageRenderer() {},
 				setLabel() {},
 				on() {},
 				logger: { warn() {} },
@@ -2235,6 +2247,7 @@ test("session switch invalidates obsolete reconnect work before awaiting teardow
 			arktype(definition: unknown) {
 				return definition;
 			},
+			registerMessageRenderer() {},
 			setLabel() {},
 			on(event: string, handler: unknown) {
 				if (event === "session_switch")
@@ -2394,6 +2407,7 @@ test("name conflict restores the accepting Hub as reconnect intent", async () =>
 			arktype(definition: unknown) {
 				return definition;
 			},
+			registerMessageRenderer() {},
 			setLabel() {},
 			on() {},
 			logger: { warn() {} },
@@ -2513,6 +2527,7 @@ test("invalid Session config blocks fallback Hub access until a successful reloa
 			arktype(definition: unknown) {
 				return definition;
 			},
+			registerMessageRenderer() {},
 			setLabel() {},
 			on(event: string, handler: unknown) {
 				if (event === "session_start")
@@ -2637,6 +2652,7 @@ test("invalid config reload closes fallback Presence and blocks sends without tr
 			arktype(definition: unknown) {
 				return definition;
 			},
+			registerMessageRenderer() {},
 			setLabel() {},
 			on(event: string, handler: unknown) {
 				if (event === "session_start")
