@@ -6,7 +6,7 @@
       "name": "omp-a2a",
       "dependencies": {
         "@modelcontextprotocol/sdk": "^1.30.1",
-        "@oh-my-pi/omptype": "^18.3.2",
+        "@oh-my-pi/omptype": "^18.6.1",
         "express": "^5.2.1",
         "ws": "^8.21.3",
       },
@@ -112,7 +112,7 @@
 
     "@oh-my-pi/omp-stats": ["@oh-my-pi/omp-stats@18.8.6", "", { "dependencies": { "@oh-my-pi/pi-ai": "18.8.6", "@oh-my-pi/pi-catalog": "18.8.6", "@oh-my-pi/pi-utils": "18.8.6", "lucide-react": "^1.24.0", "react": "19.2.7", "react-dom": "19.2.7" }, "bin": { "omp-stats": "src/index.ts" } }, "sha512-3whG5or2MJXLNfJ5gJmYDz3P1FZ2KahDF0LTVrTAhzZPDhQY0x5adYGSvirm+Zcae8TsHqEhvE3nmw+qmbEmZA=="],
 
-    "@oh-my-pi/omptype": ["@oh-my-pi/omptype@18.3.2", "", {}, "sha512-x/vzutjo/cw3u/JU8uyuyE4XSbVUQIENwej3wc8iJRRYc6G0HFnvVdGrC/tfYBOSDR2hOGkVoIqKq5cPOCfVbg=="],
+    "@oh-my-pi/omptype": ["@oh-my-pi/omptype@18.6.1", "", {}, "sha512-XSs+m/T7GbYQFurfXv9FQV53ezdxcywF+0xkTZRGsB6YIHV6Coa5vjFVVYDHLDZtoNoj0OrpjSy30kxfw5Iojw=="],
 
     "@oh-my-pi/pi-agent-core": ["@oh-my-pi/pi-agent-core@18.8.6", "", { "dependencies": { "@oh-my-pi/pi-ai": "18.8.6", "@oh-my-pi/pi-catalog": "18.8.6", "@oh-my-pi/pi-natives": "18.8.6", "@oh-my-pi/pi-utils": "18.8.6", "@oh-my-pi/pi-wire": "18.8.6", "@oh-my-pi/snapcompact": "18.8.6", "@opentelemetry/api": "^1.9.1" } }, "sha512-SgDbarItZvul1tEMJxK6jBP2EF22YMFYj1pqPKtOSP0TADott7zUZKfJTempIzqsQ2DBsLpmm43nXehoOCxGZA=="],
 
