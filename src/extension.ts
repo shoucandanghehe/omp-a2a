@@ -445,6 +445,8 @@ export default function a2aExtension(
 	let sessionLifecycle = new AbortController();
 	let modelPeerNames = new Set<string>();
 	let pendingConnectionMessage: A2aContextMessage | undefined;
+	// Set once this session tries to join A2A; keeps the guidance stable across reconnects.
+	let a2aEngaged = false;
 	const sessionRejections = new Map<string, string | null>();
 	const pendingSignatureRequests = new Map<string, symbol>();
 
@@ -665,6 +667,7 @@ export default function a2aExtension(
 
 	const connectDesired = async (target = desiredConnection): Promise<void> => {
 		if (!target || desiredConnection !== target) return;
+		a2aEngaged = true;
 		const predecessorToken = runtime.connected
 			? runtime.connectionToken()
 			: null;
@@ -727,6 +730,7 @@ export default function a2aExtension(
 		pendingSignatureRequests.clear();
 		modelPeerNames.clear();
 		pendingConnectionMessage = undefined;
+		a2aEngaged = false;
 		activeContext = null;
 		configState = { status: "unloaded" };
 		desiredConnection = null;
@@ -763,6 +767,7 @@ export default function a2aExtension(
 	}));
 	pi.on("before_agent_start", (event) => {
 		const message = takeContextDelta();
+		if (!a2aEngaged) return message ? { message } : undefined;
 		return {
 			...(message ? { message } : {}),
 			systemPrompt: [

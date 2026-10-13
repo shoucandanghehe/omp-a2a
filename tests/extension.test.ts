@@ -163,9 +163,7 @@ test("human commands and model tools expose separate A2A surfaces", async () => 
 	expect(tools.sort()).toEqual(["a2a_history", "a2a_message", "a2a_peers"]);
 	if (!beforeAgentStart)
 		throw new Error("A2A identity system prompt was not registered");
-	expect(await beforeAgentStart(beforeAgentStartEvent())).toEqual({
-		systemPrompt: EXPECTED_SYSTEM_PROMPT,
-	});
+	expect(await beforeAgentStart(beforeAgentStartEvent())).toBeUndefined();
 	const messageRegistration = messageToolRegistration;
 	if (!messageRegistration)
 		throw new Error("a2a_message tool registration was not captured");
@@ -500,7 +498,7 @@ test("connection changes append context while the system prompt stays stable", a
 			throw new Error("A2A hooks were not registered");
 		const event = beforeAgentStartEvent();
 		const initial = beforeAgentStart(event);
-		expect(initial).toEqual({ systemPrompt: EXPECTED_SYSTEM_PROMPT });
+		expect(initial).toBeUndefined();
 
 		await commandHandler(`connect ${project} --as api`, context);
 		const connected = beforeAgentStart(event);
@@ -512,7 +510,6 @@ test("connection changes append context while the system prompt stays stable", a
 			},
 			systemPrompt: EXPECTED_SYSTEM_PROMPT,
 		});
-		expect(connected?.systemPrompt).toEqual(initial?.systemPrompt);
 		expect(connected?.systemPrompt?.join("\n")).not.toContain(project);
 		expect(event.systemPrompt).toEqual(UPSTREAM_SYSTEM_PROMPT);
 
