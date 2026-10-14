@@ -72,12 +72,18 @@ const TOOLS: Tool[] = [
 	{
 		name: "a2a_history",
 		description:
-			"Review earlier Project messages. before/after take a message ref; from filters by sender name. Returned attachment paths are local copies. Use only for past context; never to wait or poll for new replies.",
+			"Review earlier Project messages. before/after take a message ref and are mutually exclusive; from filters by sender name. Returned attachment paths are local copies. Use only for past context; never to wait or poll for new replies.",
 		inputSchema: {
 			type: "object",
 			properties: {
-				before: { type: "string" },
-				after: { type: "string" },
+				before: {
+					type: "string",
+					description: "Message ref; mutually exclusive with after.",
+				},
+				after: {
+					type: "string",
+					description: "Message ref; mutually exclusive with before.",
+				},
 				limit: { type: "integer", minimum: 1 },
 				from: { type: "string" },
 			},

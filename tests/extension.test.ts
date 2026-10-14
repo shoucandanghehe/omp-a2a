@@ -12,6 +12,7 @@ import { createServer } from "node:http";
 import type { AddressInfo } from "node:net";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { type Type, type } from "@oh-my-pi/omptype";
 import type {
 	BeforeAgentStartEvent,
 	BeforeAgentStartEventResult,
@@ -291,9 +292,7 @@ test("model tools stay push-driven and forward history cancellation", async () =
 			name: "worker",
 		});
 		a2aExtension({
-			arktype(definition: unknown) {
-				return definition;
-			},
+			arktype: type,
 			registerMessageRenderer() {},
 			setLabel() {},
 			on(event: string, handler: unknown) {
@@ -375,8 +374,29 @@ test("model tools stay push-driven and forward history cancellation", async () =
 			'Send to one or more current peers, or everyone. target is a non-empty array of names from a2a_peers, or ["@all"] for every current peer; every named peer must be present. Set replyTo to reply to an earlier Project message. Attachments must be current-session local:// regular files. If your exact outbound request requires user approval, set requestUserSignature=true to ask your own local OMP UI before sending. Rejection, cancellation, or unavailable UI sends nothing. Sending is fire-and-forget. Do not wait, sleep, or poll a2a_history for replies. Continue only with other already-requested, reply-independent work; if none remains, end the turn.',
 		);
 		expect(historyTool.description).toBe(
-			"Review earlier Project messages using before, after, limit, or from. Returned attachment links are valid in the current session. Use only for past context; never wait or poll for new replies.",
+			"Review earlier Project messages using before or after (mutually exclusive), limit, or from. Returned attachment links are valid in the current session. Use only for past context; never wait or poll for new replies.",
 		);
+		const historySchema = historyTool.parameters as Type;
+		expect(historySchema.toJsonSchema()).toMatchObject({
+			properties: {
+				before: {
+					description: expect.stringContaining("mutually exclusive with after"),
+				},
+				after: {
+					description: expect.stringContaining(
+						"mutually exclusive with before",
+					),
+				},
+			},
+		});
+		const invalidHistory = await historyTool.execute("history-both", {
+			before: `${project}:2`,
+			after: `${project}:1`,
+		} as never);
+		expect(invalidHistory).toMatchObject({
+			isError: true,
+			details: { error: "history accepts before or after, not both" },
+		});
 
 		const result = await messageTool.execute("send-1", {
 			target: ["worker"],
@@ -386,6 +406,18 @@ test("model tools stay push-driven and forward history cancellation", async () =
 		expect(result.content[0]?.text).toContain(
 			"Do not wait, sleep, or poll a2a_history for replies.",
 		);
+		const before = await historyTool.execute(
+			"history-before",
+			historySchema.assert({ before: `${project}:2` }) as never,
+		);
+		expect(before.details).toMatchObject({
+			messages: [{ messageRef: `${project}:1`, text: "reply with pong" }],
+		});
+		const after = await historyTool.execute(
+			"history-after",
+			historySchema.assert({ after: `${project}:1` }) as never,
+		);
+		expect(after.details).toEqual({ messages: [] });
 
 		const originalHistory = HubClient.prototype.history;
 		const historyStarted = Promise.withResolvers<void>();

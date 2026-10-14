@@ -149,6 +149,7 @@ async function setup(
 	};
 	return {
 		hub,
+		client,
 		hubClient,
 		projectDir,
 		peer,
@@ -207,6 +208,51 @@ test("auto-connects from the client root config and exchanges messages", async (
 	const history = await call("a2a_history", { limit: 10 });
 	expect(history.text).toContain('"from":"alice"');
 	expect(history.text).toContain('text="hello back"');
+});
+
+test("history tools expose cursor exclusion and preserve one-sided queries", async () => {
+	const { client, peer, channel, call } = await setup();
+	const { tools } = await client.listTools();
+	const historyTool = tools.find((tool) => tool.name === "a2a_history");
+	expect(historyTool?.description).toContain("mutually exclusive");
+	expect(historyTool?.inputSchema).toMatchObject({
+		properties: {
+			before: {
+				description: expect.stringContaining("mutually exclusive with after"),
+			},
+			after: {
+				description: expect.stringContaining("mutually exclusive with before"),
+			},
+		},
+	});
+	for (const text of ["first", "middle", "last"]) {
+		await peer.message({ target: ["claude"], text });
+		await channel.next();
+	}
+	expect(
+		await call("a2a_history", { before: "team:3", after: "team:1" }),
+	).toEqual({
+		isError: true,
+		text: "history accepts before or after, not both",
+	});
+	const before = await call("a2a_history", {
+		before: "team:2",
+		from: "alice",
+		limit: 1,
+	});
+	expect(before.isError).toBe(false);
+	expect(before.text).toContain('text="first"');
+	expect(before.text).not.toContain('text="middle"');
+	expect(before.text).not.toContain('text="last"');
+	const after = await call("a2a_history", {
+		after: "team:2",
+		from: "alice",
+		limit: 1,
+	});
+	expect(after.isError).toBe(false);
+	expect(after.text).toContain('text="last"');
+	expect(after.text).not.toContain('text="first"');
+	expect(after.text).not.toContain('text="middle"');
 });
 
 test("attachments travel as files in both directions", async () => {

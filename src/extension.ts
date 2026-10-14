@@ -233,7 +233,7 @@ function usage(): string {
 		"/a2a disconnect",
 		"/a2a status",
 		"/a2a peers",
-		"/a2a history [--before <ref>] [--after <ref>] [--limit <n>] [--from <name>]",
+		"/a2a history [--before <ref> | --after <ref>] [--limit <n>] [--from <name>]",
 		"/a2a help",
 	].join("\n");
 }
@@ -1272,8 +1272,8 @@ export default function a2aExtension(
 	});
 
 	const historyParameters = type({
-		"before?": "string",
-		"after?": "string",
+		"before?": ["string", "@", "Message ref; mutually exclusive with after."],
+		"after?": ["string", "@", "Message ref; mutually exclusive with before."],
 		"limit?": "number",
 		"from?": "string",
 	});
@@ -1281,7 +1281,7 @@ export default function a2aExtension(
 		name: "a2a_history",
 		label: "A2A History",
 		description:
-			"Review earlier Project messages using before, after, limit, or from. Returned attachment links are valid in the current session. Use only for past context; never wait or poll for new replies.",
+			"Review earlier Project messages using before or after (mutually exclusive), limit, or from. Returned attachment links are valid in the current session. Use only for past context; never wait or poll for new replies.",
 		parameters: historyParameters,
 		describeCall: (args) => ({
 			tool: {

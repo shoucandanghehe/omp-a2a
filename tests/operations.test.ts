@@ -132,6 +132,54 @@ test("one runtime path serves discovery, messaging, delivery, and history", asyn
 	await api.disconnect();
 });
 
+test("history rejects conflicting cursors before HTTP and preserves single-cursor pages", async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-runtime-history-"));
+	roots.push(dataDir);
+	const hub = await startHubServer({
+		host: "127.0.0.1",
+		port: 0,
+		dataDir,
+	});
+	hubs.push(hub);
+	const client = new HubClient(hub.listenUrl);
+	await client.createProject({ name: "history" });
+	const runtime = new A2aRuntime({ getClient: async () => client });
+	try {
+		await runtime.connect("history", "reader");
+		for (const text of ["first", "middle", "last"])
+			await runtime.message({ target: ["@all"], text });
+		const history = vi.spyOn(client, "history");
+		try {
+			await expect(
+				runtime.history({ before: "history:3", after: "history:1" }),
+			).rejects.toThrow("history accepts before or after, not both");
+			expect(history).not.toHaveBeenCalled();
+			expect(
+				(
+					await runtime.history({
+						before: "history:2",
+						from: "reader",
+						limit: 1,
+					})
+				).map((message) => message.messageRef),
+			).toEqual(["history:1"]);
+			expect(
+				(
+					await runtime.history({
+						after: "history:2",
+						from: "reader",
+						limit: 1,
+					})
+				).map((message) => message.messageRef),
+			).toEqual(["history:3"]);
+		} finally {
+			history.mockRestore();
+		}
+	} finally {
+		await runtime.disconnect();
+	}
+});
+
 test("receiver injection completes in Hub message order", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-runtime-order-"));
 	roots.push(dataDir);

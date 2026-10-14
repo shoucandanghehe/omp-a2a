@@ -325,6 +325,8 @@ export class A2aRuntime {
 	): Promise<MessageView[]> {
 		const published = this.#published;
 		if (!published) throw new Error("A2A is not connected");
+		if (query?.before && query.after)
+			throw new Error("history accepts before or after, not both");
 		const page = await published.client.history(
 			{
 				project: published.connection.project,
