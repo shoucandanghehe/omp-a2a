@@ -33,7 +33,7 @@
 	},
 	"dependencies": {
 		"@modelcontextprotocol/sdk": "^1.32.1",
-		"@oh-my-pi/omptype": "^18.3.2",
+		"@oh-my-pi/omptype": "^18.11.1",
 		"express": "^5.2.1",
 		"ws": "^8.22.0"
 	},
