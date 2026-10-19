@@ -88,7 +88,7 @@ Repository-local connection defaults require `project` and `name`; `autoConnect`
 
 If a command reload finds the repository-local configuration invalid, the Extension closes the current Presence, clears reconnect intent, and blocks fallback Hub access until a successful reload or Session switch.
 
-The Hub runs locally with `bun run hub` or in Docker Compose. The CLI alone resolves `--host`, `--port`, and `--data-dir` with flag → environment → default precedence, rejecting a selected blank value, before calling the explicit server API. Each Hub needs a unique listener and data directory; `HubDataLock` is the only runtime ownership record. The shared SQLite Hub store uses WAL with `synchronous = FULL`; new storage writes the complete current schema and version atomically, while mismatches fail closed. The Bun `1.3.14` image runs with fixed `0.0.0.0:4173` and `/data/omp-a2a` arguments, while Compose owns host-port publication, restart policy, and memory/CPU/PID limits.
+The Hub runs locally with `bun run hub` or in Docker Compose. The CLI alone resolves `--host`, `--port`, and `--data-dir` with flag → environment → default precedence, rejecting a selected blank value, before calling the explicit server API. Each Hub needs a unique listener and data directory; `HubDataLock` is the only runtime ownership record. The shared SQLite Hub store uses WAL with `synchronous = FULL`; new storage writes the complete current schema and version atomically, while mismatches fail closed. The Bun `1.4.3` image runs with fixed `0.0.0.0:4173` and `/data/omp-a2a` arguments, while Compose owns host-port publication, restart policy, and memory/CPU/PID limits.
 
 ## User surfaces
 
@@ -126,7 +126,7 @@ The sender Extension snapshots attachment bytes before sending and fences the fi
 | `.slim/codemap.json` | File/folder hashes and selection patterns for incremental codemap maintenance; not a runtime input. |
 | `config.example.yml` | Global Hub URL example. |
 | `.env.example` | Compose host-port and resource-limit defaults plus local CLI storage example. |
-| `Dockerfile` | Unprivileged standalone Hub image pinned to Bun `1.3.14` and an exact image digest, listening on fixed `0.0.0.0:4173`. |
+| `Dockerfile` | Unprivileged standalone Hub image pinned to Bun `1.4.3` and an exact image digest, listening on fixed `0.0.0.0:4173`. |
 | `docker-compose.yml` | Hub health, host-port publication, persistent volume, restart policy, and memory/CPU/PID limits. |
 
 ## Directory map

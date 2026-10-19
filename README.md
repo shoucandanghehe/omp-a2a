@@ -106,7 +106,7 @@ These are current implementation boundaries, not delivery guarantees. The most i
 
 ## Install
 
-Use Bun `>=1.3.14`; the repository toolchain and Docker image are pinned to `1.3.14`.
+Use Bun `>=1.3.14`; the repository toolchain and Docker image are pinned to `1.4.3`.
 
 ```bash
 cd ~/code/omp-a2a
@@ -137,7 +137,7 @@ ports:
   - "127.0.0.1:${OMP_A2A_HUB_PORT:-4173}:4173"
 ```
 
-Each Compose project receives its own named volume. Use different Compose project names and published ports to run independent Hubs. The image is pinned to Bun `1.3.14`; Compose defaults to `512m` memory, `1.0` CPU, and `256` PIDs with `restart: unless-stopped`. Override the limits with `OMP_A2A_HUB_MEM_LIMIT`, `OMP_A2A_HUB_CPUS`, and `OMP_A2A_HUB_PIDS_LIMIT`.
+Each Compose project receives its own named volume. Use different Compose project names and published ports to run independent Hubs. The image is pinned to Bun `1.4.3`; Compose defaults to `512m` memory, `1.0` CPU, and `256` PIDs with `restart: unless-stopped`. Override the limits with `OMP_A2A_HUB_MEM_LIMIT`, `OMP_A2A_HUB_CPUS`, and `OMP_A2A_HUB_PIDS_LIMIT`.
 
 Preserve the named data volume:
 

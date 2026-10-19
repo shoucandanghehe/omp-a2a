@@ -106,7 +106,7 @@ omp-a2a 面向完全可信的私有网络，要求 Hub 和扩展版本匹配。
 
 ## 安装
 
-使用 Bun `>=1.3.14`；仓库工具链和 Docker 镜像固定为 `1.3.14`。
+使用 Bun `>=1.3.14`；仓库工具链和 Docker 镜像固定为 `1.4.3`。
 
 ```bash
 cd ~/code/omp-a2a
@@ -137,7 +137,7 @@ ports:
   - "127.0.0.1:${OMP_A2A_HUB_PORT:-4173}:4173"
 ```
 
-每个 Compose 项目都有自己的命名卷。使用不同的 Compose 项目名和发布端口，即可运行独立的 Hub。镜像固定为 Bun `1.3.14`；Compose 默认限制为 `512m` 内存、`1.0` CPU 和 `256` 个 PID，并使用 `restart: unless-stopped`。可通过 `OMP_A2A_HUB_MEM_LIMIT`、`OMP_A2A_HUB_CPUS` 和 `OMP_A2A_HUB_PIDS_LIMIT` 覆盖这些限制。
+每个 Compose 项目都有自己的命名卷。使用不同的 Compose 项目名和发布端口，即可运行独立的 Hub。镜像固定为 Bun `1.4.3`；Compose 默认限制为 `512m` 内存、`1.0` CPU 和 `256` 个 PID，并使用 `restart: unless-stopped`。可通过 `OMP_A2A_HUB_MEM_LIMIT`、`OMP_A2A_HUB_CPUS` 和 `OMP_A2A_HUB_PIDS_LIMIT` 覆盖这些限制。
 
 停止服务并保留命名数据卷：
 
