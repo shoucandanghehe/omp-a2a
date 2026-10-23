@@ -342,8 +342,6 @@ async function materializeMessages(
 
 function formatApprovalText(text: string): string {
 	const escapedCharacters: string[] = [];
-	let longestBacktickRun = 0;
-	let currentBacktickRun = 0;
 	for (const character of text) {
 		const codePoint = character.codePointAt(0);
 		escapedCharacters.push(
@@ -351,18 +349,17 @@ function formatApprovalText(text: string): string {
 				? escapeUnicode(character)
 				: character,
 		);
-		if (character === "`") {
-			currentBacktickRun += 1;
-			longestBacktickRun = Math.max(longestBacktickRun, currentBacktickRun);
-		} else {
-			currentBacktickRun = 0;
-		}
 	}
 	const safeText = escapedCharacters
 		.join("")
 		.replace(/[\u007f-\u009f\u2028\u2029]|\p{Cf}/gu, escapeUnicode);
-	const fence = "`".repeat(Math.max(3, longestBacktickRun + 1));
-	return `${fence}text\n${safeText}\n${fence}`;
+	return safeText
+		.replace(
+			/[\\`*_{}[\]<>()#+\-.!|~$&]/g,
+			(character) => `&#${character.charCodeAt(0)};`,
+		)
+		.replace(/^ +/gm, (indent) => "&#32;".repeat(indent.length))
+		.replace(/\n/g, "  \n");
 }
 
 function formatAttachments(attachments: LocalAttachmentReference[]): string {
@@ -387,6 +384,7 @@ function formatApprovalDialog(options: {
 			? "**Attachments:** None"
 			: [
 					"**Attachments**",
+					"",
 					formatApprovalText(
 						options.attachments
 							.map(
@@ -400,6 +398,7 @@ function formatApprovalDialog(options: {
 		`**Target:** ${target}`,
 		"",
 		"**Message**",
+		"",
 		formatApprovalText(options.text),
 		"",
 		attachments,
@@ -1113,12 +1112,12 @@ export default function a2aExtension(
 					const pendingToken = Symbol(fingerprint);
 					pendingSignatureRequests.set(fingerprint, pendingToken);
 					try {
-						const reviewOptions = {
+						const review = formatApprovalDialog({
 							target,
 							text: parameters.text,
 							attachmentSources,
 							attachments,
-						};
+						});
 						let decision: "Approve and send" | "Reject" | undefined;
 						if (localAskDialog) {
 							const approval = await localAskDialog.call(
@@ -1133,12 +1132,13 @@ export default function a2aExtension(
 												label: "Approve and send",
 												description:
 													"Send this exact outbound message with a one-time local UI approval receipt.",
-												preview: formatApprovalDialog(reviewOptions),
+												preview: review,
 											},
 											{
 												label: "Reject",
 												description:
 													"Do not send; you may give the requesting agent a reason.",
+												preview: review,
 											},
 										],
 										recommended: 0,
@@ -1160,7 +1160,6 @@ export default function a2aExtension(
 									? selectedOption
 									: undefined;
 						} else {
-							const review = formatApprovalDialog(reviewOptions);
 							// Official OMP and older forks lack this capability; confirm/input keeps Type unavailable.
 							decision = (await context.ui.confirm(
 								"Approve A2A outbound message",

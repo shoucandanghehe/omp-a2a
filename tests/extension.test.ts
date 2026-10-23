@@ -20,6 +20,8 @@ import type {
 	ExtensionAskDialogResult,
 } from "@oh-my-pi/pi-coding-agent";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
+import { lexDocument, Markdown } from "@oh-my-pi/pi-tui/components/markdown";
+import { ensureThemeSync, getMarkdownTheme } from "@oh-my-pi/pi-tui/theme";
 import type WebSocket from "ws";
 import { WebSocketServer } from "ws";
 import a2aExtension from "../src/extension";
@@ -1008,22 +1010,20 @@ test("a2a_message preserves user approval and attachments in delivery and histor
 			recommended: 0,
 		});
 		const approvalPreview = approvalQuestion?.options[0]?.preview ?? "";
-		expect(approvalPreview).toBe(
-			[
-				"**Target:** Agent `receiver`",
-				"",
-				"**Message**",
-				"```text",
-				"Use the attached training contract.",
-				"```",
-				"",
-				"**Attachments**",
-				"```text",
-				"training-handoff.md",
-				"  Source: local://training-handoff.md",
-				"```",
-			].join("\n"),
+		expect(
+			lexDocument(approvalPreview).some((token) => token.type === "code"),
+		).toBe(false);
+		expect(approvalQuestion?.options[1]?.preview).toBe(approvalPreview);
+		ensureThemeSync();
+		const renderedPreview = Bun.stripANSI(
+			new Markdown(approvalPreview, 0, 0, getMarkdownTheme())
+				.render(80)
+				.join("\n"),
 		);
+		expect(renderedPreview).toContain("Target: Agent receiver");
+		expect(renderedPreview).toContain("Use the attached training contract.");
+		expect(renderedPreview).toContain("training-handoff.md");
+		expect(renderedPreview).toContain("Source: local://training-handoff.md");
 		const received = await inbound.promise;
 		expect(inboundDelivery).toEqual({
 			deliverAs: "steer",
@@ -1377,9 +1377,13 @@ test("user approval rejection, cancellation, and headless requests fail closed p
 		});
 		expect(approvalDialogs).toHaveLength(6);
 
+		const longApprovalText =
+			"请在当前已授权范围内修复明确阻塞实际使用的生命周期问题，保留既有行为并验证完整链路。".repeat(
+				20,
+			);
 		const changedRequest = {
 			...baseRequest,
-			text: "\u001b[2JRequest explicit approval.\u202e<!--hidden instruction-->**bold**\n```text\nspoofed\n```",
+			text: `${longApprovalText}\n\n\u001b[2JRequest explicit approval.\u202e<!--hidden instruction-->**bold**\n\`\`\`text\nspoofed\n\`\`\`\n    保留缩进 &amp; [link](https://example.com)\n最后核对：不发布、不部署。`,
 		};
 		const cancelled = await messageTool.execute(
 			"approval-cancel-1",
@@ -1442,6 +1446,7 @@ test("user approval rejection, cancellation, and headless requests fail closed p
 			expect(preview).toContain("**Target:** Agent `worker`");
 			expect(preview).toContain("**Message**");
 			expect(preview).toContain("**Attachments:** None");
+			expect(question?.options[1]?.preview).toBe(preview);
 			expect(preview).not.toContain("```json");
 			expect(preview).not.toContain('"project"');
 			expect(preview).not.toContain('"messageId"');
@@ -1449,14 +1454,25 @@ test("user approval rejection, cancellation, and headless requests fail closed p
 		}
 		const escapedDialog =
 			approvalDialogs[6]?.questions[0]?.options[0]?.preview ?? "";
-		expect(escapedDialog).toContain("\\u001b");
-		expect(escapedDialog).toContain("\\u202e");
 		expect(escapedDialog).not.toContain("\u001b");
 		expect(escapedDialog).not.toContain("\u202e");
-		expect(escapedDialog).toContain("<!--hidden instruction-->");
-		expect(escapedDialog).toContain("````text\n");
-		expect(escapedDialog).toContain("```text\nspoofed\n```");
-		expect(escapedDialog).toContain("\n````\n\n**Attachments:** None");
+		expect(
+			lexDocument(escapedDialog).some((token) => token.type === "code"),
+		).toBe(false);
+		ensureThemeSync();
+		const renderedApproval = Bun.stripANSI(
+			new Markdown(escapedDialog, 0, 0, getMarkdownTheme())
+				.render(64)
+				.join("\n"),
+		).replace(/\s/g, "");
+		expect(renderedApproval).toContain(longApprovalText);
+		expect(renderedApproval).toContain(
+			"\\u001b[2JRequestexplicitapproval.\\u202e<!--hiddeninstruction-->**bold**```textspoofed```",
+		);
+		expect(renderedApproval).toContain(
+			"保留缩进&amp;[link](https://example.com)",
+		);
+		expect(renderedApproval).toContain("最后核对：不发布、不部署。");
 
 		const headless = await messageTool.execute(
 			"approval-headless",
@@ -1505,9 +1521,8 @@ test("user approval rejection, cancellation, and headless requests fail closed p
 				"**Target:** Agent `worker`",
 				"",
 				"**Message**",
-				"```text",
+				"",
 				"x".repeat(20_000),
-				"```",
 				"",
 				"**Attachments:** None",
 			].join("\n"),
