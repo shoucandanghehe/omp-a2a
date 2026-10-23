@@ -32,18 +32,14 @@ function messageHeading(message: MaterializedMessageView): string {
 	return `${message.messageRef} · ${message.from.name} → ${target}`;
 }
 
-function messageNotes(message: MaterializedMessageView): string {
-	const notes: string[] = [];
-	if (message.replyTo) notes.push(`Reply to ${message.replyTo}`);
-	if (message.userApproval?.kind === "omp-ui")
-		notes.push("Approved by sender's user");
-	return notes.join(" · ");
-}
-
 function messageBody(message: MaterializedMessageView): NativeNode[] {
 	const body: NativeNode[] = [];
-	const notes = messageNotes(message);
-	if (notes) body.push({ k: "text", p: { text: notes }, key: "context" });
+	if (message.replyTo)
+		body.push({
+			k: "text",
+			p: { text: `Reply to ${message.replyTo}` },
+			key: "context",
+		});
 	body.push({ k: "md", p: { text: message.text }, key: "message" });
 	if (message.attachments.length > 0)
 		body.push({
@@ -63,23 +59,25 @@ class InboundMessageComponent extends Box {
 
 	constructor(details: MaterializedMessageView, theme: Theme) {
 		super(1, 1, (text) => theme.bg("customMessageBg", text));
+		const approved = details.userApproval?.kind === "omp-ui";
+		const heading = `A2A ${messageHeading(details)}`;
 		this.setIgnoreTight(true);
 		this.setBorder({
 			chars: theme.boxRound,
-			color: (text) => theme.fg("borderMuted", text),
+			color: (text) => theme.fg(approved ? "success" : "borderMuted", text),
 		});
 		this.addChild(
 			new Text(
 				theme.fg(
-					"customMessageLabel",
-					theme.bold(`${theme.icon.package} A2A ${messageHeading(details)}`),
+					approved ? "success" : "customMessageLabel",
+					theme.bold(`${theme.icon.package} ${heading}`),
 				),
 				0,
 				0,
 			),
 		);
-		const notes = messageNotes(details);
-		if (notes) this.addChild(new Text(notes, 0, 0));
+		if (details.replyTo)
+			this.addChild(new Text(`Reply to ${details.replyTo}`, 0, 0));
 		this.addChild(new Spacer(1));
 		this.addChild(
 			new Markdown(details.text, 0, 0, getMarkdownTheme(), {
@@ -94,7 +92,13 @@ class InboundMessageComponent extends Box {
 		}
 		this.#view = {
 			k: "card",
-			p: { head: `A2A ${messageHeading(details)}`, role: "omp.custom.a2a" },
+			p: {
+				head: heading,
+				role: "omp.custom.a2a",
+				tone: approved ? "success" : undefined,
+				title: approved ? "Approved by sender's user" : undefined,
+				aria: approved ? `${heading} · Approved by sender's user` : undefined,
+			},
 			c: messageBody(details),
 		};
 	}
@@ -157,12 +161,23 @@ export function describeHistory(
 		body:
 			details.messages.length === 0
 				? [{ k: "text", p: { text: "No messages." } }]
-				: details.messages.map((message) => ({
-						k: "section",
-						key: message.messageId,
-						p: { head: messageHeading(message) },
-						c: messageBody(message),
-					})),
+				: details.messages.map((message) => {
+						const approved = message.userApproval?.kind === "omp-ui";
+						const heading = messageHeading(message);
+						return {
+							k: "section",
+							key: message.messageId,
+							p: {
+								head: heading,
+								tone: approved ? "success" : undefined,
+								title: approved ? "Approved by sender's user" : undefined,
+								aria: approved
+									? `${heading} · Approved by sender's user`
+									: undefined,
+							},
+							c: messageBody(message),
+						};
+					}),
 	};
 }
 

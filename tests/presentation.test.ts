@@ -128,7 +128,8 @@ test("registered inbound renderer keeps human context and markdown without expos
 		expect(ansi).toContain("A2A test:1 · sender → receiver");
 		expect(ansi).toContain("literal peer text");
 		expect(ansi).toContain("hello");
-		expect(ansi).toContain("Reply to test:0 · Approved by sender's user");
+		expect(ansi).toContain("Reply to test:0");
+		expect(ansi).not.toContain("Approved by sender's user");
 		expect(ansi).toContain("report.txt");
 		expect(ansi).toContain("local://a2a/report.txt");
 		expect(ansi).not.toContain("metadata=");
@@ -140,16 +141,20 @@ test("registered inbound renderer keeps human context and markdown without expos
 		expect(nodes.find((node) => node.k === "card")?.p?.head).toBe(
 			"A2A test:1 · sender → receiver",
 		);
+		expect(nodes.find((node) => node.k === "card")?.p?.tone).toBe("success");
+		expect(nodes.find((node) => node.k === "card")?.p?.title).toBe(
+			"Approved by sender's user",
+		);
+		expect(nodes.find((node) => node.k === "card")?.p?.aria).toBe(
+			"A2A test:1 · sender → receiver · Approved by sender's user",
+		);
 		expect(nodes.find((node) => node.k === "md")?.p?.text).toBe(
 			"# literal peer text\n```text\nhello\n```",
 		);
 		expect(nodes.find((node) => node.k === "kv")).toBeUndefined();
 		expect(
 			nodes.filter((node) => node.k === "text").map((node) => node.p?.text),
-		).toEqual([
-			"Reply to test:0 · Approved by sender's user",
-			"report.txt\nlocal://a2a/report.txt",
-		]);
+		).toEqual(["Reply to test:0", "report.txt\nlocal://a2a/report.txt"]);
 		expect(message.content).toBe(
 			'metadata={"ref":"test:1"}\ntext="original model content"',
 		);
@@ -210,16 +215,24 @@ test("registered peer and history tool views preserve roster identity and messag
 	expect(nodes.find((node) => node.k === "kv")).toBeUndefined();
 	expect(
 		nodes.filter((node) => node.k === "text").map((node) => node.p?.text),
-	).toEqual([
-		"Reply to test:0 · Approved by sender's user",
-		"report.txt\nlocal://a2a/report.txt",
-	]);
+	).toEqual(["Reply to test:0", "report.txt\nlocal://a2a/report.txt"]);
 	expect(
 		nodes.filter((node) => node.k === "section").map((node) => node.p?.head),
 	).toEqual([
 		"test:1 · sender → receiver",
 		"Attachments",
 		"test:2 · sender → @all",
+	]);
+	const messageSections = nodes.filter(
+		(node) => node.k === "section" && node.p?.head !== "Attachments",
+	);
+	expect(messageSections.map((node) => node.p?.tone)).toEqual([
+		"success",
+		undefined,
+	]);
+	expect(messageSections.map((node) => node.p?.title)).toEqual([
+		"Approved by sender's user",
+		undefined,
 	]);
 	expect(
 		history({ content: [], details: { messages: [] } }, options)?.body,
