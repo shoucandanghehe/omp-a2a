@@ -109,50 +109,53 @@ const first: MaterializedMessageView = {
 
 const options = { expanded: false, isPartial: false };
 
-test("registered inbound renderer emits structured TSP without changing ANSI or model content", () => {
+test("registered inbound renderer keeps human context and markdown without exposing protocol metadata", () => {
 	const { inbound } = registeredPresentation();
 	const message: CustomMessage<MaterializedMessageView> = {
 		role: "custom",
 		customType: "a2a-inbound",
 		content: 'metadata={"ref":"test:1"}\ntext="original model content"',
 		display: true,
-		details: first,
+		details: structuredClone(first),
 		timestamp: 0,
 	};
 	const component = new CustomMessageComponent(
 		message,
 		inbound as MessageRenderer,
 	);
-	const fallback = new CustomMessageComponent(message);
 	try {
-		expect(component.render(80)).toEqual(fallback.render(80));
+		const ansi = Bun.stripANSI(component.render(120).join("\n"));
+		expect(ansi).toContain("A2A test:1 · sender → receiver");
+		expect(ansi).toContain("literal peer text");
+		expect(ansi).toContain("hello");
+		expect(ansi).toContain("Reply to test:0 · Approved by sender's user");
+		expect(ansi).toContain("report.txt");
+		expect(ansi).toContain("local://a2a/report.txt");
+		expect(ansi).not.toContain("metadata=");
+		expect(ansi).not.toContain("original model content");
+		expect(ansi).not.toContain("first-id");
+		expect(ansi).not.toContain("sender-presence");
+		expect(ansi).not.toContain("receiver-presence");
 		const nodes = renderDocument([component]);
 		expect(nodes.find((node) => node.k === "card")?.p?.head).toBe(
 			"A2A test:1 · sender → receiver",
 		);
-		expect(nodes.find((node) => node.k === "code")?.p).toEqual({
-			text: "# literal peer text\n```text\nhello\n```",
-			lang: "text",
-		});
-		expect(nodes.find((node) => node.k === "kv")?.p?.items).toEqual([
-			{ k: "Project", v: "test" },
-			{ k: "Message ID", v: "first-id" },
-			{ k: "Sequence", v: "1" },
-			{ k: "Sender presence", v: "sender-presence" },
-			{ k: "Time", v: "1970-01-01T00:00:00.000Z" },
-			{ k: "Sender user approval", v: "confirmed" },
-			{ k: "Recipient presences", v: "receiver-presence" },
-			{ k: "Reply to", v: "test:0" },
-		]);
-		expect(nodes.find((node) => node.k === "text")?.p?.text).toBe(
-			"report.txt\nlocal://a2a/report.txt",
+		expect(nodes.find((node) => node.k === "md")?.p?.text).toBe(
+			"# literal peer text\n```text\nhello\n```",
 		);
+		expect(nodes.find((node) => node.k === "kv")).toBeUndefined();
+		expect(
+			nodes.filter((node) => node.k === "text").map((node) => node.p?.text),
+		).toEqual([
+			"Reply to test:0 · Approved by sender's user",
+			"report.txt\nlocal://a2a/report.txt",
+		]);
 		expect(message.content).toBe(
 			'metadata={"ref":"test:1"}\ntext="original model content"',
 		);
+		expect(message.details).toEqual(first);
 	} finally {
 		component.dispose();
-		fallback.dispose();
 	}
 });
 
@@ -169,14 +172,18 @@ test("registered peer and history tool views preserve roster identity and messag
 		options,
 	);
 	const roster = renderDocument(peers?.body ?? []);
+	expect(roster.find((node) => node.k === "table")?.p?.cols).toEqual([
+		{ id: "name", head: "Name" },
+		{ id: "role", head: "Role" },
+	]);
 	expect(roster.find((node) => node.k === "table")?.p?.rows).toEqual([
 		{
 			id: "receiver-presence",
-			cells: { name: "receiver", role: "You", presence: "receiver-presence" },
+			cells: { name: "receiver", role: "You" },
 		},
 		{
 			id: "sender-presence",
-			cells: { name: "sender", role: "Peer", presence: "sender-presence" },
+			cells: { name: "sender", role: "Peer" },
 		},
 	]);
 	const history = tools.get("a2a_history")?.describeResult;
@@ -198,8 +205,15 @@ test("registered peer and history tool views preserve roster identity and messag
 	);
 	const nodes = renderDocument(view?.body ?? []);
 	expect(
-		nodes.filter((node) => node.k === "code").map((node) => node.p?.text),
+		nodes.filter((node) => node.k === "md").map((node) => node.p?.text),
 	).toEqual(["# literal peer text\n```text\nhello\n```", "second"]);
+	expect(nodes.find((node) => node.k === "kv")).toBeUndefined();
+	expect(
+		nodes.filter((node) => node.k === "text").map((node) => node.p?.text),
+	).toEqual([
+		"Reply to test:0 · Approved by sender's user",
+		"report.txt\nlocal://a2a/report.txt",
+	]);
 	expect(
 		nodes.filter((node) => node.k === "section").map((node) => node.p?.head),
 	).toEqual([
@@ -241,7 +255,7 @@ test("message tool native preview preserves targets, reply and attachments witho
 		note: "approval requested",
 	});
 	const nodes = renderDocument(view?.body ?? []);
-	expect(nodes.find((node) => node.k === "code")?.p?.text).toBe("message");
+	expect(nodes.find((node) => node.k === "md")?.p?.text).toBe("message");
 	expect(nodes.find((node) => node.k === "text")?.p?.text).toBe(
 		"local://file.txt",
 	);

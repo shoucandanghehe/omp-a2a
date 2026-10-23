@@ -67,7 +67,7 @@ On `session_shutdown`, the extension aborts Session work, clears active and reco
 
 Read-only result commands (`help`/`--help`/`-h`, `hub`, `project`/`project list`, `status`, `peers`, and `history`) publish a visible transcript card whose custom-message title is the trimmed `/a2a` invocation, without triggering a model turn. The `context` hook removes only custom messages whose type is `/a2a` or starts with `/a2a ` before provider requests, preserving the contract that human command output stays outside model context. Mutating action results, connection lifecycle, Presence, delivery, and errors remain transient UI notifications.
 
-`presentation.ts` supplies the inbound renderer's `describe()` and the three tools' `describeCall`/`describeResult` hooks. Native views retain message text, causal references, approval provenance, Presence identities, ordered history, and local attachment URLs without changing model content. The OMP backend owns TSP negotiation, framing, input, and existing slash-output cards, notifications, and approval dialogs. Runtime imports use the public TUI root rather than internal native/chat modules so compiled OMP forks can resolve them.
+`presentation.ts` supplies the inbound renderer's `describe()` and the three tools' `describeCall`/`describeResult` hooks. Native and ANSI inbound views show message references, sender/target names, Markdown text, optional reply and confirmed sender-user approval, and local attachment URLs. Protocol IDs, duplicate Project/sequence fields, timestamps, and unsigned approval status stay out of message cards; native member tables show names and roles without Presence UUIDs. Model content and structured details remain unchanged. The OMP backend owns TSP negotiation, framing, input, and existing slash-output cards, notifications, and approval dialogs. Runtime imports use the public TUI root rather than internal native/chat modules so compiled OMP forks can resolve them.
 
 ## Model tool surface
 
@@ -147,7 +147,7 @@ OMP callbacks / slash / tools
 ## Tests touching this directory
 
 - `extension.test.ts`: registered surfaces, strict invalid-configuration isolation, stable system-prompt/context filtering, help and ArkType contracts, multi-level completion, push-driven tools, Presence notifications, sender-owned approval/rejection and attachment ownership, Session/Project-switch cancellation, outbound send fencing, stale UI suppression, and reconnect intent.
-- `presentation.test.ts`: registered renderers through the real OMP native backend and TSP document applier; checks literal message text, metadata, attachment references, roster identity, ordered history, approval-request previews, error fallback, and ANSI/model-content preservation.
+- `presentation.test.ts`: registered renderers through the real OMP native backend and TSP document applier; checks Markdown source, compact human context without protocol metadata, attachment references, roster identity, ordered history, approval-request previews, error fallback, ANSI presentation, and unchanged model content/details.
 - `local-attachments.test.ts`: `materializeLocalAttachments` rejects unsafe, blank, path-like, control-character, and duplicate names.
 - `operations.test.ts`: published Hub bindings, shared transition teardown, peer snapshots, HTTP and realtime cancellation, new/replayed acceptance, ordered injection, Delivery outcomes, and disconnected-state errors.
 - `config.test.ts`: strict configuration parsing and migration failures.

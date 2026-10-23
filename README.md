@@ -98,7 +98,7 @@ omp-a2a is for a fully trusted private network of matching Hub and Extension ver
 
 - **Custom protocol:** this repository implements a private realtime protocol, not the standard A2A protocol. Do not assume interoperability with standard A2A clients or servers.
 - **OMP runtime:** attachment transfer requires OMP `>=18.3.2`; the extension uses the session-scoped `local://` router to locate files without bypassing protocol path checks.
-- **Tern native UI:** when OMP's TSP backend is active, inbound messages and tool views use native cards, metadata, member tables, and message sections. OMP owns terminal negotiation and input; ordinary terminals retain ANSI rendering, and Hub messaging is unchanged.
+- **Tern native UI:** when OMP's TSP backend is active, inbound messages and tool views use native cards, member tables, and Markdown message sections. Message cards show sender/target names, message references, replies, confirmed sender-user approval, and attachments—not protocol IDs or duplicate metadata. OMP owns terminal negotiation and input; ordinary terminals use the same compact inbound presentation through ANSI rendering. Model context and Hub messaging are unchanged.
 - **Hub changes while connected:** an established WebSocket, connected status, and history remain bound to the Hub that accepted the Presence. Project administration intentionally uses the currently configured Hub. Disconnect and reconnect to move realtime messaging and connected history to a new `hubUrl`.
 - **Hub HTTP bounds:** metadata, Project administration, and history requests have a 15-second deadline by default. Caller cancellation also covers response-body reading, and failed requests are never retried automatically.
 

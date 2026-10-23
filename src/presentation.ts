@@ -7,7 +7,6 @@ import {
 	Text,
 	type Theme,
 } from "@oh-my-pi/pi-tui";
-import type { CustomMessage } from "@oh-my-pi/pi-tui/chat/messages";
 import type { NativeNode } from "@oh-my-pi/pi-tui/native/node";
 import type {
 	NativeToolView,
@@ -33,28 +32,19 @@ function messageHeading(message: MaterializedMessageView): string {
 	return `${message.messageRef} · ${message.from.name} → ${target}`;
 }
 
+function messageNotes(message: MaterializedMessageView): string {
+	const notes: string[] = [];
+	if (message.replyTo) notes.push(`Reply to ${message.replyTo}`);
+	if (message.userApproval?.kind === "omp-ui")
+		notes.push("Approved by sender's user");
+	return notes.join(" · ");
+}
+
 function messageBody(message: MaterializedMessageView): NativeNode[] {
-	const items = [
-		{ k: "Project", v: message.project },
-		{ k: "Message ID", v: message.messageId },
-		{ k: "Sequence", v: String(message.sequence) },
-		{ k: "Sender presence", v: message.from.presenceId },
-		{ k: "Time", v: new Date(message.createdAt).toISOString() },
-		{
-			k: "Sender user approval",
-			v: message.userApproval?.kind === "omp-ui" ? "confirmed" : "unsigned",
-		},
-	];
-	if (message.target.type === "agents" && message.target.presenceIds)
-		items.push({
-			k: "Recipient presences",
-			v: message.target.presenceIds.join(", "),
-		});
-	if (message.replyTo) items.push({ k: "Reply to", v: message.replyTo });
-	const body: NativeNode[] = [
-		{ k: "kv", p: { items }, key: "metadata" },
-		{ k: "code", p: { text: message.text, lang: "text" }, key: "message" },
-	];
+	const body: NativeNode[] = [];
+	const notes = messageNotes(message);
+	if (notes) body.push({ k: "text", p: { text: notes }, key: "context" });
+	body.push({ k: "md", p: { text: message.text }, key: "message" });
 	if (message.attachments.length > 0)
 		body.push({
 			k: "section",
@@ -71,11 +61,7 @@ function messageBody(message: MaterializedMessageView): NativeNode[] {
 class InboundMessageComponent extends Box {
 	readonly #view: NativeNode;
 
-	constructor(
-		message: CustomMessage<MaterializedMessageView>,
-		details: MaterializedMessageView,
-		theme: Theme,
-	) {
+	constructor(details: MaterializedMessageView, theme: Theme) {
 		super(1, 1, (text) => theme.bg("customMessageBg", text));
 		this.setIgnoreTight(true);
 		this.setBorder({
@@ -86,25 +72,26 @@ class InboundMessageComponent extends Box {
 			new Text(
 				theme.fg(
 					"customMessageLabel",
-					theme.bold(`${theme.icon.package} ${message.customType}`),
+					theme.bold(`${theme.icon.package} A2A ${messageHeading(details)}`),
 				),
 				0,
 				0,
 			),
 		);
+		const notes = messageNotes(details);
+		if (notes) this.addChild(new Text(notes, 0, 0));
 		this.addChild(new Spacer(1));
-		const content =
-			typeof message.content === "string"
-				? message.content
-				: message.content
-						.filter((part) => part.type === "text")
-						.map((part) => ("text" in part ? part.text : ""))
-						.join("\n");
 		this.addChild(
-			new Markdown(content, 0, 0, getMarkdownTheme(), {
+			new Markdown(details.text, 0, 0, getMarkdownTheme(), {
 				color: (text) => theme.fg("customMessageText", text),
 			}),
 		);
+		if (details.attachments.length > 0) {
+			this.addChild(new Spacer(1));
+			this.addChild(new Text("Attachments", 0, 0));
+			for (const attachment of details.attachments)
+				this.addChild(new Text(`${attachment.name}\n${attachment.url}`, 0, 0));
+		}
 		this.#view = {
 			k: "card",
 			p: { head: `A2A ${messageHeading(details)}`, role: "omp.custom.a2a" },
@@ -123,7 +110,7 @@ export const renderInboundMessage: MessageRenderer<MaterializedMessageView> = (
 	theme,
 ) =>
 	message.details
-		? new InboundMessageComponent(message, message.details, theme)
+		? new InboundMessageComponent(message.details, theme)
 		: undefined;
 
 export function describeToolText(result: ToolRenderResult): NativeToolView {
@@ -147,14 +134,12 @@ export function describePeers(
 					cols: [
 						{ id: "name", head: "Name" },
 						{ id: "role", head: "Role" },
-						{ id: "presence", head: "Presence" },
 					],
 					rows: [details.self, ...details.peers].map((peer, index) => ({
 						id: peer.presenceId,
 						cells: {
 							name: peer.name,
 							role: index === 0 ? "You" : "Peer",
-							presence: peer.presenceId,
 						},
 					})),
 				},
@@ -189,8 +174,7 @@ export function describeMessageCall(args: {
 	requestUserSignature?: boolean;
 }): NativeToolView {
 	const body: NativeNode[] = [];
-	if (args.text !== undefined)
-		body.push({ k: "code", p: { text: args.text, lang: "text" } });
+	if (args.text !== undefined) body.push({ k: "md", p: { text: args.text } });
 	if (args.attachments?.length)
 		body.push({
 			k: "section",
