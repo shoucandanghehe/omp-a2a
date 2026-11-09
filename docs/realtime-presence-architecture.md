@@ -36,7 +36,7 @@ Text below 32 KiB stays identity encoded. Larger text uses gzip plus Base64 only
 
 ### Public interfaces
 
-Humans administer Projects and their own connection through `/a2a`. Models receive exactly `a2a_peers`, `a2a_message`, and `a2a_history`. Every model turn receives stable A2A tool, collaboration-authority, and approval-ownership guidance; the latest hidden `a2a-connection` message supplies current operational status, Project, and roster name. Connected models address current peer results, inbound sender names, or the magic target `@all` for every current peer. Inbound messages are pushed into OMP serially in Hub-assigned Project sequence through `steer` delivery; there is no polling tool or user send/Inbox protocol surface.
+Humans administer Projects and their own connection through `/a2a`. Models receive exactly `a2a_peers`, `a2a_message`, and `a2a_history`. Every model turn receives stable A2A tool, sending, peer-request, and approval guidance; the latest hidden `a2a-connection` message supplies current operational status, Project, and roster name. Connected models address current peer results, inbound sender names, or the magic target `@all` for every current peer. Inbound messages are pushed into OMP serially in Hub-assigned Project sequence through `steer` delivery; there is no polling tool or user send/Inbox protocol surface.
 
 `a2a_message` accepts optional current-session `local://` regular-file sources. The sender Extension snapshots their bytes before sending; the Hub never resolves sender-local URLs. Receiving and history-querying Extensions materialize new `local://` copies inside their own sessions before exposing the Message.
 
