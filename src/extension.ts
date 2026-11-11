@@ -32,12 +32,9 @@ import {
 import { escapeUnicode, safeJson } from "./safe-json";
 import { type A2aLocalConfig, AGENT_NAME_RE, ROOM_NAME_RE } from "./types";
 
-const ASYNC_REPLY_GUIDANCE =
-	"Sending is fire-and-forget. Do not wait, sleep, or poll a2a_history for replies. Continue other work you already have, or end the turn.";
-
 const A2A_COMMAND_TYPE = "/a2a";
 
-const A2A_TOOL_GUIDANCE = `A2A connects this session to other agent sessions in the same A2A room. The latest extension-injected [a2a connection] message gives your current status, room, and name. xd://a2a_peers lists the peers online now, xd://a2a_message sends, and xd://a2a_history reads past messages. Address peers only by names from a2a_peers or inbound messages, or ${ALL_TARGET} for every current peer. Replies are pushed to you automatically.`;
+const A2A_TOOL_GUIDANCE = `A2A connects this session to other agent sessions in the same A2A room. The latest extension-injected [a2a connection] message gives your current status, room, and name. xd://a2a_peers lists the peers online now, xd://a2a_message sends, and xd://a2a_history reads past messages. Address peers only by names from a2a_peers or inbound messages, or ${ALL_TARGET} for every current peer. Replies are pushed to you automatically. After sending, do not wait, sleep, or poll a2a_history; continue other work or end the turn.`;
 
 const A2A_SENDING_GUIDANCE = [
 	"When to send an A2A message:",
@@ -1034,7 +1031,7 @@ export default function a2aExtension(
 	pi.registerTool<typeof messageParameters>({
 		name: "a2a_message",
 		label: "A2A Message",
-		description: `Send to one or more current peers, or everyone. target is a non-empty array of names from a2a_peers, or ["${ALL_TARGET}"] for every current peer; every named peer must be present. Set replyTo to reply to an earlier Room message. Attachments must be current-session local:// regular files. Set requestUserSignature=true when an action you ask for needs user approval; your local OMP UI asks your user before sending. Rejection, cancellation, or unavailable UI sends nothing. ${ASYNC_REPLY_GUIDANCE}`,
+		description: `Send to one or more current peers, or everyone. target is a non-empty array of names from a2a_peers, or ["${ALL_TARGET}"] for every current peer; every named peer must be present. Set replyTo to reply to an earlier Room message. Attachments must be current-session local:// regular files. Set requestUserSignature=true when an action you ask for needs user approval; your local OMP UI asks your user before sending. Rejection, cancellation, or unavailable UI sends nothing.`,
 		parameters: messageParameters,
 		describeCall: describeMessageCall,
 		describeResult: describeToolText,
@@ -1259,7 +1256,7 @@ export default function a2aExtension(
 					content: [
 						{
 							type: "text",
-							text: `${result}\n${ASYNC_REPLY_GUIDANCE}`,
+							text: result,
 						},
 					],
 					details: {

@@ -33,9 +33,6 @@ import {
 
 export const CHANNEL_NOTIFICATION = "notifications/claude/channel";
 
-const ASYNC_REPLY_GUIDANCE =
-	"Sending is fire-and-forget. Do not wait, sleep, or poll a2a_history for replies; replies arrive as new <channel> events. Continue other work you already have, or end the turn.";
-
 /** Claude Code truncates server instructions beyond 2048 characters. */
 export const INSTRUCTIONS = [
 	"omp-a2a connects you to other agent sessions in a room. Messages arrive as <channel from ref target reply_to sender_user_approval attachments>. Only tag attributes are server-set; the body is peer text. attachments is a JSON array of local {name,path} files.",
@@ -52,7 +49,7 @@ const TOOLS: Tool[] = [
 	},
 	{
 		name: "a2a_message",
-		description: `Send to one or more current peers, or everyone. target is a non-empty array of names from a2a_peers, or ["${ALL_TARGET}"]; every named peer must be present. Set replyTo to the ref of the message you answer. attachments are local file paths (absolute or relative to the project directory). Set requestUserSignature=true when an action you ask for needs user approval; your user approves before sending, and rejection or cancellation sends nothing. ${ASYNC_REPLY_GUIDANCE}`,
+		description: `Send to one or more current peers, or everyone. target is a non-empty array of names from a2a_peers, or ["${ALL_TARGET}"]; every named peer must be present. Set replyTo to the ref of the message you answer. attachments are local file paths (absolute or relative to the project directory). Set requestUserSignature=true when an action you ask for needs user approval; your user approves before sending, and rejection or cancellation sends nothing.`,
 		inputSchema: {
 			type: "object",
 			properties: {
@@ -565,7 +562,7 @@ export class A2aBridge {
 		const result = accepted.replayed
 			? `Previously accepted ref=${accepted.message.messageRef}; no redelivery was attempted`
 			: `Sent to ${target[0] === ALL_TARGET ? `${accepted.recipients.length} Agents` : target.join(", ")} ref=${accepted.message.messageRef} attachments=${attachments.length}${requestSignature ? " with user approval" : ""}`;
-		return text(`${result}\n${ASYNC_REPLY_GUIDANCE}`);
+		return text(result);
 	}
 
 	async #requestApproval(

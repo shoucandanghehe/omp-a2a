@@ -67,7 +67,7 @@ type ContextHandler = (event: {
 }) => { messages?: unknown[] } | undefined;
 
 const A2A_TOOL_GUIDANCE =
-	"A2A connects this session to other agent sessions in the same A2A room. The latest extension-injected [a2a connection] message gives your current status, room, and name. xd://a2a_peers lists the peers online now, xd://a2a_message sends, and xd://a2a_history reads past messages. Address peers only by names from a2a_peers or inbound messages, or @all for every current peer. Replies are pushed to you automatically.";
+	"A2A connects this session to other agent sessions in the same A2A room. The latest extension-injected [a2a connection] message gives your current status, room, and name. xd://a2a_peers lists the peers online now, xd://a2a_message sends, and xd://a2a_history reads past messages. Address peers only by names from a2a_peers or inbound messages, or @all for every current peer. Replies are pushed to you automatically. After sending, do not wait, sleep, or poll a2a_history; continue other work or end the turn.";
 
 const A2A_SENDING_GUIDANCE = [
 	"When to send an A2A message:",
@@ -385,7 +385,7 @@ test("model tools stay push-driven and forward history cancellation", async () =
 		});
 
 		expect(messageTool.description).toBe(
-			'Send to one or more current peers, or everyone. target is a non-empty array of names from a2a_peers, or ["@all"] for every current peer; every named peer must be present. Set replyTo to reply to an earlier Room message. Attachments must be current-session local:// regular files. Set requestUserSignature=true when an action you ask for needs user approval; your local OMP UI asks your user before sending. Rejection, cancellation, or unavailable UI sends nothing. Sending is fire-and-forget. Do not wait, sleep, or poll a2a_history for replies. Continue other work you already have, or end the turn.',
+			'Send to one or more current peers, or everyone. target is a non-empty array of names from a2a_peers, or ["@all"] for every current peer; every named peer must be present. Set replyTo to reply to an earlier Room message. Attachments must be current-session local:// regular files. Set requestUserSignature=true when an action you ask for needs user approval; your local OMP UI asks your user before sending. Rejection, cancellation, or unavailable UI sends nothing.',
 		);
 		expect(historyTool.description).toBe(
 			"Review earlier Room messages using before or after (mutually exclusive), limit, or from. Returned attachment links are valid in the current session. Use only for past context; never wait or poll for new replies.",
@@ -416,9 +416,8 @@ test("model tools stay push-driven and forward history cancellation", async () =
 			target: ["worker"],
 			text: "reply with pong",
 		} as never);
-		expect(result.content[0]?.text).toContain("Sending is fire-and-forget.");
-		expect(result.content[0]?.text).toContain(
-			"Do not wait, sleep, or poll a2a_history for replies.",
+		expect(result.content[0]?.text).toMatch(
+			/^Sent to worker ref=\S+ attachments=0$/,
 		);
 		const before = await historyTool.execute(
 			"history-before",
