@@ -14,28 +14,25 @@ function assert(condition: unknown, message: string): asserts condition {
 
 try {
 	store = new HubStore(databasePath);
-	console.log("\n== persistent SQLite Projects ==");
-	store.createProject({ name: "billing" });
-	store.createProject({ name: "search" });
+	console.log("\n== persistent SQLite Rooms ==");
+	store.createRoom({ name: "billing" });
+	store.createRoom({ name: "search" });
 	assert(
 		store
-			.listProjects()
-			.map((project) => project.name)
+			.listRooms()
+			.map((room) => room.name)
 			.join(",") === "billing,search",
-		"Projects persist in sorted order",
+		"Rooms persist in sorted order",
 	);
 	store.close();
 	store = null;
 	store = new HubStore(databasePath);
-	assert(store.getProject("billing")?.name === "billing", "Project reopens");
-	assert(store.deleteProject("billing"), "existing Project deletes");
-	assert(!store.deleteProject("billing"), "Project deletion is idempotent");
-	assert(
-		store.listProjects()[0]?.name === "search",
-		"unrelated Project remains",
-	);
+	assert(store.getRoom("billing")?.name === "billing", "Room reopens");
+	assert(store.deleteRoom("billing"), "existing Room deletes");
+	assert(!store.deleteRoom("billing"), "Room deletion is idempotent");
+	assert(store.listRooms()[0]?.name === "search", "unrelated Room remains");
 	console.log("\n== PASS ==");
-	console.log("SQLite Project store smoke OK");
+	console.log("SQLite Room store smoke OK");
 } finally {
 	store?.close();
 	fs.rmSync(dataDir, { recursive: true, force: true });

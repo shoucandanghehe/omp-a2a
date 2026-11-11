@@ -20,7 +20,7 @@ export function hubLockPath(dataDir?: string): string {
 	return path.join(hubRunDir(dataDir), "hub-lock.sqlite");
 }
 
-/** Canonical SQLite owner of Hub Projects and message history. */
+/** Canonical SQLite owner of Hub Rooms and message history. */
 export function hubStoreDatabasePath(
 	dataDir: string = defaultDataDir(),
 ): string {

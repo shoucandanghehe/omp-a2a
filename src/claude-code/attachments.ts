@@ -31,7 +31,7 @@ export async function snapshotFileAttachments(
  * Message identity, so inbound delivery and later history reads reuse one copy.
  */
 export async function materializeFileAttachments(
-	message: Pick<MessageView, "project" | "sequence" | "messageId"> & {
+	message: Pick<MessageView, "room" | "sequence" | "messageId"> & {
 		attachments: MessageView["attachments"];
 	},
 	inboxRoot: string,
@@ -47,7 +47,7 @@ export async function materializeFileAttachments(
 		.slice(0, 12);
 	const directory = path.join(
 		inboxRoot,
-		message.project,
+		message.room,
 		`${message.sequence}-${identity}`,
 	);
 	await mkdir(directory, { recursive: true, mode: 0o700 });

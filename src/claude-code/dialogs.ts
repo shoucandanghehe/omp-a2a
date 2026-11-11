@@ -12,7 +12,7 @@ export type DialogText = {
 	rejectionPrompt: string;
 	reasonTitle: string;
 	reasonDescription: string;
-	deleteProject: (name: string) => string;
+	deleteRoom: (name: string) => string;
 };
 
 const DIALOG_TEXT: Record<DialogLanguage, DialogText> = {
@@ -23,13 +23,13 @@ const DIALOG_TEXT: Record<DialogLanguage, DialogText> = {
 		],
 		to: "To",
 		attachments: "Attachments",
-		everyone: "Everyone in this Project",
+		everyone: "Everyone in this Room",
 		rejectionPrompt:
 			"Message rejected; it will not be sent. To tell the agent why, type a reason and choose Accept (Accept only submits the reason). Decline discards anything typed here.",
 		reasonTitle: "Rejection reason (optional)",
 		reasonDescription: "Submitted only with Accept",
-		deleteProject: (name) =>
-			`Delete Project "${name}" and its entire message history? This cannot be undone.`,
+		deleteRoom: (name) =>
+			`Delete Room "${name}" and its entire message history? This cannot be undone.`,
 	},
 	zh: {
 		approvalHeader: [
@@ -38,13 +38,13 @@ const DIALOG_TEXT: Record<DialogLanguage, DialogText> = {
 		],
 		to: "收件人",
 		attachments: "附件",
-		everyone: "本项目所有人",
+		everyone: "本 Room 所有人",
 		rejectionPrompt:
 			"消息已拒绝，不会发送。如需告诉 agent 原因，请填写后按 Accept（这里的 Accept 只是提交理由）；按 Decline 会丢弃已填写的内容。",
 		reasonTitle: "拒绝理由（选填）",
 		reasonDescription: "仅在按 Accept 时提交",
-		deleteProject: (name) =>
-			`删除项目 "${name}" 及其全部消息历史？此操作不可撤销。`,
+		deleteRoom: (name) =>
+			`删除 Room "${name}" 及其全部消息历史？此操作不可撤销。`,
 	},
 };
 

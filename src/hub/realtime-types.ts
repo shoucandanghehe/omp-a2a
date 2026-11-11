@@ -1,13 +1,13 @@
-import { AGENT_NAME_RE, PROJECT_NAME_RE } from "../types";
+import { AGENT_NAME_RE, ROOM_NAME_RE } from "../types";
 import { decodeTextPayload, parseEncodedAttachments } from "./payload";
 import type { EncodedAttachment, EncodedTextPayload } from "./types";
 
-export const A2A_PROTOCOL_VERSION = 5;
+export const A2A_PROTOCOL_VERSION = 6;
 export const DELIVERY_ACKNOWLEDGE_TIMEOUT_MS = 2_000;
 
 export const MESSAGE_ID_RE = /^[a-zA-Z0-9][a-zA-Z0-9._:-]{0,127}$/;
 
-/** Magic target selecting every current Project Presence except the sender. */
+/** Magic target selecting every current Room Presence except the sender. */
 export const ALL_TARGET = "@all";
 
 const PEER_KEYS = ["name", "presenceId"] as const;
@@ -19,7 +19,7 @@ const USER_APPROVAL_KEYS = ["kind"] as const;
 const MESSAGE_KEYS = [
 	"messageId",
 	"messageRef",
-	"project",
+	"room",
 	"sequence",
 	"from",
 	"target",
@@ -213,12 +213,11 @@ export function decodeRealtimeMessage(value: unknown): RealtimeMessage {
 	const messageId = stringField(message, "messageId", "message");
 	if (!MESSAGE_ID_RE.test(messageId))
 		throw new Error("message.messageId is invalid");
-	const project = stringField(message, "project", "message");
-	if (!PROJECT_NAME_RE.test(project))
-		throw new Error("message.project is invalid");
+	const room = stringField(message, "room", "message");
+	if (!ROOM_NAME_RE.test(room)) throw new Error("message.room is invalid");
 	const sequence = safeIntegerField(message, "sequence", "message", 1);
 	const messageRef = stringField(message, "messageRef", "message");
-	if (messageRef !== formatMessageRef(project, sequence))
+	if (messageRef !== formatMessageRef(room, sequence))
 		throw new Error("message.messageRef is not canonical");
 	if (Array.isArray(message.attachments)) {
 		for (const [index, candidate] of message.attachments.entries()) {
@@ -231,15 +230,15 @@ export function decodeRealtimeMessage(value: unknown): RealtimeMessage {
 	const replyTo = optionalStringField(message, "replyTo", "message");
 	if (replyTo !== undefined) {
 		const reply = parseMessageRef(replyTo);
-		if (reply.project !== project)
-			throw new Error("message.replyTo belongs to another project");
+		if (reply.room !== room)
+			throw new Error("message.replyTo belongs to another room");
 		if (reply.sequence >= sequence)
 			throw new Error("message.replyTo must precede the message");
 	}
 	const decoded: RealtimeMessage = {
 		messageId,
 		messageRef,
-		project,
+		room,
 		sequence,
 		from: decodePeer(message.from),
 		target: decodeTarget(message.target),
@@ -257,33 +256,33 @@ export function decodeRealtimeMessage(value: unknown): RealtimeMessage {
 	return decoded;
 }
 
-type ParsedMessageRef = { project: string; sequence: number };
+type ParsedMessageRef = { room: string; sequence: number };
 
-export function formatMessageRef(project: string, sequence: number): string {
+export function formatMessageRef(room: string, sequence: number): string {
 	if (
-		!PROJECT_NAME_RE.test(project) ||
+		!ROOM_NAME_RE.test(room) ||
 		!Number.isSafeInteger(sequence) ||
 		sequence <= 0
 	) {
 		throw new Error("invalid message reference components");
 	}
-	return `${project}:${sequence}`;
+	return `${room}:${sequence}`;
 }
 
 export function parseMessageRef(reference: string): ParsedMessageRef {
 	const separator = reference.lastIndexOf(":");
-	const project = reference.slice(0, separator);
+	const room = reference.slice(0, separator);
 	const sequenceText = reference.slice(separator + 1);
 	const sequence = Number(sequenceText);
 	if (
 		separator <= 0 ||
-		!PROJECT_NAME_RE.test(project) ||
+		!ROOM_NAME_RE.test(room) ||
 		!/^[1-9]\d*$/.test(sequenceText) ||
 		!Number.isSafeInteger(sequence)
 	) {
 		throw new Error(`invalid message reference: ${reference}`);
 	}
-	return { project, sequence };
+	return { room, sequence };
 }
 
 export function isExactGoodbyeFrame(
@@ -331,7 +330,7 @@ export type DeliveryEvent = {
 export type RealtimeMessage = {
 	messageId: string;
 	messageRef: string;
-	project: string;
+	room: string;
 	sequence: number;
 	from: Peer;
 	target: MessageTarget;
@@ -343,7 +342,7 @@ export type RealtimeMessage = {
 };
 
 export type HistoryQuery = {
-	project: string;
+	room: string;
 	before?: string;
 	after?: string;
 	limit?: number;
@@ -355,7 +354,7 @@ export type HistoryPage = {
 };
 
 export type ClientFrame =
-	| { type: "hello"; protocolVersion: number; project: string; name: string }
+	| { type: "hello"; protocolVersion: number; room: string; name: string }
 	| {
 			type: "message";
 			requestId: string;
@@ -374,7 +373,7 @@ export type ServerFrame =
 	| {
 			type: "claimed";
 			protocolVersion: typeof A2A_PROTOCOL_VERSION;
-			project: string;
+			room: string;
 			self: Peer;
 			peers: Peer[];
 	  }

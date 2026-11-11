@@ -5,7 +5,7 @@ import { hubLockPath, hubStoreDatabasePath } from "../paths";
 import { HubDataDirInUseError, HubDataLock } from "./data-lock";
 import { RealtimeHub } from "./realtime-server";
 import { A2A_PROTOCOL_VERSION } from "./realtime-types";
-import { HubStore, ProjectConflictError } from "./store";
+import { HubStore, RoomConflictError } from "./store";
 
 export type StartHubServerOptions = {
 	host: string;
@@ -91,10 +91,10 @@ export async function startHubServer(
 		app.get("/v1/meta", (_request, response) =>
 			response.json({ protocolVersion: A2A_PROTOCOL_VERSION }),
 		);
-		app.get("/v1/projects", (_request, response) =>
-			response.json({ projects: hubStore.listProjects() }),
+		app.get("/v1/rooms", (_request, response) =>
+			response.json({ rooms: hubStore.listRooms() }),
 		);
-		app.post("/v1/projects", (request, response) => {
+		app.post("/v1/rooms", (request, response) => {
 			try {
 				const body = request.body as {
 					name?: string;
@@ -105,47 +105,43 @@ export async function startHubServer(
 				if (!body.name)
 					return void response.status(400).json({ error: "name required" });
 				response.status(201).json({
-					project: hubStore.createProject({ ...body, name: body.name }),
+					room: hubStore.createRoom({ ...body, name: body.name }),
 				});
 			} catch (error) {
-				response
-					.status(error instanceof ProjectConflictError ? 409 : 400)
-					.json({
-						error: error instanceof Error ? error.message : String(error),
-					});
+				response.status(error instanceof RoomConflictError ? 409 : 400).json({
+					error: error instanceof Error ? error.message : String(error),
+				});
 			}
 		});
-		app.delete("/v1/projects/:name", (request, response) => {
+		app.delete("/v1/rooms/:name", (request, response) => {
 			try {
 				if (realtime?.count(request.params.name)) {
-					throw new ProjectConflictError(
-						`project has active Presences: ${request.params.name}`,
+					throw new RoomConflictError(
+						`room has active Presences: ${request.params.name}`,
 					);
 				}
 				response.json({
 					ok: true,
-					deleted: hubStore.deleteProject(request.params.name),
+					deleted: hubStore.deleteRoom(request.params.name),
 				});
 			} catch (error) {
-				response
-					.status(error instanceof ProjectConflictError ? 409 : 400)
-					.json({
-						error: error instanceof Error ? error.message : String(error),
-					});
+				response.status(error instanceof RoomConflictError ? 409 : 400).json({
+					error: error instanceof Error ? error.message : String(error),
+				});
 			}
 		});
 		app.get("/v1/history", (request, response) => {
 			try {
-				const project = String(request.query.project ?? "");
-				if (!project)
-					return void response.status(400).json({ error: "project required" });
-				if (!hubStore.getProject(project))
+				const room = String(request.query.room ?? "");
+				if (!room)
+					return void response.status(400).json({ error: "room required" });
+				if (!hubStore.getRoom(room))
 					return void response
 						.status(404)
-						.json({ error: `unknown project: ${project}` });
+						.json({ error: `unknown room: ${room}` });
 				response.json(
 					hubStore.history({
-						project,
+						room,
 						before:
 							request.query.before === undefined
 								? undefined

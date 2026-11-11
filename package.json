@@ -3,7 +3,7 @@
 	"version": "0.1.0",
 	"packageManager": "bun@1.4.3",
 	"private": true,
-	"description": "Anonymous realtime Agent chat for OMP: WebSocket Presence + persistent Project history",
+	"description": "Anonymous realtime Agent chat for OMP: WebSocket Presence + persistent Room history",
 	"type": "module",
 	"omp": {
 		"extensions": [

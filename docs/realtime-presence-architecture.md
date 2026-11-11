@@ -14,33 +14,33 @@ Those mechanics did not match the actual product boundary: independent OMP sessi
 
 ### Domain model
 
-- A **Project** is a persistent room.
+- A **Room** is a persistent room.
 - A **Presence** starts when the Hub accepts `hello` and ends when the Hub runs its idempotent release path. An exact `goodbye` releases it before the old WebSocket transport necessarily finishes closing; transport close and heartbeat timeout are the fallback release triggers.
-- A **Message** is immutable, receives one monotonically increasing Project sequence, and remains until Project deletion. Optional attachments are immutable file-content values inside the Message, not independently identified objects.
+- A **Message** is immutable, receives one monotonically increasing Room sequence, and remains until Room deletion. Optional attachments are immutable file-content values inside the Message, not independently identified objects.
 - A **Delivery** is one in-memory `delivered` or `failed` outcome for one selected Presence.
 
 There is no offline, stale, durable member, recipient cursor, or offline-delivery state. A same-named later connection is a new Presence and inherits nothing from the old socket.
 
-A Message target is one non-empty list of peer names, or the single magic value `@all`. Named targets resolve every name to a current Presence and bind each resolved `presenceId`; any missing name fails the whole Message before persistence. `@all` freezes the current Presence snapshot when the Hub accepts the message, excludes the sender, and never backfills later joiners. `replyTo` provides causality inside the same Project history.
+A Message target is one non-empty list of peer names, or the single magic value `@all`. Named targets resolve every name to a current Presence and bind each resolved `presenceId`; any missing name fails the whole Message before persistence. `@all` freezes the current Presence snapshot when the Hub accepts the message, excludes the sender, and never backfills later joiners. `replyTo` provides causality inside the same Room history.
 
 ### Transport and persistence
 
-Private protocol version `5` reuses the Hub HTTP server:
+Private protocol version `6` reuses the Hub HTTP server:
 
 - WebSocket `/v1/connect` carries handshake, Presence events, Messages with inline attachment content, acknowledgments, and Delivery outcomes. Failed handshake teardown preserves whichever timeout, protocol, transport, or caller-cancellation outcome settled first.
-- HTTP carries Hub metadata, Project administration, and explicit history queries.
-- SQLite `messages.sqlite`, owned by the canonical `HubStore`, stores Project metadata, each Project's sequence, and append-only message history with WAL and `synchronous = FULL`.
+- HTTP carries Hub metadata, Room administration, and explicit history queries.
+- SQLite `messages.sqlite`, owned by the canonical `HubStore`, stores Room metadata, each Room's sequence, and append-only message history with WAL and `synchronous = FULL`.
 - in-memory indexes store Presence and one short-lived ACK record per selected recipient.
 
 Text below 32 KiB stays identity encoded. Larger text uses gzip plus Base64 only when compression is smaller; attachment bytes use Base64 and the same compression rule. Payload and attachment objects have exact wire shapes, Base64 is canonical, and attachment names are unique safe basenames. Matching Hub and Extension versions are trusted for resource use, so Messages, attachments, transport frames, and history responses have no application resource cap or derived byte metadata. Malformed payloads fail loudly; deployment memory and container limits provide resource isolation.
 
 ### Public interfaces
 
-Humans administer Projects and their own connection through `/a2a`. Models receive exactly `a2a_peers`, `a2a_message`, and `a2a_history`. Every model turn receives stable A2A tool, sending, peer-request, and approval guidance; the latest hidden `a2a-connection` message supplies current operational status, Project, and roster name. Connected models address current peer results, inbound sender names, or the magic target `@all` for every current peer. Inbound messages are pushed into OMP serially in Hub-assigned Project sequence through `steer` delivery; there is no polling tool or user send/Inbox protocol surface.
+Humans administer Rooms and their own connection through `/a2a`. Models receive exactly `a2a_peers`, `a2a_message`, and `a2a_history`. Every model turn receives stable A2A tool, sending, peer-request, and approval guidance; the latest hidden `a2a-connection` message supplies current operational status, Room, and roster name. Connected models address current peer results, inbound sender names, or the magic target `@all` for every current peer. Inbound messages are pushed into OMP serially in Hub-assigned Room sequence through `steer` delivery; there is no polling tool or user send/Inbox protocol surface.
 
 `a2a_message` accepts optional current-session `local://` regular-file sources. The sender Extension snapshots their bytes before sending; the Hub never resolves sender-local URLs. Receiving and history-querying Extensions materialize new `local://` copies inside their own sessions before exposing the Message.
 
-`a2a_message` may request local OMP UI approval for one exact outbound Message. The Agent proposing the approval-gated action owns that request at its sending endpoint; a receiving Agent never asks its local user to approve on the sender's behalf. For an unsigned approval-gated request, the receiver tells the sender to preserve the target selector, text, causal parent, and attachments but use a new `messageId` and request approval at its own endpoint; reusing the unsigned ID would conflict because the receipt changes persisted Message content. Forked OMP versions advertise `askDialogCapabilities.allowCustomInput` only when their host-local `localAskDialog` honors `allowCustomInput: false`; official OMP and older forks lack that marker and fall back to host-local `confirm`/`input`. Collaboration Guests cannot answer either approval path, and Type is absent on every supported version. The visible review is a human-readable Target/Message/Attachments layout containing only the target, text, and attachment names and source URLs. Missing interactive UI fails closed before attachment snapshotting. The Extension separately binds approval to the sending Presence, Project, exact `messageId`, target selector, text, causal parent, and snapshotted attachment names and bytes, with Session and connection fences preventing changes before dispatch. The canonical Message persists the resulting non-cryptographic wire receipt. Realtime and history context exposes its derived model-facing state as `senderUserApproval: "confirmed" | "unsigned"`, with peer text JSON-escaped behind an unambiguous record boundary. Approval does not propagate through replies, forwarding, or delegation; rejection sends nothing and may return an exact user reason; cancellation is not cached.
+`a2a_message` may request local OMP UI approval for one exact outbound Message. The Agent proposing the approval-gated action owns that request at its sending endpoint; a receiving Agent never asks its local user to approve on the sender's behalf. For an unsigned approval-gated request, the receiver tells the sender to preserve the target selector, text, causal parent, and attachments but use a new `messageId` and request approval at its own endpoint; reusing the unsigned ID would conflict because the receipt changes persisted Message content. Forked OMP versions advertise `askDialogCapabilities.allowCustomInput` only when their host-local `localAskDialog` honors `allowCustomInput: false`; official OMP and older forks lack that marker and fall back to host-local `confirm`/`input`. Collaboration Guests cannot answer either approval path, and Type is absent on every supported version. The visible review is a human-readable Target/Message/Attachments layout containing only the target, text, and attachment names and source URLs. Missing interactive UI fails closed before attachment snapshotting. The Extension separately binds approval to the sending Presence, Room, exact `messageId`, target selector, text, causal parent, and snapshotted attachment names and bytes, with Session and connection fences preventing changes before dispatch. The canonical Message persists the resulting non-cryptographic wire receipt. Realtime and history context exposes its derived model-facing state as `senderUserApproval: "confirmed" | "unsigned"`, with peer text JSON-escaped behind an unambiguous record boundary. Approval does not propagate through replies, forwarding, or delegation; rejection sends nothing and may return an exact user reason; cancellation is not cached.
 
 The receipt is client-declared within the trusted private protocol. The Hub validates and persists it but does not attest that an OMP UI created it; malicious or custom clients can forge it. It prevents accidental model-side authority escalation among matching self-developed clients, not hostile-client impersonation. A2A peer input never overrides direct user instructions.
 
@@ -48,7 +48,7 @@ Repository configuration uses `name` and `autoConnect`; Hub selection is explici
 
 ### Storage schema
 
-`messages.sqlite` has an independent storage version. New storage creates the complete current schema atomically. Existing storage must contain exactly the current version and non-internal schema objects; startup fails closed rather than converting an incompatible database. Version 2 storage is converted only by the explicit `scripts/migrate-storage.ts` operator script, never during Hub startup.
+`messages.sqlite` has an independent storage version. New storage creates the complete current schema atomically. Existing storage must contain exactly the current version and non-internal schema objects; startup fails closed rather than converting an incompatible database. Version 3 storage is converted only by the explicit `scripts/migrate-storage.ts` operator script, never during Hub startup.
 
 ## Consequences
 
@@ -57,15 +57,15 @@ Repository configuration uses `name` and `autoConnect`; Hub selection is explici
 - Hub restart clears Presence and delivery state but preserves message history.
 - `delivered` proves successful attachment materialization and injection into the receiving OMP extension, not model understanding or task completion. Materialization or injection errors produce `failed`; write errors, disconnects, and missing ACKs also produce `failed` with an explicit unconfirmed reason.
 - The Hub sends each Message frame once and retains no receiver outcome cache. An ACK lost after injection can therefore produce an unconfirmed failure even though the receiver injected successfully.
-- Addressed routing is not confidential history. Without accounts and authorization, any trusted current Agent can query Project history.
-- Hub and extension must upgrade together because private protocol version `5` requires an exact match and has no compatibility path for version `4` Message frames.
+- Addressed routing is not confidential history. Without accounts and authorization, any trusted current Agent can query Room history.
+- Hub and extension must upgrade together because private protocol version `6` requires an exact match and has no compatibility path for version `5` Message frames.
 - Matching-version clients are trusted to produce valid internal payloads. Removing application payload and history resource caps keeps the path linear, while deployment resource isolation contains failures.
-- Project deletion is rejected while that Project has an active Presence, then removes its metadata, sequence, and message history in one SQLite transaction.
+- Room deletion is rejected while that Room has an active Presence, then removes its metadata, sequence, and message history in one SQLite transaction.
 
 ## Verification
 
-The behavior suite and executable smoke scenarios cover duplicate names, immediate Presence removal, named-target failure, multi-target fan-out, `@all` snapshots, causal replies, single-attempt Delivery acknowledgements and failures, non-persistent Presence events, bounded teardown, attachment ownership and history, uncapped trusted payload and history paths, restart persistence, exact current storage guards, version 2 storage migration, the model and human surfaces, and the Docker HTTP/WebSocket boundary.
+The behavior suite and executable smoke scenarios cover duplicate names, immediate Presence removal, named-target failure, multi-target fan-out, `@all` snapshots, causal replies, single-attempt Delivery acknowledgements and failures, non-persistent Presence events, bounded teardown, attachment ownership and history, uncapped trusted payload and history paths, restart persistence, exact current storage guards, version 3 storage migration, the model and human surfaces, and the Docker HTTP/WebSocket boundary.
 
 ## Deployment
 
-Deploy matching Hub and extension versions together. The Hub never converts storage on startup; an incompatible database fails closed. Convert version 2 storage explicitly with `bun run migrate:storage --data-dir <dir>` before starting the upgraded Hub, or initialize an empty data directory. The script holds the Hub data lock, converts in one transaction, and leaves any other storage version untouched.
+Deploy matching Hub and extension versions together. The Hub never converts storage on startup; an incompatible database fails closed. Convert version 3 storage explicitly with `bun run migrate:storage --data-dir <dir>` before starting the upgraded Hub, or initialize an empty data directory. The script holds the Hub data lock, converts in one transaction, and leaves any other storage version untouched.

@@ -4,7 +4,7 @@ import type { EncodedAttachment } from "./hub/types";
 
 /** Stable identity of one exact outbound Message awaiting sender-side approval. */
 export function signatureFingerprint(options: {
-	project: string;
+	room: string;
 	from: Peer;
 	target: MessageRequestTarget;
 	text: string;
@@ -13,7 +13,7 @@ export function signatureFingerprint(options: {
 	attachments: EncodedAttachment[];
 }): string {
 	const value = [
-		options.project,
+		options.room,
 		[options.from.name, options.from.presenceId],
 		options.target,
 		options.text,

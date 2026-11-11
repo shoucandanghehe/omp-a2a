@@ -8,10 +8,10 @@
 
 | Script | Invocation | Boundary exercised |
 | --- | --- | --- |
-| `smoke.ts` | `bun run scripts/smoke.ts` | Canonical SQLite Project store in a temporary data directory. |
+| `smoke.ts` | `bun run scripts/smoke.ts` | Canonical SQLite Room store in a temporary data directory. |
 | `smoke-hub.ts` | `bun run scripts/smoke-hub.ts` | Two real in-process HTTP/WebSocket Hubs with temporary persistent storage. |
 | `smoke-docker.ts` | `bun run smoke:docker` | Public HTTP and WebSocket interfaces of an already-running selected Hub. |
-| `migrate-storage.ts` | `bun run migrate:storage` | Version 2 `messages.sqlite` converted to the current storage version under the Hub data lock. |
+| `migrate-storage.ts` | `bun run migrate:storage` | Version 3 `messages.sqlite` converted to the current storage version under the Hub data lock. |
 
 `bun run smoke` executes `bun test`, `smoke.ts`, then `smoke-hub.ts`. Docker is intentionally separate because it needs an already-running container boundary.
 
@@ -21,12 +21,12 @@
 
 ### Goal
 
-Prove Project metadata persists in the same SQLite owner used by the Hub, with deterministic listing and idempotent deletion, without starting a server.
+Prove Room metadata persists in the same SQLite owner used by the Hub, with deterministic listing and idempotent deletion, without starting a server.
 
 ### Scenario
 
 1. Create a unique temporary data directory and open `HubStore`.
-2. Create `billing` and `search` Projects.
+2. Create `billing` and `search` Rooms.
 3. Assert deterministic name order.
 4. Close and reopen the store, then prove `billing` persisted.
 5. Delete `billing`, assert a second deletion returns false, and prove `search` remains.
@@ -52,12 +52,12 @@ Exercise the actual HTTP server, WebSocket protocol, realtime Presence, message 
 ### Covered scenario
 
 1. **Minimal control responses**: assert metadata contains only `protocolVersion` and health contains only `ok` plus the service name.
-2. **Independent Hubs**: create a Project on the first Hub and prove the second Hub does not see it.
+2. **Independent Hubs**: create a Room on the first Hub and prove the second Hub does not see it.
 3. **Realtime Presence**: connect named `api` and `web` sockets and observe peer snapshot plus join notification.
-4. **Direct message**: send from `api` to current `web`, observe accepted Project sequence, realtime payload, and sender delivery result.
-5. **Project broadcast**: connect another peer, freeze the recipient snapshot, and observe one message plus delivery outcome per selected Presence.
+4. **Direct message**: send from `api` to current `web`, observe accepted Room sequence, realtime payload, and sender delivery result.
+5. **Room broadcast**: connect another peer, freeze the recipient snapshot, and observe one message plus delivery outcome per selected Presence.
 6. **Persistent history**: query accepted messages through HTTP and prove history survives Hub stop/restart while Presence does not.
-7. **Safe Project deletion**: close Presence, delete the Project and its history, and verify repeated deletion is idempotent.
+7. **Safe Room deletion**: close Presence, delete the Room and its history, and verify repeated deletion is idempotent.
 
 ### Cleanup
 
@@ -77,28 +77,28 @@ Cross the deployed process/network boundary rather than proving another in-proce
 ### Scenario
 
 1. Decode exact minimal metadata and health responses through the configured client URL.
-2. Create a timestamped temporary Project.
+2. Create a timestamped temporary Room.
 3. Open `api` and `web` WebSocket Presences.
 4. Send one direct Message with an explicit `messageId` and binary-safe attachment.
-5. Assert the Hub assigned `<project>:1`.
+5. Assert the Hub assigned `<room>:1`.
 6. Await and decode the realtime text and exact attachment bytes at `web`.
 7. Close both sockets.
 8. Query HTTP history and assert the Message and attachment bytes persisted.
-9. Delete the temporary Project.
+9. Delete the temporary Room.
 
-`finally` closes any surviving sockets and retries Project deletion. The script never owns or stops the external Hub.
+`finally` closes any surviving sockets and retries Room deletion. The script never owns or stops the external Hub.
 
 ## `migrate-storage.ts`
 
 ### Goal
 
-Convert version 2 `messages.sqlite` storage to the current version without changing the Hub's fail-closed startup contract.
+Convert version 3 `messages.sqlite` storage to the current version without changing the Hub's fail-closed startup contract.
 
 ### Scenario
 
 1. Resolve the data directory exactly like the Hub (`--data-dir`, `OMP_A2A_HUB_DATA_DIR`, then `~/.omp/a2a`) and report `absent` without creating anything when the database is missing.
 2. When the database exists, acquire the Hub data lock so a running Hub blocks conversion.
-3. In one transaction, rename `target_name` to `target_names` and `target_presence_id` to `target_presence_ids`, convert `project` targets to `all` while clearing target columns, convert `agent` targets to `agents` with JSON-wrapped names and optional presence IDs, and set the current `user_version`.
+3. In one transaction, rename `projects` to `rooms`, `project_sequences` to `room_sequences`, namespace columns to `room`, `project_sequence` to `room_sequence`, and the sender-history index to `messages_room_sender`, and set `user_version` to `4`.
 4. After a `migrated` result, reopen through `HubStore` so its schema guard validates the converted schema; a `current` result is already a no-op and skips reopening.
 5. Report `migrated` or `current`; any other storage version fails before the conversion transaction and therefore without writing.
 
@@ -107,23 +107,23 @@ Convert version 2 `messages.sqlite` storage to the current version without chang
 - `ALTER TABLE ... RENAME COLUMN` preserves the stored schema text, so no table rebuild and no second copy of the current DDL.
 - Re-running on current storage is a no-op.
 - The migration is explicit operator work; `HubStore` never converts storage during startup.
-- The migration transaction preserves Project metadata, sequences, payloads, attachments, approval receipts, timestamps, and causal references; it changes only the legacy target columns/kinds and storage version. Other target-kind values are not rewritten.
+- The migration transaction preserves Room metadata, sequences, payloads, attachments, approval receipts, timestamps, and causal references; it preserves every row and value and changes only table, column, and index names and the storage version.
 - The post-migration `HubStore` reopen is a schema check after the conversion transaction commits; if that check rejects the database, the committed conversion is not rolled back.
 
 ## Verification matrix
 
 | Behavior | Unit/behavior tests | `smoke.ts` | `smoke-hub.ts` | `smoke-docker.ts` |
 | --- | --- | --- | --- | --- |
-| SQLite Project persistence | yes | yes | yes | CRUD only; no reopen |
+| SQLite Room persistence | yes | yes | yes | CRUD only; no reopen |
 | Independent Hub state | yes | no | yes | no |
 | WebSocket handshake/Presence | yes | no | yes | yes |
 | Direct realtime routing | yes | no | yes | yes |
-| Project broadcast snapshot | yes | no | yes | no |
+| Room broadcast snapshot | yes | no | yes | no |
 | Delivery outcomes | yes | no | yes | no |
 | Persistent history/restart | yes | no | yes | history only |
 | Attachment wire/history bytes | yes | no | no | yes |
 | Current storage schema guard | yes | no | no | no |
-| Version 2 storage migration | yes | no | no | no |
+| Version 3 storage migration | yes | no | no | no |
 | Payload boundaries | yes | no | representative payload | representative payload |
 | Actual container/network process | no | no | no | yes |
 

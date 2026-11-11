@@ -9,7 +9,7 @@ services:
     ports:
       - "${OMP_A2A_HUB_PORT:-4173}:4173"
     volumes:
-      # This Compose project owns one independent Project registry and message history.
+      # This Compose project owns one independent Room registry and message history.
       - a2a-data:/data/omp-a2a
     healthcheck:
       test:

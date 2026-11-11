@@ -8,8 +8,8 @@ import {
 	HubStore,
 	MESSAGE_STORAGE_VERSION,
 	MessageIdConflictError,
-	ProjectConflictError,
-	UnknownProjectError,
+	RoomConflictError,
+	UnknownRoomError,
 } from "../src/hub/store";
 
 const roots: string[] = [];
@@ -18,13 +18,13 @@ const UNSUPPORTED_STORAGE_MESSAGE =
 
 function appendMessage(
 	store: HubStore,
-	project: string,
+	room: string,
 	messageId: string,
 	createdAt = 100,
 ) {
 	return store.append({
 		messageId,
-		project,
+		room,
 		from: { name: "api", presenceId: "presence-api" },
 		target: { type: "all" },
 		payload: encodeTextPayload(messageId),
@@ -38,16 +38,16 @@ afterEach(() => {
 		rmSync(root, { recursive: true, force: true });
 });
 
-test("messages form one immutable sequence per Project", () => {
+test("messages form one immutable sequence per Room", () => {
 	const root = mkdtempSync(join(tmpdir(), "omp-a2a-messages-"));
 	roots.push(root);
 	const databasePath = join(root, "messages.sqlite");
 	const store = new HubStore(databasePath);
-	store.createProject({ name: "billing" });
+	store.createRoom({ name: "billing" });
 
 	const first = store.append({
 		messageId: "message-1",
-		project: "billing",
+		room: "billing",
 		from: { name: "api", presenceId: "presence-api" },
 		target: { type: "agents", names: ["web"], presenceIds: ["presence-web"] },
 		payload: encodeTextPayload("check the login contract"),
@@ -57,7 +57,7 @@ test("messages form one immutable sequence per Project", () => {
 	});
 	const second = store.append({
 		messageId: "message-2",
-		project: "billing",
+		room: "billing",
 		from: { name: "api", presenceId: "presence-api" },
 		target: { type: "all" },
 		payload: encodeTextPayload("freeze the contract"),
@@ -80,13 +80,13 @@ test("messages form one immutable sequence per Project", () => {
 	expect(second.message.userApproval).toBeUndefined();
 	expect(
 		store
-			.history({ project: "billing", limit: 10 })
+			.history({ room: "billing", limit: 10 })
 			.messages.map((message) => message.messageRef),
 	).toEqual(["billing:1", "billing:2"]);
 
 	const repeated = store.append({
 		messageId: "message-1",
-		project: "billing",
+		room: "billing",
 		from: { name: "api", presenceId: "another-presence" },
 		target: {
 			type: "agents",
@@ -102,7 +102,7 @@ test("messages form one immutable sequence per Project", () => {
 	expect(() =>
 		store.append({
 			messageId: "message-1",
-			project: "billing",
+			room: "billing",
 			from: { name: "api", presenceId: "presence-api" },
 			target: { type: "agents", names: ["web"], presenceIds: ["presence-web"] },
 			payload: encodeTextPayload("check the login contract"),
@@ -113,7 +113,7 @@ test("messages form one immutable sequence per Project", () => {
 	expect(() =>
 		store.append({
 			messageId: "message-1",
-			project: "billing",
+			room: "billing",
 			from: { name: "api", presenceId: "presence-api" },
 			target: { type: "agents", names: ["web"], presenceIds: ["presence-web"] },
 			payload: encodeTextPayload("different body"),
@@ -133,7 +133,7 @@ test("messages form one immutable sequence per Project", () => {
 	expect(
 		database
 			.query<{ msg_id: string; user_approved: number }, []>(
-				"SELECT msg_id, user_approved FROM messages ORDER BY project_sequence",
+				"SELECT msg_id, user_approved FROM messages ORDER BY room_sequence",
 			)
 			.all(),
 	).toEqual([
@@ -147,15 +147,15 @@ test("messages form one immutable sequence per Project", () => {
 });
 
 test("current storage schema is versioned and reopens", () => {
-	expect(MESSAGE_STORAGE_VERSION).toBe(3);
+	expect(MESSAGE_STORAGE_VERSION).toBe(4);
 	const root = mkdtempSync(join(tmpdir(), "omp-a2a-messages-"));
 	roots.push(root);
 	const databasePath = join(root, "messages.sqlite");
 	const store = new HubStore(databasePath);
-	store.createProject({ name: "current" });
+	store.createRoom({ name: "current" });
 	store.append({
 		messageId: "current-schema",
-		project: "current",
+		room: "current",
 		from: { name: "api", presenceId: "presence-api" },
 		target: { type: "all" },
 		payload: encodeTextPayload("persist the current schema"),
@@ -173,7 +173,7 @@ test("current storage schema is versioned and reopens", () => {
 	database.close();
 
 	const reopened = new HubStore(databasePath);
-	expect(reopened.history({ project: "current" }).messages).toMatchObject([
+	expect(reopened.history({ room: "current" }).messages).toMatchObject([
 		{
 			messageId: "current-schema",
 			messageRef: "current:1",
@@ -184,15 +184,15 @@ test("current storage schema is versioned and reopens", () => {
 	reopened.close();
 });
 
-test("history uses stable Project cursors and sender filters", () => {
+test("history uses stable Room cursors and sender filters", () => {
 	const root = mkdtempSync(join(tmpdir(), "omp-a2a-messages-"));
 	roots.push(root);
 	const store = new HubStore(join(root, "messages.sqlite"));
-	store.createProject({ name: "history" });
+	store.createRoom({ name: "history" });
 	for (const [index, from] of ["api", "web", "api"].entries()) {
 		store.append({
 			messageId: `history-${index + 1}`,
-			project: "history",
+			room: "history",
 			from: { name: from, presenceId: `presence-${from}` },
 			target: { type: "all" },
 			payload: encodeTextPayload(`message ${index + 1}`),
@@ -203,22 +203,22 @@ test("history uses stable Project cursors and sender filters", () => {
 
 	expect(
 		store
-			.history({ project: "history", limit: 2 })
+			.history({ room: "history", limit: 2 })
 			.messages.map((message) => message.messageRef),
 	).toEqual(["history:2", "history:3"]);
 	expect(
 		store
-			.history({ project: "history", before: "history:3", limit: 2 })
+			.history({ room: "history", before: "history:3", limit: 2 })
 			.messages.map((message) => message.messageRef),
 	).toEqual(["history:1", "history:2"]);
 	expect(
 		store
-			.history({ project: "history", after: "history:1", limit: 1 })
+			.history({ room: "history", after: "history:1", limit: 1 })
 			.messages.map((message) => message.messageRef),
 	).toEqual(["history:2"]);
 	expect(
 		store
-			.history({ project: "history", from: "api" })
+			.history({ room: "history", from: "api" })
 			.messages.map((message) => message.messageRef),
 	).toEqual(["history:1", "history:3"]);
 	store.close();
@@ -228,11 +228,11 @@ test("history keeps its default page and accepts explicit large limits", () => {
 	const root = mkdtempSync(join(tmpdir(), "omp-a2a-messages-"));
 	roots.push(root);
 	const store = new HubStore(join(root, "messages.sqlite"));
-	store.createProject({ name: "large-limit" });
+	store.createRoom({ name: "large-limit" });
 	for (let index = 1; index <= 501; index++) {
 		store.append({
 			messageId: `large-limit-${index}`,
-			project: "large-limit",
+			room: "large-limit",
 			from: { name: "api", presenceId: "presence-api" },
 			target: { type: "all" },
 			payload: encodeTextPayload(`message ${index}`),
@@ -240,16 +240,16 @@ test("history keeps its default page and accepts explicit large limits", () => {
 			createdAt: index,
 		});
 	}
-	const defaultPage = store.history({ project: "large-limit" }).messages;
+	const defaultPage = store.history({ room: "large-limit" }).messages;
 	expect(defaultPage).toHaveLength(50);
 	expect(defaultPage[0]?.messageRef).toBe("large-limit:452");
 	expect(
-		store.history({ project: "large-limit", limit: 501 }).messages,
+		store.history({ room: "large-limit", limit: 501 }).messages,
 	).toHaveLength(501);
-	expect(() => store.history({ project: "large-limit", limit: 0 })).toThrow(
+	expect(() => store.history({ room: "large-limit", limit: 0 })).toThrow(
 		"positive integer",
 	);
-	expect(() => store.history({ project: "large-limit", limit: 1.5 })).toThrow(
+	expect(() => store.history({ room: "large-limit", limit: 1.5 })).toThrow(
 		"positive integer",
 	);
 	store.close();
@@ -306,7 +306,7 @@ test("current storage version rejects unexpected schema objects", () => {
 		},
 		{
 			type: "view",
-			sql: "CREATE VIEW unexpected_view AS SELECT project FROM messages",
+			sql: "CREATE VIEW unexpected_view AS SELECT room FROM messages",
 		},
 	];
 	const outcomes: Array<{
@@ -365,10 +365,10 @@ test("attachment content participates in messageId idempotency", () => {
 	const root = mkdtempSync(join(tmpdir(), "omp-a2a-attachment-idempotency-"));
 	roots.push(root);
 	const store = new HubStore(join(root, "messages.sqlite"));
-	store.createProject({ name: "attachments" });
+	store.createRoom({ name: "attachments" });
 	const draft = {
 		messageId: "attachment-idempotency",
-		project: "attachments",
+		room: "attachments",
 		from: { name: "api", presenceId: "presence-api" },
 		target: { type: "all" as const },
 		payload: encodeTextPayload("training contract"),
@@ -406,90 +406,86 @@ test("attachment content participates in messageId idempotency", () => {
 	store.close();
 });
 
-test("Project metadata persists with deterministic sorting", () => {
-	const root = mkdtempSync(join(tmpdir(), "omp-a2a-project-store-"));
+test("Room metadata persists with deterministic sorting", () => {
+	const root = mkdtempSync(join(tmpdir(), "omp-a2a-room-store-"));
 	roots.push(root);
 	const databasePath = join(root, "messages.sqlite");
 	const store = new HubStore(databasePath);
-	const zeta = store.createProject({
+	const zeta = store.createRoom({
 		name: "zeta",
 		displayName: "Zeta",
-		description: "last Project",
+		description: "last Room",
 		createdByCwd: "/repos/zeta",
 	});
-	const alpha = store.createProject({ name: "alpha" });
+	const alpha = store.createRoom({ name: "alpha" });
 
-	expect(store.listProjects()).toEqual([alpha, zeta]);
-	expect(store.getProject("zeta")).toEqual(zeta);
-	expect(() => store.createProject({ name: "zeta" })).toThrow(
-		ProjectConflictError,
-	);
+	expect(store.listRooms()).toEqual([alpha, zeta]);
+	expect(store.getRoom("zeta")).toEqual(zeta);
+	expect(() => store.createRoom({ name: "zeta" })).toThrow(RoomConflictError);
 	store.close();
 
 	const reopened = new HubStore(databasePath);
-	expect(reopened.listProjects()).toEqual([alpha, zeta]);
-	expect(reopened.deleteProject("missing")).toBe(false);
+	expect(reopened.listRooms()).toEqual([alpha, zeta]);
+	expect(reopened.deleteRoom("missing")).toBe(false);
 	reopened.close();
 });
 
-test("messages require an existing Project", () => {
-	const root = mkdtempSync(join(tmpdir(), "omp-a2a-project-required-"));
+test("messages require an existing Room", () => {
+	const root = mkdtempSync(join(tmpdir(), "omp-a2a-room-required-"));
 	roots.push(root);
 	const store = new HubStore(join(root, "messages.sqlite"));
 
-	expect(() => appendMessage(store, "unknown", "unknown-project")).toThrow(
-		UnknownProjectError,
+	expect(() => appendMessage(store, "unknown", "unknown-room")).toThrow(
+		UnknownRoomError,
 	);
-	expect(() => store.history({ project: "unknown" })).toThrow(
-		UnknownProjectError,
-	);
+	expect(() => store.history({ room: "unknown" })).toThrow(UnknownRoomError);
 	store.close();
 });
 
-test("Project deletion rolls back metadata, history, and sequence together", () => {
+test("Room deletion rolls back metadata, history, and sequence together", () => {
 	const root = mkdtempSync(join(tmpdir(), "omp-a2a-delete-atomic-"));
 	roots.push(root);
 	const databasePath = join(root, "messages.sqlite");
 	const store = new HubStore(databasePath);
-	store.createProject({ name: "atomic" });
+	store.createRoom({ name: "atomic" });
 	appendMessage(store, "atomic", "before-failure");
 
 	const injector = new Database(databasePath);
 	injector.run(`
-		CREATE TRIGGER fail_project_delete
-		BEFORE DELETE ON projects
+		CREATE TRIGGER fail_room_delete
+		BEFORE DELETE ON rooms
 		BEGIN
 			SELECT RAISE(ABORT, 'forced delete failure');
 		END
 	`);
-	expect(() => store.deleteProject("atomic")).toThrow("forced delete failure");
-	expect(store.getProject("atomic")?.name).toBe("atomic");
+	expect(() => store.deleteRoom("atomic")).toThrow("forced delete failure");
+	expect(store.getRoom("atomic")?.name).toBe("atomic");
 	expect(
 		store
-			.history({ project: "atomic" })
+			.history({ room: "atomic" })
 			.messages.map((message) => message.messageId),
 	).toEqual(["before-failure"]);
 	expect(appendMessage(store, "atomic", "after-failure").message.sequence).toBe(
 		2,
 	);
 
-	injector.run("DROP TRIGGER fail_project_delete");
+	injector.run("DROP TRIGGER fail_room_delete");
 	injector.close();
-	expect(store.deleteProject("atomic")).toBe(true);
+	expect(store.deleteRoom("atomic")).toBe(true);
 	store.close();
 });
 
-test("deleting and recreating a Project cannot expose old history", () => {
+test("deleting and recreating a Room cannot expose old history", () => {
 	const root = mkdtempSync(join(tmpdir(), "omp-a2a-delete-recreate-"));
 	roots.push(root);
 	const store = new HubStore(join(root, "messages.sqlite"));
-	store.createProject({ name: "recreated" });
+	store.createRoom({ name: "recreated" });
 	appendMessage(store, "recreated", "old-history");
 
-	expect(store.deleteProject("recreated")).toBe(true);
-	expect(store.deleteProject("recreated")).toBe(false);
-	store.createProject({ name: "recreated" });
-	expect(store.history({ project: "recreated" }).messages).toEqual([]);
+	expect(store.deleteRoom("recreated")).toBe(true);
+	expect(store.deleteRoom("recreated")).toBe(false);
+	store.createRoom({ name: "recreated" });
+	expect(store.history({ room: "recreated" }).messages).toEqual([]);
 	expect(
 		appendMessage(store, "recreated", "new-history").message.sequence,
 	).toBe(1);

@@ -11,7 +11,7 @@ import type {
 	UserApprovalReceipt,
 } from "./hub/realtime-types";
 import type { EncodedAttachment } from "./hub/types";
-import type { A2aProject } from "./types";
+import type { A2aRoom } from "./types";
 
 export type MessageAttachment = { name: string; bytes: Buffer };
 export type MessageView = Omit<RealtimeMessage, "payload" | "attachments"> & {
@@ -28,7 +28,7 @@ export type RuntimeStatus = {
 		protocolVersion: number;
 	};
 	connection: null | {
-		project: string;
+		room: string;
 		name: string;
 		presenceId: string;
 		peers: Peer[];
@@ -53,7 +53,7 @@ type PublishedConnection = {
 	lifecycle: AbortController;
 };
 type ConnectionResult = {
-	project: string;
+	room: string;
 	name: string;
 	presenceId: string;
 	peers: Peer[];
@@ -83,8 +83,8 @@ export class A2aRuntime {
 		return this.#published !== null;
 	}
 
-	get project(): string | null {
-		return this.#published?.connection.project ?? null;
+	get room(): string | null {
+		return this.#published?.connection.room ?? null;
 	}
 
 	get name(): string | null {
@@ -96,14 +96,14 @@ export class A2aRuntime {
 	}
 
 	get publishedTarget(): {
-		project: string;
+		room: string;
 		name: string;
 		client: HubClient;
 	} | null {
 		const published = this.#published;
 		return published
 			? {
-					project: published.connection.project,
+					room: published.connection.room,
 					name: published.connection.name,
 					client: published.client,
 				}
@@ -120,7 +120,7 @@ export class A2aRuntime {
 	}
 
 	connect(
-		project: string,
+		room: string,
 		name: string,
 		client?: HubClient | (() => Promise<HubClient>),
 	): Promise<ConnectionResult> {
@@ -135,7 +135,7 @@ export class A2aRuntime {
 		);
 		const abort = new AbortController();
 		const promise = this.#connectCandidate({
-			project,
+			room,
 			name,
 			client,
 			abort,
@@ -151,14 +151,14 @@ export class A2aRuntime {
 	}
 
 	async #connectCandidate(options: {
-		project: string;
+		room: string;
 		name: string;
 		client?: HubClient | (() => Promise<HubClient>);
 		abort: AbortController;
 		predecessorTeardown: Promise<void>;
 	}): Promise<ConnectionResult> {
 		const {
-			project,
+			room,
 			name,
 			client: requestedClient,
 			abort,
@@ -174,12 +174,12 @@ export class A2aRuntime {
 
 		const predecessor = this.#published;
 		if (
-			predecessor?.connection.project === project &&
+			predecessor?.connection.room === room &&
 			predecessor.connection.name === name &&
 			predecessor.client.baseUrl === client.baseUrl
 		) {
 			return {
-				project,
+				room,
 				name,
 				presenceId: predecessor.connection.self.presenceId,
 				peers: predecessor.connection.peers(),
@@ -191,7 +191,7 @@ export class A2aRuntime {
 		let candidateClosed = false;
 		connection = await A2aConnection.connect({
 			baseUrl: client.baseUrl,
-			project,
+			room,
 			name,
 			signal: abort.signal,
 			events: {
@@ -253,7 +253,7 @@ export class A2aRuntime {
 			throw new Error("A2A connection transition superseded");
 		}
 		return {
-			project,
+			room,
 			name,
 			presenceId: connection.self.presenceId,
 			peers: connection.peers(),
@@ -320,7 +320,7 @@ export class A2aRuntime {
 	}
 
 	async history(
-		query?: Omit<HistoryQuery, "project">,
+		query?: Omit<HistoryQuery, "room">,
 		options?: HubRequestOptions,
 	): Promise<MessageView[]> {
 		const published = this.#published;
@@ -329,7 +329,7 @@ export class A2aRuntime {
 			throw new Error("history accepts before or after, not both");
 		const page = await published.client.history(
 			{
-				project: published.connection.project,
+				room: published.connection.room,
 				...query,
 			},
 			options,
@@ -346,7 +346,7 @@ export class A2aRuntime {
 			hub: { baseUrl: client.baseUrl, protocolVersion: meta.protocolVersion },
 			connection: connection
 				? {
-						project: connection.project,
+						room: connection.room,
 						name: connection.name,
 						presenceId: connection.self.presenceId,
 						peers: connection.peers(),
@@ -355,27 +355,27 @@ export class A2aRuntime {
 		};
 	}
 
-	async createProject(
-		project: {
+	async createRoom(
+		room: {
 			name: string;
 			displayName?: string;
 			description?: string;
 			createdByCwd?: string;
 		},
 		options?: HubRequestOptions,
-	): Promise<A2aProject> {
-		return await (await this.#getClient()).createProject(project, options);
+	): Promise<A2aRoom> {
+		return await (await this.#getClient()).createRoom(room, options);
 	}
 
-	async listProjects(options?: HubRequestOptions): Promise<A2aProject[]> {
-		return await (await this.#getClient()).listProjects(options);
+	async listRooms(options?: HubRequestOptions): Promise<A2aRoom[]> {
+		return await (await this.#getClient()).listRooms(options);
 	}
 
-	async deleteProject(
+	async deleteRoom(
 		name: string,
 		options?: HubRequestOptions,
 	): Promise<boolean> {
-		return await (await this.#getClient()).deleteProject(name, options);
+		return await (await this.#getClient()).deleteRoom(name, options);
 	}
 
 	#view(message: RealtimeMessage): MessageView {

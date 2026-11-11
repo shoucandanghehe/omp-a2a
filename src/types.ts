@@ -1,5 +1,5 @@
 /** Persistent collaboration room. */
-export interface A2aProject {
+export interface A2aRoom {
 	name: string;
 	displayName?: string;
 	description?: string;
@@ -9,11 +9,11 @@ export interface A2aProject {
 
 /** Per-repository connection defaults. */
 export interface A2aLocalConfig {
-	project: string;
+	room: string;
 	name: string;
 	hubUrl?: string;
 	autoConnect?: boolean;
 }
 
-export const PROJECT_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
+export const ROOM_NAME_RE = /^[a-zA-Z0-9][a-zA-Z0-9._-]{0,63}$/;
 export const AGENT_NAME_RE = /^[\p{L}\p{N}][\p{L}\p{N}\p{M}._-]{0,31}$/u;

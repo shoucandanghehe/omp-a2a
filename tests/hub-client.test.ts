@@ -47,12 +47,12 @@ test("global YAML preserves a quoted Hub URL", () => {
 test("explicit Hub URL overrides global config", () => {
 	const home = createHome();
 	writeConfig(home, "config.yml", "hubUrl: http://global:4173\n");
-	expect(resolveHubUrl({ home, hubUrl: " http://project:4173/ " })).toBe(
-		"http://project:4173",
+	expect(resolveHubUrl({ home, hubUrl: " http://room:4173/ " })).toBe(
+		"http://room:4173",
 	);
 });
 
-test("Hub URL requires project or global configuration", () => {
+test("Hub URL requires room or global configuration", () => {
 	const home = createHome();
 	const previous = process.env.OMP_A2A_HUB_URL;
 	process.env.OMP_A2A_HUB_URL = "http://ignored:4173";
@@ -212,7 +212,7 @@ test("a caller-aborted request never reaches the Hub", async () => {
 
 	await expect(
 		new HubClient(baseUrl).history(
-			{ project: "client-test" },
+			{ room: "client-test" },
 			{ signal: controller.signal },
 		),
 	).rejects.toBe(reason);
@@ -229,7 +229,7 @@ test("caller cancellation interrupts body reading with the caller reason", async
 	const controller = new AbortController();
 	const reason = new Error("model turn cancelled");
 	const history = new HubClient(baseUrl).history(
-		{ project: "client-test" },
+		{ room: "client-test" },
 		{ signal: controller.signal },
 	);
 	await bodyStarted.promise;
@@ -250,27 +250,27 @@ test("a successful response with invalid JSON fails at the HubClient seam", asyn
 });
 
 test("a successful response with the wrong shape fails at the HubClient seam", async () => {
-	const { baseUrl } = await serveJson({ projects: "not-an-array" });
+	const { baseUrl } = await serveJson({ rooms: "not-an-array" });
 
-	await expect(new HubClient(baseUrl).listProjects()).rejects.toThrow(
-		"Hub returned invalid Project list response",
+	await expect(new HubClient(baseUrl).listRooms()).rejects.toThrow(
+		"Hub returned invalid Room list response",
 	);
 });
 
 test("a JSON Hub error preserves its status and request URL", async () => {
-	const { baseUrl } = await serveJson({ error: "project already exists" }, 409);
+	const { baseUrl } = await serveJson({ error: "room already exists" }, 409);
 	const error = await new HubClient(baseUrl)
-		.createProject({ name: "client-test" })
+		.createRoom({ name: "client-test" })
 		.catch((caught: unknown) => caught);
 	if (!(error instanceof HubHttpError))
 		throw new Error("expected HubHttpError for a non-2xx response");
 
 	expect(error.status).toBe(409);
-	expect(error.url).toBe(`${baseUrl}/v1/projects`);
-	expect(error.hubError).toBe("project already exists");
+	expect(error.url).toBe(`${baseUrl}/v1/rooms`);
+	expect(error.hubError).toBe("room already exists");
 	expect(error.message).toContain("HTTP 409");
 	expect(error.message).toContain(baseUrl);
-	expect(error.message).toContain("project already exists");
+	expect(error.message).toContain("room already exists");
 });
 
 test("an HTML Hub error still preserves its status and request URL", async () => {
@@ -308,7 +308,7 @@ test("history rejects invalid sequences, references, attachments, and approval r
 	const validMessage = {
 		messageId: "client-message",
 		messageRef: "client-test:1",
-		project: "client-test",
+		room: "client-test",
 		sequence: 1,
 		from: { name: "api", presenceId: "presence-api" },
 		target: { type: "all" },
@@ -322,7 +322,7 @@ test("history rejects invalid sequences, references, attachments, and approval r
 		{
 			messageId: validMessage.messageId,
 			messageRef: validMessage.messageRef,
-			project: validMessage.project,
+			room: validMessage.room,
 			sequence: validMessage.sequence,
 			from: validMessage.from,
 			target: validMessage.target,
@@ -356,22 +356,22 @@ test("history rejects invalid sequences, references, attachments, and approval r
 	});
 	const client = new HubClient(baseUrl);
 
-	await expect(client.history({ project: "client-test" })).rejects.toThrow(
+	await expect(client.history({ room: "client-test" })).rejects.toThrow(
 		"message.sequence must be a safe integer >= 1",
 	);
-	await expect(client.history({ project: "client-test" })).rejects.toThrow(
+	await expect(client.history({ room: "client-test" })).rejects.toThrow(
 		"message.messageRef is not canonical",
 	);
-	await expect(client.history({ project: "client-test" })).rejects.toThrow(
+	await expect(client.history({ room: "client-test" })).rejects.toThrow(
 		"attachments must be an array",
 	);
-	await expect(client.history({ project: "client-test" })).rejects.toThrow(
+	await expect(client.history({ room: "client-test" })).rejects.toThrow(
 		"attachment data is not canonical base64",
 	);
-	await expect(client.history({ project: "client-test" })).rejects.toThrow(
+	await expect(client.history({ room: "client-test" })).rejects.toThrow(
 		"message.userApproval.kind is invalid",
 	);
-	await expect(client.history({ project: "client-test" })).rejects.toThrow(
+	await expect(client.history({ room: "client-test" })).rejects.toThrow(
 		"message.userApproval.unexpected is not allowed",
 	);
 });
@@ -380,7 +380,7 @@ const validMetadata = {
 	protocolVersion: A2A_PROTOCOL_VERSION,
 };
 
-const validProject = {
+const validRoom = {
 	name: "alpha",
 	createdAt: 1,
 };
@@ -400,7 +400,7 @@ function historyMessage(
 	return {
 		messageId: `client-message-${sequence}`,
 		messageRef: `alpha:${sequence}`,
-		project: "alpha",
+		room: "alpha",
 		sequence,
 		from: { name: "api", presenceId: "presence-api" },
 		target: { type: "all" },
@@ -424,36 +424,36 @@ const exactKeyScenarios: ExactKeyScenario[] = [
 		request: (client) => client.meta(),
 	},
 	{
-		name: "Project creation wrapper",
-		response: { project: validProject, unexpected: true },
-		request: (client) => client.createProject({ name: "alpha" }),
+		name: "Room creation wrapper",
+		response: { room: validRoom, unexpected: true },
+		request: (client) => client.createRoom({ name: "alpha" }),
 	},
 	{
-		name: "Project list wrapper",
-		response: { projects: [validProject], unexpected: true },
-		request: (client) => client.listProjects(),
+		name: "Room list wrapper",
+		response: { rooms: [validRoom], unexpected: true },
+		request: (client) => client.listRooms(),
 	},
 	{
-		name: "Project deletion wrapper",
+		name: "Room deletion wrapper",
 		response: { ok: true, deleted: true, unexpected: true },
-		request: (client) => client.deleteProject("alpha"),
+		request: (client) => client.deleteRoom("alpha"),
 	},
 	{
 		name: "history wrapper",
 		response: { messages: [], unexpected: true },
-		request: (client) => client.history({ project: "alpha" }),
+		request: (client) => client.history({ room: "alpha" }),
 	},
 	{
-		name: "Project",
-		response: { projects: [{ ...validProject, unexpected: true }] },
-		request: (client) => client.listProjects(),
+		name: "Room",
+		response: { rooms: [{ ...validRoom, unexpected: true }] },
+		request: (client) => client.listRooms(),
 	},
 	{
 		name: "history message",
 		response: {
 			messages: [historyMessage(1, { unexpected: true })],
 		},
-		request: (client) => client.history({ project: "alpha" }),
+		request: (client) => client.history({ room: "alpha" }),
 	},
 	{
 		name: "history message sender",
@@ -468,7 +468,7 @@ const exactKeyScenarios: ExactKeyScenario[] = [
 				}),
 			],
 		},
-		request: (client) => client.history({ project: "alpha" }),
+		request: (client) => client.history({ room: "alpha" }),
 	},
 	{
 		name: "all message target",
@@ -479,7 +479,7 @@ const exactKeyScenarios: ExactKeyScenario[] = [
 				}),
 			],
 		},
-		request: (client) => client.history({ project: "alpha" }),
+		request: (client) => client.history({ room: "alpha" }),
 	},
 	{
 		name: "agents message target",
@@ -490,7 +490,7 @@ const exactKeyScenarios: ExactKeyScenario[] = [
 				}),
 			],
 		},
-		request: (client) => client.history({ project: "alpha" }),
+		request: (client) => client.history({ room: "alpha" }),
 	},
 	{
 		name: "message text payload",
@@ -505,7 +505,7 @@ const exactKeyScenarios: ExactKeyScenario[] = [
 				}),
 			],
 		},
-		request: (client) => client.history({ project: "alpha" }),
+		request: (client) => client.history({ room: "alpha" }),
 	},
 	{
 		name: "message attachment",
@@ -516,7 +516,7 @@ const exactKeyScenarios: ExactKeyScenario[] = [
 				}),
 			],
 		},
-		request: (client) => client.history({ project: "alpha" }),
+		request: (client) => client.history({ room: "alpha" }),
 	},
 	{
 		name: "attachment payload",
@@ -532,7 +532,7 @@ const exactKeyScenarios: ExactKeyScenario[] = [
 				}),
 			],
 		},
-		request: (client) => client.history({ project: "alpha" }),
+		request: (client) => client.history({ room: "alpha" }),
 	},
 ];
 
@@ -546,16 +546,16 @@ for (const scenario of exactKeyScenarios) {
 
 const invalidHistoryRelationships = [
 	{
-		name: "a row from another Project",
+		name: "a row from another Room",
 		messages: [
 			historyMessage(1, {
 				messageRef: "beta:1",
-				project: "beta",
+				room: "beta",
 			}),
 		],
 	},
 	{
-		name: "non-monotonic Project sequences",
+		name: "non-monotonic Room sequences",
 		messages: [historyMessage(2), historyMessage(1)],
 	},
 	{
@@ -573,7 +573,7 @@ for (const scenario of invalidHistoryRelationships) {
 		const { baseUrl } = await serveJson({ messages: scenario.messages });
 
 		await expect(
-			new HubClient(baseUrl).history({ project: "alpha" }),
+			new HubClient(baseUrl).history({ room: "alpha" }),
 		).rejects.toThrow();
 	});
 }
@@ -588,7 +588,7 @@ test("history snapshots its mutable query before dispatch", async () => {
 		response.end(JSON.stringify({ messages: [historyMessage(1)] }));
 	});
 	const query = {
-		project: "alpha",
+		room: "alpha",
 		before: "alpha:3",
 		from: "api",
 		limit: 2,
@@ -597,7 +597,7 @@ test("history snapshots its mutable query before dispatch", async () => {
 	const history = new HubClient(baseUrl).history(query);
 	const requestedUrl = await requestArrived.promise;
 	Object.assign(query, {
-		project: "beta",
+		room: "beta",
 		before: "beta:9",
 		from: "other",
 		limit: 99,
@@ -605,10 +605,10 @@ test("history snapshots its mutable query before dispatch", async () => {
 	releaseResponse.resolve();
 
 	await expect(history).resolves.toMatchObject({
-		messages: [{ project: "alpha", messageRef: "alpha:1" }],
+		messages: [{ room: "alpha", messageRef: "alpha:1" }],
 	});
 	expect(requestedUrl).toBe(
-		"/v1/history?project=alpha&before=alpha%3A3&from=api&limit=2",
+		"/v1/history?room=alpha&before=alpha%3A3&from=api&limit=2",
 	);
 });
 

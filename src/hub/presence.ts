@@ -1,82 +1,81 @@
 import type { WebSocket } from "ws";
-import { AGENT_NAME_RE, PROJECT_NAME_RE } from "../types";
+import { AGENT_NAME_RE, ROOM_NAME_RE } from "../types";
 import type { Peer } from "./realtime-types";
 
 export class NameInUseError extends Error {}
 
 export type Presence = Peer & {
-	project: string;
+	room: string;
 	socket: WebSocket;
 	connectedAt: number;
 };
 
 export class PresenceRegistry {
-	#byProject = new Map<string, Map<string, Presence>>();
+	#byRoom = new Map<string, Map<string, Presence>>();
 	#bySocket = new Map<WebSocket, Presence>();
 
 	claim(
-		project: string,
+		room: string,
 		name: string,
 		socket: WebSocket,
 	): { self: Presence; peers: Peer[] } {
-		if (!PROJECT_NAME_RE.test(project))
-			throw new Error(`invalid project: ${project}`);
+		if (!ROOM_NAME_RE.test(room)) throw new Error(`invalid room: ${room}`);
 		if (!AGENT_NAME_RE.test(name)) throw new Error(`invalid name: ${name}`);
 		if (this.#bySocket.has(socket))
 			throw new Error("connection already claimed a name");
-		let room = this.#byProject.get(project);
-		if (!room) {
-			room = new Map();
-			this.#byProject.set(project, room);
+		let members = this.#byRoom.get(room);
+		if (!members) {
+			members = new Map();
+			this.#byRoom.set(room, members);
 		}
-		if (room.has(name))
-			throw new NameInUseError(`name already in use in ${project}: ${name}`);
+		if (members.has(name))
+			throw new NameInUseError(`name already in use in ${room}: ${name}`);
 		const peers = Array.from(
-			room.values(),
+			members.values(),
 			({ name: peerName, presenceId }) => ({ name: peerName, presenceId }),
 		);
 		const self: Presence = {
-			project,
+			room,
 			name,
 			presenceId: crypto.randomUUID(),
 			socket,
 			connectedAt: Date.now(),
 		};
-		room.set(name, self);
+		members.set(name, self);
 		this.#bySocket.set(socket, self);
 		return { self, peers };
 	}
 
-	get(project: string, name: string): Presence | null {
-		return this.#byProject.get(project)?.get(name) ?? null;
+	get(room: string, name: string): Presence | null {
+		return this.#byRoom.get(room)?.get(name) ?? null;
 	}
 
 	getBySocket(socket: WebSocket): Presence | null {
 		return this.#bySocket.get(socket) ?? null;
 	}
 
-	connections(project: string): Presence[] {
-		return Array.from(this.#byProject.get(project)?.values() ?? []);
+	connections(room: string): Presence[] {
+		return Array.from(this.#byRoom.get(room)?.values() ?? []);
 	}
 
 	remove(socket: WebSocket): Presence | null {
 		const presence = this.#bySocket.get(socket);
 		if (!presence) return null;
 		this.#bySocket.delete(socket);
-		const room = this.#byProject.get(presence.project);
+		const room = this.#byRoom.get(presence.room);
 		room?.delete(presence.name);
-		if (room?.size === 0) this.#byProject.delete(presence.project);
+		if (room?.size === 0) this.#byRoom.delete(presence.room);
 		return presence;
 	}
 
-	count(project: string): number {
-		return this.#byProject.get(project)?.size ?? 0;
+	count(room: string): number {
+		return this.#byRoom.get(room)?.size ?? 0;
 	}
 
 	close(): Presence[] {
 		const presences = Array.from(this.#bySocket.values());
 		this.#bySocket.clear();
-		this.#byProject.clear();
+		this.#byRoom.clear();
 		return presences;
 	}
 }

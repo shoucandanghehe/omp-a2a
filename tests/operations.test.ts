@@ -39,7 +39,7 @@ test("one runtime path serves discovery, messaging, delivery, and history", asyn
 	});
 	hubs.push(hub);
 	const client = new HubClient(hub.listenUrl);
-	await client.createProject({ name: "runtime" });
+	await client.createRoom({ name: "runtime" });
 
 	let resolveMessage!: (message: MessageView) => void;
 	const received = new Promise<MessageView>((resolve) => {
@@ -142,7 +142,7 @@ test("history rejects conflicting cursors before HTTP and preserves single-curso
 	});
 	hubs.push(hub);
 	const client = new HubClient(hub.listenUrl);
-	await client.createProject({ name: "history" });
+	await client.createRoom({ name: "history" });
 	const runtime = new A2aRuntime({ getClient: async () => client });
 	try {
 		await runtime.connect("history", "reader");
@@ -190,7 +190,7 @@ test("receiver injection completes in Hub message order", async () => {
 	});
 	hubs.push(hub);
 	const client = new HubClient(hub.listenUrl);
-	await client.createProject({ name: "runtime-order" });
+	await client.createRoom({ name: "runtime-order" });
 
 	const firstStarted = Promise.withResolvers<void>();
 	const releaseFirst = Promise.withResolvers<void>();
@@ -269,7 +269,7 @@ test("receiver injection failure produces a terminal failed delivery", async () 
 	});
 	hubs.push(hub);
 	const client = new HubClient(hub.listenUrl);
-	await client.createProject({ name: "runtime-failure" });
+	await client.createRoom({ name: "runtime-failure" });
 	const delivery = Promise.withResolvers<DeliveryEvent>();
 	const api = new A2aRuntime({
 		getClient: async () => client,
@@ -317,7 +317,7 @@ test("runtime HTTP operations preserve caller cancellation", async () => {
 	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
 	hubs.push(hub);
 	const client = new HubClient(hub.listenUrl);
-	await client.createProject({ name: "runtime-cancel" });
+	await client.createRoom({ name: "runtime-cancel" });
 	const api = new A2aRuntime({ getClient: async () => client });
 	await api.connect("runtime-cancel", "api");
 	const controller = new AbortController();
@@ -328,12 +328,10 @@ test("runtime HTTP operations preserve caller cancellation", async () => {
 	await expect(api.history({}, options)).rejects.toBe(reason);
 	await expect(api.status(options)).rejects.toBe(reason);
 	await expect(
-		api.createProject({ name: "should-not-exist" }, options),
+		api.createRoom({ name: "should-not-exist" }, options),
 	).rejects.toBe(reason);
-	await expect(api.listProjects(options)).rejects.toBe(reason);
-	await expect(api.deleteProject("runtime-cancel", options)).rejects.toBe(
-		reason,
-	);
+	await expect(api.listRooms(options)).rejects.toBe(reason);
+	await expect(api.deleteRoom("runtime-cancel", options)).rejects.toBe(reason);
 	await api.disconnect();
 });
 
@@ -343,7 +341,7 @@ test("pre-dispatch message abort sends nothing to history", async () => {
 	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
 	hubs.push(hub);
 	const client = new HubClient(hub.listenUrl);
-	await client.createProject({ name: "runtime-abort" });
+	await client.createRoom({ name: "runtime-abort" });
 	const api = new A2aRuntime({
 		getClient: async () => client,
 		events: {},
@@ -382,8 +380,8 @@ test("published connection keeps its Hub binding until a replacement succeeds", 
 	hubs.push(firstHub, secondHub);
 	const firstClient = new HubClient(firstHub.listenUrl);
 	const secondClient = new HubClient(secondHub.listenUrl);
-	await firstClient.createProject({ name: "hub-binding" });
-	await secondClient.createProject({ name: "hub-binding" });
+	await firstClient.createRoom({ name: "hub-binding" });
+	await secondClient.createRoom({ name: "hub-binding" });
 
 	const firstSignal = Promise.withResolvers<AbortSignal>();
 	const secondSignal = Promise.withResolvers<AbortSignal>();
@@ -423,7 +421,7 @@ test("published connection keeps its Hub binding until a replacement succeeds", 
 	expect(oldSignal.aborted).toBe(false);
 	expect(await runtime.status()).toMatchObject({
 		hub: { baseUrl: firstHub.listenUrl },
-		connection: { project: "hub-binding", name: "worker" },
+		connection: { room: "hub-binding", name: "worker" },
 	});
 
 	await conflict.disconnect();
@@ -432,7 +430,7 @@ test("published connection keeps its Hub binding until a replacement succeeds", 
 	expect(oldSignal.aborted).toBe(true);
 	expect(await runtime.status()).toMatchObject({
 		hub: { baseUrl: secondHub.listenUrl },
-		connection: { project: "hub-binding", name: "worker" },
+		connection: { room: "hub-binding", name: "worker" },
 	});
 
 	await secondPeer.connect("hub-binding", "sender");
@@ -471,10 +469,10 @@ test("superseding a same-name connect waits for the prior candidate teardown", a
 		socket.on("message", (data) => {
 			const frame = JSON.parse(data.toString()) as {
 				type: string;
-				project?: string;
+				room?: string;
 				name?: string;
 			};
-			if (frame.type !== "hello" || !frame.project || !frame.name) return;
+			if (frame.type !== "hello" || !frame.room || !frame.name) return;
 			helloCount += 1;
 			if (helloCount === 1) {
 				firstHello.resolve();
@@ -485,7 +483,7 @@ test("superseding a same-name connect waits for the prior candidate teardown", a
 				JSON.stringify({
 					type: "claimed",
 					protocolVersion: A2A_PROTOCOL_VERSION,
-					project: frame.project,
+					room: frame.room,
 					self: { name: frame.name, presenceId: `presence-${presence}` },
 					peers: [],
 				}),
@@ -520,7 +518,7 @@ test("superseding a same-name connect waits for the prior candidate teardown", a
 
 	const replacement = await runtime.connect("same-name", "worker");
 	expect(replacement).toMatchObject({
-		project: "same-name",
+		room: "same-name",
 		name: "worker",
 	});
 	expect(await supersededFailure).toBeInstanceOf(Error);
@@ -533,7 +531,7 @@ test("reverse disconnect overlap retains the teardown barrier before reconnect",
 	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
 	hubs.push(hub);
 	const client = new HubClient(hub.listenUrl);
-	await client.createProject({ name: "teardown-barrier" });
+	await client.createRoom({ name: "teardown-barrier" });
 
 	let clientRequests = 0;
 	const runtime = new A2aRuntime({
@@ -552,7 +550,7 @@ test("reverse disconnect overlap retains the teardown barrier before reconnect",
 	const closeSpy = vi
 		.spyOn(A2aConnection.prototype, "close")
 		.mockImplementation(async function (this: A2aConnection) {
-			if (holdClose && this.project === "teardown-barrier") {
+			if (holdClose && this.room === "teardown-barrier") {
 				closeStarted.resolve();
 				await releaseClose.promise;
 			}
@@ -577,7 +575,7 @@ test("reverse disconnect overlap retains the teardown barrier before reconnect",
 		expect(await disconnect).toBe(true);
 		expect(await secondDisconnect).toBe(false);
 		expect(await reconnect).toMatchObject({
-			project: "teardown-barrier",
+			room: "teardown-barrier",
 			name: "worker",
 		});
 		expect(clientRequests).toBe(2);
@@ -620,12 +618,12 @@ test("only the latest connection transition can publish or emit events", async (
 		closeWaiters.set(name, waiter);
 		return waiter.promise;
 	};
-	const claim = (socket: WebSocket, project: string, name: string) => {
+	const claim = (socket: WebSocket, room: string, name: string) => {
 		socket.send(
 			JSON.stringify({
 				type: "claimed",
 				protocolVersion: A2A_PROTOCOL_VERSION,
-				project,
+				room,
 				self: { name, presenceId: `${name}-presence` },
 				peers: [],
 			}),
@@ -636,7 +634,7 @@ test("only the latest connection transition can publish or emit events", async (
 		socket.on("message", (data) => {
 			const frame = JSON.parse(data.toString()) as {
 				type: string;
-				project?: string;
+				room?: string;
 				name?: string;
 				messageId?: string;
 			};
@@ -647,11 +645,11 @@ test("only the latest connection transition can publish or emit events", async (
 				candidateOutcome.resolve(frame);
 				return;
 			}
-			if (frame.type !== "hello" || !frame.project || !frame.name) return;
+			if (frame.type !== "hello" || !frame.room || !frame.name) return;
 			name = frame.name;
 			sockets.set(name, socket);
 			socketWaiters.get(name)?.resolve(socket);
-			if (name === "latest") claim(socket, frame.project, name);
+			if (name === "latest") claim(socket, frame.room, name);
 		});
 		socket.on("close", () => {
 			if (name) closeWaiters.get(name)?.resolve();
@@ -686,7 +684,7 @@ test("only the latest connection transition can publish or emit events", async (
 			message: {
 				messageId: "candidate-message",
 				messageRef: "transitions:1",
-				project: "transitions",
+				room: "transitions",
 				sequence: 1,
 				from: { name: "sender", presenceId: "sender-presence" },
 				target: {

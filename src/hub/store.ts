@@ -2,8 +2,8 @@ import { Database } from "bun:sqlite";
 import { existsSync } from "node:fs";
 import * as path from "node:path";
 import { ensureDir } from "../paths";
-import type { A2aProject } from "../types";
-import { AGENT_NAME_RE, PROJECT_NAME_RE } from "../types";
+import type { A2aRoom } from "../types";
+import { AGENT_NAME_RE, ROOM_NAME_RE } from "../types";
 import { decodeTextPayload, parseEncodedAttachments } from "./payload";
 import {
 	decodeUserApprovalReceipt,
@@ -18,17 +18,17 @@ import {
 } from "./realtime-types";
 import type { EncodedAttachment, EncodedTextPayload } from "./types";
 
-export const MESSAGE_STORAGE_VERSION = 3;
+export const MESSAGE_STORAGE_VERSION = 4;
 const UNSUPPORTED_STORAGE_MESSAGE =
 	"unsupported pre-release storage; start with an empty data directory";
 
 export class MessageIdConflictError extends Error {}
-export class ProjectConflictError extends Error {}
-export class UnknownProjectError extends Error {}
+export class RoomConflictError extends Error {}
+export class UnknownRoomError extends Error {}
 export class UnknownReplyTargetError extends Error {}
 export type MessageDraft = {
 	messageId: string;
-	project: string;
+	room: string;
 	from: { name: string; presenceId: string };
 	target: MessageTarget;
 	payload: EncodedTextPayload;
@@ -43,8 +43,8 @@ export type MessageAppendResult =
 	| { replayed: true; message: RealtimeMessage };
 
 type MessageRow = {
-	project: string;
-	project_sequence: number;
+	room: string;
+	room_sequence: number;
 	msg_id: string;
 	sender_name: string;
 	sender_presence_id: string;
@@ -59,7 +59,7 @@ type MessageRow = {
 	reply_to_sequence: number | null;
 };
 
-type ProjectRow = {
+type RoomRow = {
 	name: string;
 	display_name: string | null;
 	description: string | null;
@@ -69,8 +69,8 @@ type ProjectRow = {
 
 type SequenceRow = { next_sequence: number };
 
-const PROJECTS_SCHEMA = `
-	CREATE TABLE projects (
+const ROOMS_SCHEMA = `
+	CREATE TABLE rooms (
 		name TEXT PRIMARY KEY,
 		display_name TEXT,
 		description TEXT,
@@ -79,17 +79,17 @@ const PROJECTS_SCHEMA = `
 	)
 `;
 
-const PROJECT_SEQUENCES_SCHEMA = `
-	CREATE TABLE project_sequences (
-		project TEXT PRIMARY KEY NOT NULL,
+const ROOM_SEQUENCES_SCHEMA = `
+	CREATE TABLE room_sequences (
+		room TEXT PRIMARY KEY NOT NULL,
 		next_sequence INTEGER NOT NULL
 	)
 `;
 
 const MESSAGES_SCHEMA = `
 	CREATE TABLE messages (
-		project TEXT NOT NULL,
-		project_sequence INTEGER NOT NULL,
+		room TEXT NOT NULL,
+		room_sequence INTEGER NOT NULL,
 		msg_id TEXT NOT NULL UNIQUE,
 		sender_name TEXT NOT NULL,
 		sender_presence_id TEXT NOT NULL,
@@ -102,12 +102,12 @@ const MESSAGES_SCHEMA = `
 		user_approved INTEGER NOT NULL CHECK (user_approved IN (0, 1)),
 		created_at INTEGER NOT NULL,
 		reply_to_sequence INTEGER,
-		PRIMARY KEY(project, project_sequence)
+		PRIMARY KEY(room, room_sequence)
 	)
 `;
 
-const MESSAGES_PROJECT_SENDER_INDEX_SCHEMA =
-	"CREATE INDEX messages_project_sender ON messages(project, sender_name, project_sequence)";
+const MESSAGES_ROOM_SENDER_INDEX_SCHEMA =
+	"CREATE INDEX messages_room_sender ON messages(room, sender_name, room_sequence)";
 
 function normalizeSchema(sql: string): string {
 	return sql.replace(/\s+/g, " ").trim();
@@ -129,8 +129,8 @@ function storedStringArray(value: string | null, label: string): string[] {
 const CURRENT_SCHEMA = [
 	{
 		type: "index",
-		name: "messages_project_sender",
-		sql: normalizeSchema(MESSAGES_PROJECT_SENDER_INDEX_SCHEMA),
+		name: "messages_room_sender",
+		sql: normalizeSchema(MESSAGES_ROOM_SENDER_INDEX_SCHEMA),
 	},
 	{
 		type: "table",
@@ -139,20 +139,20 @@ const CURRENT_SCHEMA = [
 	},
 	{
 		type: "table",
-		name: "project_sequences",
-		sql: normalizeSchema(PROJECT_SEQUENCES_SCHEMA),
+		name: "room_sequences",
+		sql: normalizeSchema(ROOM_SEQUENCES_SCHEMA),
 	},
 	{
 		type: "table",
-		name: "projects",
-		sql: normalizeSchema(PROJECTS_SCHEMA),
+		name: "rooms",
+		sql: normalizeSchema(ROOMS_SCHEMA),
 	},
 ];
 
-function assertProjectName(name: unknown): asserts name is string {
-	if (typeof name !== "string" || !PROJECT_NAME_RE.test(name)) {
+function assertRoomName(name: unknown): asserts name is string {
+	if (typeof name !== "string" || !ROOM_NAME_RE.test(name)) {
 		throw new Error(
-			`invalid project name "${String(name)}" (use [a-zA-Z0-9._-], start alnum, max 64)`,
+			`invalid room name "${String(name)}" (use [a-zA-Z0-9._-], start alnum, max 64)`,
 		);
 	}
 }
@@ -160,11 +160,11 @@ function assertProjectName(name: unknown): asserts name is string {
 function optionalString(value: unknown, field: string): string | undefined {
 	if (value === undefined) return undefined;
 	if (typeof value !== "string")
-		throw new Error(`Project ${field} must be a string`);
+		throw new Error(`Room ${field} must be a string`);
 	return value;
 }
 
-function toProject(row: ProjectRow): A2aProject {
+function toRoom(row: RoomRow): A2aRoom {
 	return {
 		name: row.name,
 		displayName: row.display_name ?? undefined,
@@ -177,12 +177,12 @@ function toProject(row: ProjectRow): A2aProject {
 export class HubStore {
 	#database: Database;
 	#allocateSequence;
-	#deleteProject;
+	#deleteRoom;
 	#findById;
 	#findByRef;
-	#findProject;
+	#findRoom;
 	#insert;
-	#insertProject;
+	#insertRoom;
 	#append;
 
 	constructor(databasePath: string) {
@@ -194,9 +194,9 @@ export class HubStore {
 			this.#database.run("PRAGMA journal_mode = WAL");
 			this.#database.run("PRAGMA synchronous = FULL");
 			this.#allocateSequence = this.#database.query<SequenceRow, [string]>(`
-				INSERT INTO project_sequences(project, next_sequence)
+				INSERT INTO room_sequences(room, next_sequence)
 				VALUES (?, 1)
-				ON CONFLICT(project) DO UPDATE
+				ON CONFLICT(room) DO UPDATE
 				SET next_sequence = next_sequence + 1
 				RETURNING next_sequence
 			`);
@@ -204,48 +204,39 @@ export class HubStore {
 				"SELECT * FROM messages WHERE msg_id = ?",
 			);
 			this.#findByRef = this.#database.query<MessageRow, [string, number]>(
-				"SELECT * FROM messages WHERE project = ? AND project_sequence = ?",
+				"SELECT * FROM messages WHERE room = ? AND room_sequence = ?",
 			);
-			this.#findProject = this.#database.query<ProjectRow, [string]>(
-				"SELECT * FROM projects WHERE name = ?",
+			this.#findRoom = this.#database.query<RoomRow, [string]>(
+				"SELECT * FROM rooms WHERE name = ?",
 			);
 			this.#insert = this.#database.query(`
 				INSERT INTO messages(
-					project, project_sequence, msg_id, sender_name, sender_presence_id,
+					room, room_sequence, msg_id, sender_name, sender_presence_id,
 					target_kind, target_names, target_presence_ids, encoding, data,
 					attachments, user_approved, created_at, reply_to_sequence
 				) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
 			`);
-			this.#insertProject = this.#database.query(`
-				INSERT INTO projects(
+			this.#insertRoom = this.#database.query(`
+				INSERT INTO rooms(
 					name, display_name, description, created_at, created_by_cwd
 				) VALUES (?, ?, ?, ?, ?)
 			`);
-			this.#deleteProject = this.#database.transaction(
-				(project: string): boolean => {
-					if (!this.#findProject.get(project)) return false;
-					this.#database
-						.query("DELETE FROM messages WHERE project = ?")
-						.run(project);
-					this.#database
-						.query("DELETE FROM project_sequences WHERE project = ?")
-						.run(project);
-					this.#database
-						.query("DELETE FROM projects WHERE name = ?")
-						.run(project);
-					return true;
-				},
-			);
+			this.#deleteRoom = this.#database.transaction((room: string): boolean => {
+				if (!this.#findRoom.get(room)) return false;
+				this.#database.query("DELETE FROM messages WHERE room = ?").run(room);
+				this.#database
+					.query("DELETE FROM room_sequences WHERE room = ?")
+					.run(room);
+				this.#database.query("DELETE FROM rooms WHERE name = ?").run(room);
+				return true;
+			});
 			this.#append = this.#database.transaction(
 				(draft: MessageDraft): MessageAppendResult => {
 					const attachments = this.#validateDraft(draft);
-					if (!this.#findProject.get(draft.project)) {
-						throw new UnknownProjectError(`unknown project: ${draft.project}`);
+					if (!this.#findRoom.get(draft.room)) {
+						throw new UnknownRoomError(`unknown room: ${draft.room}`);
 					}
-					const replyToSequence = this.#resolveReply(
-						draft.project,
-						draft.replyTo,
-					);
+					const replyToSequence = this.#resolveReply(draft.room, draft.replyTo);
 					const existing = this.#findById.get(draft.messageId);
 					if (existing) {
 						if (!this.#matches(existing, draft, attachments, replyToSequence)) {
@@ -256,14 +247,14 @@ export class HubStore {
 						return { replayed: true, message: this.#toMessage(existing) };
 					}
 					const sequence = this.#allocateSequence.get(
-						draft.project,
+						draft.room,
 					)?.next_sequence;
 					if (!sequence)
 						throw new Error(
-							`failed to allocate message sequence for ${draft.project}`,
+							`failed to allocate message sequence for ${draft.room}`,
 						);
 					this.#insert.run(
-						draft.project,
+						draft.room,
 						sequence,
 						draft.messageId,
 						draft.from.name,
@@ -286,8 +277,8 @@ export class HubStore {
 						replayed: false,
 						message: {
 							messageId: draft.messageId,
-							messageRef: formatMessageRef(draft.project, sequence),
-							project: draft.project,
+							messageRef: formatMessageRef(draft.room, sequence),
+							room: draft.room,
 							sequence,
 							from: { ...draft.from },
 							target: { ...draft.target },
@@ -318,7 +309,7 @@ export class HubStore {
 		const existing = this.#findById.get(draft.messageId);
 		if (!existing) return null;
 		const attachments = this.#validateDraft(draft);
-		const replyToSequence = this.#resolveReply(draft.project, draft.replyTo);
+		const replyToSequence = this.#resolveReply(draft.room, draft.replyTo);
 		if (!this.#matches(existing, draft, attachments, replyToSequence)) {
 			throw new MessageIdConflictError(
 				`messageId already used with different content: ${draft.messageId}`,
@@ -327,53 +318,53 @@ export class HubStore {
 		return { replayed: true, message: this.#toMessage(existing) };
 	}
 
-	createProject(options: {
+	createRoom(options: {
 		name: string;
 		displayName?: string;
 		description?: string;
 		createdByCwd?: string;
-	}): A2aProject {
-		assertProjectName(options.name);
+	}): A2aRoom {
+		assertRoomName(options.name);
 		const displayName = optionalString(options.displayName, "displayName");
 		const description = optionalString(options.description, "description");
 		const createdByCwd = optionalString(options.createdByCwd, "createdByCwd");
-		if (this.#findProject.get(options.name)) {
-			throw new ProjectConflictError(`project already exists: ${options.name}`);
+		if (this.#findRoom.get(options.name)) {
+			throw new RoomConflictError(`room already exists: ${options.name}`);
 		}
-		const project: A2aProject = {
+		const room: A2aRoom = {
 			name: options.name,
 			displayName,
 			description,
 			createdAt: Date.now(),
 			createdByCwd,
 		};
-		this.#insertProject.run(
-			project.name,
-			project.displayName ?? null,
-			project.description ?? null,
-			project.createdAt,
-			project.createdByCwd ?? null,
+		this.#insertRoom.run(
+			room.name,
+			room.displayName ?? null,
+			room.description ?? null,
+			room.createdAt,
+			room.createdByCwd ?? null,
 		);
-		return project;
+		return room;
 	}
 
-	getProject(name: string): A2aProject | null {
-		assertProjectName(name);
-		const row = this.#findProject.get(name);
-		return row ? toProject(row) : null;
+	getRoom(name: string): A2aRoom | null {
+		assertRoomName(name);
+		const row = this.#findRoom.get(name);
+		return row ? toRoom(row) : null;
 	}
 
-	listProjects(): A2aProject[] {
+	listRooms(): A2aRoom[] {
 		return this.#database
-			.query<ProjectRow, []>("SELECT * FROM projects")
+			.query<RoomRow, []>("SELECT * FROM rooms")
 			.all()
-			.map(toProject)
+			.map(toRoom)
 			.sort((left, right) => left.name.localeCompare(right.name));
 	}
 
-	deleteProject(project: string): boolean {
-		assertProjectName(project);
-		return this.#deleteProject.immediate(project);
+	deleteRoom(room: string): boolean {
+		assertRoomName(room);
+		return this.#deleteRoom.immediate(room);
 	}
 
 	append(draft: MessageDraft): MessageAppendResult {
@@ -382,15 +373,15 @@ export class HubStore {
 
 	get(reference: string): RealtimeMessage | null {
 		const parsed = parseMessageRef(reference);
-		const row = this.#findByRef.get(parsed.project, parsed.sequence);
+		const row = this.#findByRef.get(parsed.room, parsed.sequence);
 		return row ? this.#toMessage(row) : null;
 	}
 
 	history(query: HistoryQuery): HistoryPage {
-		if (!PROJECT_NAME_RE.test(query.project))
-			throw new Error(`invalid project: ${query.project}`);
-		if (!this.#findProject.get(query.project)) {
-			throw new UnknownProjectError(`unknown project: ${query.project}`);
+		if (!ROOM_NAME_RE.test(query.room))
+			throw new Error(`invalid room: ${query.room}`);
+		if (!this.#findRoom.get(query.room)) {
+			throw new UnknownRoomError(`unknown room: ${query.room}`);
 		}
 		if (query.before && query.after)
 			throw new Error("history accepts before or after, not both");
@@ -399,20 +390,20 @@ export class HubStore {
 		const limit = query.limit ?? 50;
 		if (!Number.isSafeInteger(limit) || limit <= 0)
 			throw new Error("history limit must be a positive integer");
-		const params: Array<string | number> = [query.project];
-		const predicates = ["project = ?"];
+		const params: Array<string | number> = [query.room];
+		const predicates = ["room = ?"];
 		let ascending = false;
 		if (query.before) {
 			const ref = parseMessageRef(query.before);
-			if (ref.project !== query.project)
-				throw new Error("history cursor belongs to another project");
-			predicates.push("project_sequence < ?");
+			if (ref.room !== query.room)
+				throw new Error("history cursor belongs to another room");
+			predicates.push("room_sequence < ?");
 			params.push(ref.sequence);
 		} else if (query.after) {
 			const ref = parseMessageRef(query.after);
-			if (ref.project !== query.project)
-				throw new Error("history cursor belongs to another project");
-			predicates.push("project_sequence > ?");
+			if (ref.room !== query.room)
+				throw new Error("history cursor belongs to another room");
+			predicates.push("room_sequence > ?");
 			params.push(ref.sequence);
 			ascending = true;
 		}
@@ -426,7 +417,7 @@ export class HubStore {
 			.query<MessageRow, Array<string | number>>(
 				`SELECT * FROM messages
 				WHERE ${predicates.join(" AND ")}
-				ORDER BY project_sequence ${order}
+				ORDER BY room_sequence ${order}
 				LIMIT ?`,
 			)
 			.all(...params);
@@ -464,10 +455,10 @@ export class HubStore {
 					.get()?.user_version ?? 0;
 			if (schema.length === 0 && version === 0) {
 				if (databaseExisted) throw new Error(UNSUPPORTED_STORAGE_MESSAGE);
-				this.#database.run(PROJECTS_SCHEMA);
-				this.#database.run(PROJECT_SEQUENCES_SCHEMA);
+				this.#database.run(ROOMS_SCHEMA);
+				this.#database.run(ROOM_SEQUENCES_SCHEMA);
 				this.#database.run(MESSAGES_SCHEMA);
-				this.#database.run(MESSAGES_PROJECT_SENDER_INDEX_SCHEMA);
+				this.#database.run(MESSAGES_ROOM_SENDER_INDEX_SCHEMA);
 				this.#database.run(`PRAGMA user_version = ${MESSAGE_STORAGE_VERSION}`);
 				return;
 			}
@@ -480,12 +471,12 @@ export class HubStore {
 		})();
 	}
 
-	#resolveReply(project: string, replyTo: string | undefined): number | null {
+	#resolveReply(room: string, replyTo: string | undefined): number | null {
 		if (!replyTo) return null;
 		const parsed = parseMessageRef(replyTo);
-		if (parsed.project !== project)
-			throw new UnknownReplyTargetError("replyTo belongs to another project");
-		if (!this.#findByRef.get(project, parsed.sequence))
+		if (parsed.room !== room)
+			throw new UnknownReplyTargetError("replyTo belongs to another room");
+		if (!this.#findByRef.get(room, parsed.sequence))
 			throw new UnknownReplyTargetError(`unknown replyTo: ${replyTo}`);
 		return parsed.sequence;
 	}
@@ -493,8 +484,8 @@ export class HubStore {
 	#validateDraft(draft: MessageDraft): EncodedAttachment[] {
 		if (!MESSAGE_ID_RE.test(draft.messageId))
 			throw new Error(`invalid messageId: ${draft.messageId}`);
-		if (!PROJECT_NAME_RE.test(draft.project))
-			throw new Error(`invalid project: ${draft.project}`);
+		if (!ROOM_NAME_RE.test(draft.room))
+			throw new Error(`invalid room: ${draft.room}`);
 		if (!AGENT_NAME_RE.test(draft.from.name))
 			throw new Error(`invalid sender name: ${draft.from.name}`);
 		if (!draft.from.presenceId)
@@ -533,7 +524,7 @@ export class HubStore {
 		replyToSequence: number | null,
 	): boolean {
 		return (
-			row.project === draft.project &&
+			row.room === draft.room &&
 			row.sender_name === draft.from.name &&
 			row.target_kind === draft.target.type &&
 			row.target_names ===
@@ -573,9 +564,9 @@ export class HubStore {
 		const attachments = parseEncodedAttachments(JSON.parse(row.attachments));
 		return {
 			messageId: row.msg_id,
-			messageRef: formatMessageRef(row.project, row.project_sequence),
-			project: row.project,
-			sequence: row.project_sequence,
+			messageRef: formatMessageRef(row.room, row.room_sequence),
+			room: row.room,
+			sequence: row.room_sequence,
 			from: {
 				name: row.sender_name,
 				presenceId: row.sender_presence_id,
@@ -588,7 +579,7 @@ export class HubStore {
 			replyTo:
 				row.reply_to_sequence == null
 					? undefined
-					: formatMessageRef(row.project, row.reply_to_sequence),
+					: formatMessageRef(row.room, row.reply_to_sequence),
 		};
 	}
 }

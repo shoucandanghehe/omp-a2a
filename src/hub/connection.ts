@@ -112,7 +112,7 @@ type DeliveryOutcomeFrame = Extract<
 
 export class A2aConnection {
 	#socket: WebSocket;
-	#project: string;
+	#room: string;
 	#name: string;
 	#self: Peer | null = null;
 	#peers = new Map<string, Peer>();
@@ -147,13 +147,13 @@ export class A2aConnection {
 
 	private constructor(
 		baseUrl: string,
-		project: string,
+		room: string,
 		name: string,
 		events: A2aConnectionEvents,
 		goodbyeTimeoutMs: number,
 		closeTimeoutMs: number,
 	) {
-		this.#project = project;
+		this.#room = room;
 		this.#name = name;
 		this.#events = events;
 		this.#goodbyeTimeoutMs = goodbyeTimeoutMs;
@@ -173,7 +173,7 @@ export class A2aConnection {
 			this.#send({
 				type: "hello",
 				protocolVersion: A2A_PROTOCOL_VERSION,
-				project: this.#project,
+				room: this.#room,
 				name: this.#name,
 			}),
 		);
@@ -192,7 +192,7 @@ export class A2aConnection {
 
 	static async connect(options: {
 		baseUrl: string;
-		project: string;
+		room: string;
 		name: string;
 		events?: A2aConnectionEvents;
 		signal?: AbortSignal;
@@ -221,7 +221,7 @@ export class A2aConnection {
 		);
 		const connection = new A2aConnection(
 			options.baseUrl,
-			options.project,
+			options.room,
 			options.name,
 			options.events ?? {},
 			goodbyeTimeoutMs,
@@ -256,8 +256,8 @@ export class A2aConnection {
 		}
 	}
 
-	get project(): string {
-		return this.#project;
+	get room(): string {
+		return this.#room;
 	}
 
 	get name(): string {

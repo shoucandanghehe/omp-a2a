@@ -45,7 +45,7 @@ type PendingDelivery = {
 export class RealtimeHub {
 	#server: Server;
 	#wss: WebSocketServer;
-	#store: Pick<HubStore, "append" | "replay" | "getProject">;
+	#store: Pick<HubStore, "append" | "replay" | "getRoom">;
 	#presences = new PresenceRegistry();
 	#alive = new Map<WebSocket, boolean>();
 	#closeReasons = new Map<
@@ -66,7 +66,7 @@ export class RealtimeHub {
 
 	constructor(
 		server: Server,
-		store: Pick<HubStore, "append" | "replay" | "getProject">,
+		store: Pick<HubStore, "append" | "replay" | "getRoom">,
 		options: RealtimeHubOptions = {},
 	) {
 		this.#server = server;
@@ -109,8 +109,8 @@ export class RealtimeHub {
 		);
 	}
 
-	count(project: string): number {
-		return this.#presences.count(project);
+	count(room: string): number {
+		return this.#presences.count(room);
 	}
 
 	close(): Promise<void> {
@@ -238,24 +238,24 @@ export class RealtimeHub {
 			if (frame.protocolVersion !== A2A_PROTOCOL_VERSION) {
 				throw new Error(`Hub requires protocol ${A2A_PROTOCOL_VERSION}`);
 			}
-			if (typeof frame.project !== "string" || typeof frame.name !== "string") {
-				throw new Error("project and name are required");
+			if (typeof frame.room !== "string" || typeof frame.name !== "string") {
+				throw new Error("room and name are required");
 			}
-			if (!this.#store.getProject(frame.project))
-				throw new Error(`unknown project: ${frame.project}`);
+			if (!this.#store.getRoom(frame.room))
+				throw new Error(`unknown room: ${frame.room}`);
 			const { self, peers } = this.#presences.claim(
-				frame.project,
+				frame.room,
 				frame.name,
 				socket,
 			);
 			this.#send(socket, {
 				type: "claimed",
 				protocolVersion: A2A_PROTOCOL_VERSION,
-				project: self.project,
+				room: self.room,
 				self: { name: self.name, presenceId: self.presenceId },
 				peers,
 			});
-			this.#broadcast(self.project, self.presenceId, {
+			this.#broadcast(self.room, self.presenceId, {
 				type: "presence_joined",
 				peer: { name: self.name, presenceId: self.presenceId },
 			});
@@ -306,7 +306,7 @@ export class RealtimeHub {
 
 			const draft: MessageDraft = {
 				messageId: frame.messageId,
-				project: presence.project,
+				room: presence.room,
 				from: { name: presence.name, presenceId: presence.presenceId },
 				target:
 					target[0] === ALL_TARGET
@@ -334,7 +334,7 @@ export class RealtimeHub {
 				const resolved: Presence[] = [];
 				const missing: string[] = [];
 				for (const name of draft.target.names) {
-					const recipient = this.#presences.get(presence.project, name);
+					const recipient = this.#presences.get(presence.room, name);
 					if (!recipient) {
 						missing.push(name);
 						continue;
@@ -371,7 +371,7 @@ export class RealtimeHub {
 					return;
 				}
 				recipients = this.#presences
-					.connections(presence.project)
+					.connections(presence.room)
 					.filter((recipient) => recipient.presenceId !== presence.presenceId);
 			}
 
@@ -531,7 +531,7 @@ export class RealtimeHub {
 				});
 		}
 		if (!this.#closing) {
-			this.#broadcast(presence.project, presence.presenceId, {
+			this.#broadcast(presence.room, presence.presenceId, {
 				type: "presence_left",
 				peer: { name: presence.name, presenceId: presence.presenceId },
 				reason,
@@ -541,11 +541,11 @@ export class RealtimeHub {
 	}
 
 	#broadcast(
-		project: string,
+		room: string,
 		excludedPresenceId: string,
 		frame: ServerFrame,
 	): void {
-		for (const presence of this.#presences.connections(project)) {
+		for (const presence of this.#presences.connections(room)) {
 			if (presence.presenceId !== excludedPresenceId)
 				this.#send(presence.socket, frame);
 		}

@@ -63,10 +63,10 @@ async function main() {
 			JSON.stringify({ ok: true, service: "omp-a2a-hub" }),
 		"Hub health response stays minimal",
 	);
-	await client.createProject({ name: "mesh-demo" });
+	await client.createRoom({ name: "mesh-demo" });
 	assert(
-		(await otherClient.listProjects()).length === 0,
-		"Hub Projects are isolated",
+		(await otherClient.listRooms()).length === 0,
+		"Hub Rooms are isolated",
 	);
 	const joined = new AsyncQueue<string>();
 
@@ -76,7 +76,7 @@ async function main() {
 	const testMessages = new AsyncQueue<RealtimeMessage>();
 	const api = await A2aConnection.connect({
 		baseUrl: first.listenUrl,
-		project: "mesh-demo",
+		room: "mesh-demo",
 		name: "api",
 		events: {
 			onDelivery: (delivery) => deliveries.push(delivery),
@@ -85,14 +85,14 @@ async function main() {
 	});
 	const web = await A2aConnection.connect({
 		baseUrl: first.listenUrl,
-		project: "mesh-demo",
+		room: "mesh-demo",
 		name: "web",
 		events: { onMessage: (message) => webMessages.push(message) },
 	});
 	assert((await joined.next()) === "web", "web join is announced");
 	const test = await A2aConnection.connect({
 		baseUrl: first.listenUrl,
-		project: "mesh-demo",
+		room: "mesh-demo",
 		name: "test",
 		events: { onMessage: (message) => testMessages.push(message) },
 	});
@@ -113,7 +113,7 @@ async function main() {
 	});
 	assert(
 		named.message.messageRef === "mesh-demo:1",
-		"named message receives Project sequence",
+		"named message receives Room sequence",
 	);
 	assert(
 		decodeTextPayload((await webMessages.next()).payload) === "hello",
@@ -188,7 +188,7 @@ async function main() {
 	handles.push(restarted);
 	const restartedClient = new HubClient(restarted.listenUrl);
 	const history = await restartedClient.history({
-		project: "mesh-demo",
+		room: "mesh-demo",
 		limit: 10,
 	});
 	assert(history.messages.length === 3, "history survives Hub restart");
@@ -203,7 +203,7 @@ async function main() {
 	);
 	const replacement = await A2aConnection.connect({
 		baseUrl: restarted.listenUrl,
-		project: "mesh-demo",
+		room: "mesh-demo",
 		name: "web",
 	});
 	assert(
@@ -211,22 +211,22 @@ async function main() {
 		"Presence does not survive Hub restart",
 	);
 
-	console.log("\n== safe Project deletion ==");
+	console.log("\n== safe Room deletion ==");
 	let activeDeleteRejected = false;
 	try {
-		await restartedClient.deleteProject("mesh-demo");
+		await restartedClient.deleteRoom("mesh-demo");
 	} catch {
 		activeDeleteRejected = true;
 	}
-	assert(activeDeleteRejected, "active Presence blocks Project deletion");
+	assert(activeDeleteRejected, "active Presence blocks Room deletion");
 	await replacement.close();
 	assert(
-		await restartedClient.deleteProject("mesh-demo"),
-		"inactive Project deletes with its history",
+		await restartedClient.deleteRoom("mesh-demo"),
+		"inactive Room deletes with its history",
 	);
 	assert(
-		!(await restartedClient.deleteProject("mesh-demo")),
-		"Project deletion is idempotent",
+		!(await restartedClient.deleteRoom("mesh-demo")),
+		"Room deletion is idempotent",
 	);
 
 	console.log("\n== PASS ==");

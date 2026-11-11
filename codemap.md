@@ -2,9 +2,9 @@
 
 ## Project responsibility
 
-`omp-a2a` provides anonymous realtime Agent chat between independent Oh My Pi (OMP) processes. A standalone Hub owns persistent Projects and message history, current WebSocket Presence, and realtime routing. The OMP extension is a pure client.
+`omp-a2a` provides anonymous realtime Agent chat between independent Oh My Pi (OMP) processes. A standalone Hub owns persistent Rooms and message history, current WebSocket Presence, and realtime routing. The OMP extension is a pure client.
 
-The wire protocol is private version `5`. It is not the standard A2A protocol, requires matching Hub and extension versions, and assumes a fully trusted private network.
+The wire protocol is private version `6`. It is not the standard A2A protocol, requires matching Hub and extension versions, and assumes a fully trusted private network.
 
 ## System entry points
 
@@ -14,10 +14,10 @@ The wire protocol is private version `5`. It is not the standard A2A protocol, r
 - `src/hub/realtime-server.ts`: WebSocket Presence, realtime routing, delivery outcomes, heartbeat, and shutdown.
 - `claude-code/`: Claude Code plugin loaded in place from `.claude-plugin/marketplace.json` or `--plugin-dir`; its MCP server `src/claude-code/main.ts` joins a Claude Code session as a Presence and delivers inbound Messages as Channel events.
 - `src/operations.ts`: `A2aRuntime`, the extension-facing module over HTTP and WebSocket clients.
-- `scripts/smoke.ts`: persistent SQLite Project-store smoke.
+- `scripts/smoke.ts`: persistent SQLite Room-store smoke.
 - `scripts/smoke-hub.ts`: in-process HTTP/WebSocket/persistence smoke.
 - `scripts/smoke-docker.ts`: public boundary smoke against an already-running Hub.
-- `scripts/migrate-storage.ts`: explicit locked storage version 2 to 3 conversion; never part of Hub startup.
+- `scripts/migrate-storage.ts`: explicit locked storage version 3 to 4 conversion; never part of Hub startup.
 
 ## Architecture
 
@@ -30,26 +30,26 @@ OMP session
              A2aRuntime
        ┌─────────┴─────────┐
        │ HTTP              │ WebSocket
-       │ Projects/history  │ Presence/messages/delivery
+       │ Rooms/history  │ Presence/messages/delivery
        ▼                   ▼
               standalone Hub
        ┌───────────────┴───────────────┐
        │                               │
     in-memory                       SQLite
-    Presence              Project metadata + message history
+    Presence              Room metadata + message history
 ```
 
 ### Control and history plane
 
-`HubClient` uses bounded, caller-cancellable HTTP requests for Hub metadata, Project create/list/delete, and explicit history queries. It validates successful wire responses before exposing them to the runtime and never retries automatically. Project metadata, per-Project sequence, and Messages share `<dataDir>/messages.sqlite`. Deletion is rejected while a Project has an active Presence, then removes all three durable facts in one SQLite transaction.
+`HubClient` uses bounded, caller-cancellable HTTP requests for Hub metadata, Room create/list/delete, and explicit history queries. It validates successful wire responses before exposing them to the runtime and never retries automatically. Room metadata, per-Room sequence, and Messages share `<dataDir>/messages.sqlite`. Deletion is rejected while a Room has an active Presence, then removes all three durable facts in one SQLite transaction.
 
 ### Realtime plane
 
 1. `A2aConnection` opens `/v1/connect`, sends a versioned `hello`, and waits at most 5 seconds (or until caller cancellation) for the claim. The first handshake outcome remains authoritative while the failed socket is torn down.
-2. `RealtimeHub` verifies the Project and atomically claims the name in `PresenceRegistry`.
+2. `RealtimeHub` verifies the Room and atomically claims the name in `PresenceRegistry`.
 3. The client receives its `presenceId` and the current peer snapshot; current peers receive `presence_joined`.
-4. A named target request checks idempotency, resolves every requested Presence, then persists. An `@all` request persists first and, only for a new acceptance, enumerates current Project Presence once into a local array.
-5. `HubStore` verifies the Project and atomically appends one immutable Message—including encoded attachment content—while assigning the next Project sequence; an identical existing `messageId` returns `replayed`.
+4. A named target request checks idempotency, resolves every requested Presence, then persists. An `@all` request persists first and, only for a new acceptance, enumerates current Room Presence once into a local array.
+5. `HubStore` verifies the Room and atomically appends one immutable Message—including encoded attachment content—while assigning the next Room sequence; an identical existing `messageId` returns `replayed`.
 6. The Hub synchronously enqueues the Message once to each selected concrete socket and keeps one bounded in-memory ACK record per `(messageId, recipientPresenceId)`.
 7. Each receiver materializes attachments, injects the Message into OMP, then reports `delivered` or `delivery_failed`.
 8. The sender receives one terminal in-memory `delivered` or `failed` outcome per selected Presence; write errors, disconnects, and a two-second ACK timeout are unconfirmed failures.
@@ -61,15 +61,15 @@ A same-named later connection is a new Presence and never inherits pending Deliv
 
 ### Persistent store contract
 
-- `HubStore` is the single canonical owner of persistent Project metadata, Project sequence, and Messages.
-- Message references are `<project>:<sequence>` and sequence is monotonic per Project.
+- `HubStore` is the single canonical owner of persistent Room metadata, Room sequence, and Messages.
+- Message references are `<room>:<sequence>` and sequence is monotonic per Room.
 - `messageId` is the persistent idempotency key; conflicting reuse fails and identical reuse returns the canonical Message as `replayed` without Presence enumeration or redelivery.
-- `replyTo` must resolve inside the same Project.
+- `replyTo` must resolve inside the same Room.
 - Named targets are bound to their resolved `presenceId`s; `@all` messages persist before one local Presence enumeration and never persist their recipient array.
-- History is append-only until Project deletion. Presence, recipient arrays, ACK trackers, and delivery events are not persisted.
+- History is append-only until Room deletion. Presence, recipient arrays, ACK trackers, and delivery events are not persisted.
 - Attachments are ordered immutable values inside a Message. Their names and bytes participate in `messageId` idempotency; they share the Message lifecycle.
-- `messages.sqlite` has an independent storage version, currently `3`, with `projects`, `project_sequences`, and `messages` tables plus the sender-history index. Startup accepts only the exact current version and complete set of current non-internal schema objects; unsupported storage fails closed.
-- `bun run migrate:storage --data-dir <path>` explicitly converts version 2 target columns and values under `HubDataLock`, preserving other durable Message facts. Conversion commits before the CLI validates the resulting schema through `HubStore`; current-version storage returns without schema validation. Operators must stop the Hub and back up its data before migration.
+- `messages.sqlite` has an independent storage version, currently `4`, with `rooms`, `room_sequences`, and `messages` tables plus the sender-history index. Startup accepts only the exact current version and complete set of current non-internal schema objects; unsupported storage fails closed.
+- `bun run migrate:storage --data-dir <path>` explicitly converts version 3 table, column, and index names to version 4 under `HubDataLock`, preserving every row and value. Conversion commits before the CLI validates the resulting schema through `HubStore`; current-version storage returns without schema validation. Operators must stop the Hub and back up its data before migration.
 
 ### Payload contract
 
@@ -84,7 +84,7 @@ Hub URL precedence is:
 
 Missing configuration fails explicitly. The resolved client URL is authoritative for HTTP and WebSocket connections. Hub metadata is exactly `{protocolVersion}` and only validates compatibility; health is exactly `{ok:true,service:"omp-a2a-hub"}`. Neither response advertises a route. In-process server callers receive a `listenUrl` that preserves an explicit bind host and maps wildcard IPv4/IPv6 binds to loopback.
 
-Repository-local connection defaults require `project` and `name`; `autoConnect` defaults to enabled. Removed `agentId` and `autoJoin` fields fail with an explicit migration error.
+Repository-local connection defaults require `room` and `name`; `autoConnect` defaults to enabled. Removed `agentId` and `autoJoin` fields fail with an explicit migration error.
 
 If a command reload finds the repository-local configuration invalid, the Extension closes the current Presence, clears reconnect intent, and blocks fallback Hub access until a successful reload or Session switch.
 
@@ -94,21 +94,21 @@ The Hub runs locally with `bun run hub` or in Docker Compose. The CLI alone reso
 
 ### Human commands
 
-`/a2a` provides Hub status, Project create/list/delete, connect/disconnect, current status, peer listing, and explicit history. Its synchronous completion tree covers root commands, Project subcommands, `connect --as`, and compatible history flags.
+`/a2a` provides Hub status, Room create/list/delete, connect/disconnect, current status, peer listing, and explicit history. Its synchronous completion tree covers root commands, Room subcommands, `connect --as`, and compatible history flags.
 
 Read-only results persist as visible `/a2a` transcript cards and are filtered out of model context. Action results, connection lifecycle, Presence, delivery, and errors remain transient UI notifications.
 
 ### Model tools
 
-- `a2a_peers`: current Presence names in the connected Project, plus the magic `@all` target.
+- `a2a_peers`: current Presence names in the connected Room, plus the magic `@all` target.
 - `a2a_message`: one or more named recipients, `@all`, or a causal reply, with optional current-session `local://` attachment sources; sending is fire-and-forget, so the model continues other work it already has or ends its turn.
 - `a2a_history`: deliberate lookup of already-persisted context, never a reply-waiting primitive.
 
-`a2a_message` can optionally request local OMP UI approval before sending. The proposing Agent owns that request and must obtain approval at its own sending endpoint; a receiver never asks its local user on the sender's behalf. For an unsigned approval-gated request, the receiver tells the sender to preserve target, text, causal parent, and attachments but use a new `messageId` and request approval at the sending endpoint; reusing the unsigned ID would conflict because the receipt changes persisted Message content. Forked OMP versions advertise `askDialogCapabilities.allowCustomInput` when `localAskDialog` can disable custom input; official OMP and older forks lack that marker and fall back to `confirm`/`input`, so every supported path hides Type. The UI reviews a human-readable summary containing only the target, text, and attachment names and source URLs. The Extension independently binds approval to the sending Presence, Project, exact `messageId`, target, text, causal parent, and snapshotted attachment names and bytes before adding a non-cryptographic `omp-ui` receipt. The receipt belongs only to that immutable Message and never propagates through replies, forwarding, or delegation. Rejection may return an exact user reason and suppresses an identical repeat for the same sending Presence and Message facts within the Session; cancellation sends nothing and is not cached. Model-visible inbound and history metadata labels the state as `senderUserApproval: "confirmed" | "unsigned"`.
+`a2a_message` can optionally request local OMP UI approval before sending. The proposing Agent owns that request and must obtain approval at its own sending endpoint; a receiver never asks its local user on the sender's behalf. For an unsigned approval-gated request, the receiver tells the sender to preserve target, text, causal parent, and attachments but use a new `messageId` and request approval at the sending endpoint; reusing the unsigned ID would conflict because the receipt changes persisted Message content. Forked OMP versions advertise `askDialogCapabilities.allowCustomInput` when `localAskDialog` can disable custom input; official OMP and older forks lack that marker and fall back to `confirm`/`input`, so every supported path hides Type. The UI reviews a human-readable summary containing only the target, text, and attachment names and source URLs. The Extension independently binds approval to the sending Presence, Room, exact `messageId`, target, text, causal parent, and snapshotted attachment names and bytes before adding a non-cryptographic `omp-ui` receipt. The receipt belongs only to that immutable Message and never propagates through replies, forwarding, or delegation. Rejection may return an exact user reason and suppresses an identical repeat for the same sending Presence and Message facts within the Session; cancellation sends nothing and is not cached. Model-visible inbound and history metadata labels the state as `senderUserApproval: "confirmed" | "unsigned"`.
 
-Every model turn receives byte-identical A2A system-prompt additions containing the exact `xd://` tool addresses, sending rules, peer-request handling, and approval rules; connection status, Project, and roster name never change that prefix. The Extension instead appends hidden `a2a-connection` context messages: idle transitions coalesce to the latest state for the next turn or inbound Message, busy transitions enter the active turn through `steer`, and a simultaneous idle Presence delta combines with the connection update as `a2a-context`. Models send only when a specific peer needs the message, choose recipients per message, and report their own progress to their own user. Peer requests are normal work requests and need no signature. Extension-injected `confirmed` means the sender's user approved the Message, so the receiver executes without asking its own user again; an unsigned request that needs approval returns to its sender for a signed resend.
+Every model turn receives byte-identical A2A system-prompt additions containing the exact `xd://` tool addresses, sending rules, peer-request handling, and approval rules; connection status, Room, and roster name never change that prefix. The Extension instead appends hidden `a2a-connection` context messages: idle transitions coalesce to the latest state for the next turn or inbound Message, busy transitions enter the active turn through `steer`, and a simultaneous idle Presence delta combines with the connection update as `a2a-context`. Models send only when a specific peer needs the message, choose recipients per message, and report their own progress to their own user. Peer requests are normal work requests and need no signature. Extension-injected `confirmed` means the sender's user approved the Message, so the receiver executes without asking its own user again; an unsigned request that needs approval returns to its sender for a signed resend.
 
-Idle Presence churn is collapsed by comparing the roster at the last terminal `agent_end` with the current roster; at most one hidden `a2a-presence` delta enters model context before the next inbound Message or model turn, and net-zero churn disappears. Busy sessions receive each Presence change through `steer`. Inbound Messages are pushed through OMP `sendMessage` in Hub-assigned Project sequence using `steer` delivery: idle sessions start a turn and busy sessions queue the Message into the active turn. Injection rechecks the published connection token and Session generation after cancellable attachment materialization; stale work reports failed delivery. Models never wait, sleep, or poll history for replies.
+Idle Presence churn is collapsed by comparing the roster at the last terminal `agent_end` with the current roster; at most one hidden `a2a-presence` delta enters model context before the next inbound Message or model turn, and net-zero churn disappears. Busy sessions receive each Presence change through `steer`. Inbound Messages are pushed through OMP `sendMessage` in Hub-assigned Room sequence using `steer` delivery: idle sessions start a turn and busy sessions queue the Message into the active turn. Injection rechecks the published connection token and Session generation after cancellable attachment materialization; stale work reports failed delivery. Models never wait, sleep, or poll history for replies.
 The sender Extension snapshots attachment bytes before sending and fences the final send to the initiating Session and published connection. Receivers and history callers materialize new URLs in their own session-local storage; caller cancellation or Session/connection shutdown stops attachment I/O and removes every uncommitted output directory, including completed siblings of a failed batch. The Hub never resolves `local://`.
 
 ## Root asset map
@@ -118,7 +118,7 @@ The sender Extension snapshots attachment bytes before sending and fences the fi
 | `package.json` | Bun metadata, pinned toolchain, OMP extension registration, Hub executable, build, check, storage migration, and smoke scripts. |
 | `bun.lock` | Locked dependency graph. |
 | `biome.json` | Canonical formatting, lint, and import-organization policy. |
-| `tsconfig.json` | Strict TypeScript 7 no-emit project boundary for source, scripts, and tests. |
+| `tsconfig.json` | Strict TypeScript 7 no-emit room boundary for source, scripts, and tests. |
 | `.github/workflows/ci.yml` | Read-only source quality and real container smoke gates. |
 | `.github/dependabot.yml` | Weekly Bun, GitHub Actions, and Docker dependency updates. |
 | `AGENTS.md` | Repository map, commit-message style, signing, and history-rewrite rules. |
@@ -133,7 +133,7 @@ The sender Extension snapshots attachment bytes before sending and fences the fi
 
 | Directory | Responsibility | Detailed map |
 | --- | --- | --- |
-| `src/` | OMP adapter, runtime, configuration, Project domain names, and Hub storage paths. | [`src/codemap.md`](src/codemap.md) |
+| `src/` | OMP adapter, runtime, configuration, Room domain names, and Hub storage paths. | [`src/codemap.md`](src/codemap.md) |
 | `src/claude-code/` | Claude Code MCP adapter over `A2aRuntime`: Channel delivery, four tools, elicitation approvals, file-path attachments. | This table |
 | `claude-code/` | Claude Code plugin manifest, `/a2a` command, and entry shim. | This table |
 | `src/hub/` | HTTP/WebSocket protocol, Presence, routing, canonical SQLite persistence, payloads, locking, and process lifecycle. | [`src/hub/codemap.md`](src/hub/codemap.md) |
@@ -143,7 +143,7 @@ The sender Extension snapshots attachment bytes before sending and fences the fi
 
 ## Verification
 
-`bun run check` enforces zero-warning Biome CI checks and strict TypeScript 7 no-emit checking. `bun run verify` adds both Bun entry-point builds, all Bun tests, the SQLite Project-store smoke, and the live in-process Hub smoke. It covers current storage guards, bounded WebSocket lifecycles, caller cancellation, Presence routing, replay without redelivery, single-attempt Delivery cleanup, attachment ownership and history, uncapped trusted payload/history behavior, Hub restart/cleanup, extension lifecycle, and command completion. `bun run audit` rejects high or critical advisories in production dependencies.
+`bun run check` enforces zero-warning Biome CI checks and strict TypeScript 7 no-emit checking. `bun run verify` adds both Bun entry-point builds, all Bun tests, the SQLite Room-store smoke, and the live in-process Hub smoke. It covers current storage guards, bounded WebSocket lifecycles, caller cancellation, Presence routing, replay without redelivery, single-attempt Delivery cleanup, attachment ownership and history, uncapped trusted payload/history behavior, Hub restart/cleanup, extension lifecycle, and command completion. `bun run audit` rejects high or critical advisories in production dependencies.
 
 GitHub Actions runs those source and dependency gates alongside an independent Docker Compose job that validates the model, waits for the real container health check, crosses its HTTP/WebSocket boundary with `bun run smoke:docker`, prints logs on failure, and always removes containers and volumes. Third-party actions are commit-SHA pinned; workflow permissions are read-only; superseded runs are cancelled. Dependabot checks the Bun lockfile, action pins, and Docker base image weekly.
 
@@ -153,5 +153,5 @@ The implemented realtime model is documented in [`docs/realtime-presence-archite
 
 - No authentication, authorization, tenant isolation, or confidentiality guarantee exists.
 - Established WebSockets do not move when `hubUrl` changes; disconnect and reconnect.
-- Ordinary Hub metadata, Project, and history HTTP calls have a 15-second default deadline; caller cancellation covers headers and response-body reading.
+- Ordinary Hub metadata, Room, and history HTTP calls have a 15-second default deadline; caller cancellation covers headers and response-body reading.
 - The default Compose port publication binds all host interfaces unless the operator narrows it.

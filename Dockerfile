@@ -11,7 +11,7 @@ COPY src ./src
 
 ENV NODE_ENV=production
 
-# Persist Project metadata and append-only message history.
+# Persist Room metadata and append-only message history.
 RUN mkdir -p /data/omp-a2a && chown -R bun:bun /data /app
 USER bun
 

@@ -4,9 +4,9 @@
 
 `src/hub/` implements the private versioned protocol and all Hub-owned runtime and persistent state:
 
-- HTTP Project administration and explicit history;
+- HTTP Room administration and explicit history;
 - WebSocket Presence, realtime messages, and delivery outcomes;
-- versioned SQLite Project metadata, sequence, and append-only message history;
+- versioned SQLite Room metadata, sequence, and append-only message history;
 - functional payload encoding, decoding, and structural validation without application resource caps;
 - exclusive data-directory ownership and process lifecycle.
 
@@ -18,9 +18,9 @@
 | `server.ts` | Express routes, explicit HTTP listener lifecycle, storage ownership, and WebSocket attachment. | `startHubServer`, `HubServerHandle`, `HubDataDirInUseError` |
 | `realtime-server.ts` | Upgrade handling, handshake, Presence events, routing, delivery tracking, heartbeat, and shutdown. | `RealtimeHub`, `RealtimeHubOptions` |
 | `connection.ts` | Extension-side WebSocket protocol client, bounded handshakes/message requests, serial receive/ack, and graceful close. | `A2aConnection.connect`, `send`, `close`, `A2aConnectionEvents` |
-| `presence.ts` | In-memory Project/name/socket indexes. | `PresenceRegistry`, `Presence`, `NameInUseError` |
-| `store.ts` | Versioned SQLite Project metadata, sequences, Messages, history, atomic deletion, idempotency, and fail-closed schema guard. | `HubStore`, `MessageIdConflictError`, `ProjectConflictError`, `UnknownProjectError`, `UnknownReplyTargetError` |
-| `client.ts` | Hub URL resolution and HTTP meta/Project/history client. | `HubClient`, `probeHub`, `connectHub`, `resolveHubUrl`, HTTP error classes |
+| `presence.ts` | In-memory Room/name/socket indexes. | `PresenceRegistry`, `Presence`, `NameInUseError` |
+| `store.ts` | Versioned SQLite Room metadata, sequences, Messages, history, atomic deletion, idempotency, and fail-closed schema guard. | `HubStore`, `MessageIdConflictError`, `RoomConflictError`, `UnknownRoomError`, `UnknownReplyTargetError` |
+| `client.ts` | Hub URL resolution and HTTP meta/Room/history client. | `HubClient`, `probeHub`, `connectHub`, `resolveHubUrl`, HTTP error classes |
 | `realtime-types.ts` | Versioned WebSocket frames, canonical realtime Message decoding, tagged target/approval shapes, public realtime/history types, message identifiers, and canonical references. | protocol types, `decodeRealtimeMessage`, `decodeUserApprovalReceipt`, `A2A_PROTOCOL_VERSION`, reference helpers |
 | `payload.ts` | Exact payload/attachment wire parsing, canonical Base64 decoding, structural attachment-name validation, and text/binary codecs. | codecs, `parseEncodedAttachments`, `validateAttachmentName` |
 | `data-lock.ts` | Exclusive ownership of one Hub data directory. | `HubDataLock`, `HubDataDirInUseError` |
@@ -34,27 +34,27 @@
 | --- | --- |
 | `GET /healthz` | Exactly `{ok:true,service:"omp-a2a-hub"}`. |
 | `GET /v1/meta` | Exactly `{protocolVersion}` for compatibility checks. |
-| `GET /v1/projects` | Sorted persistent Project list. |
-| `POST /v1/projects` | Create Project metadata; duplicate returns `409`. |
-| `DELETE /v1/projects/:name` | Reject active Presence, then atomically remove metadata, sequence, and complete history. |
-| `GET /v1/history` | Query one existing Project by cursor, sender name, and any explicit positive integer limit. |
+| `GET /v1/rooms` | Sorted persistent Room list. |
+| `POST /v1/rooms` | Create Room metadata; duplicate returns `409`. |
+| `DELETE /v1/rooms/:name` | Reject active Presence, then atomically remove metadata, sequence, and complete history. |
+| `GET /v1/history?room=<name>` | Query one existing Room by cursor, sender name, and any explicit positive integer limit. |
 | `GET /v1/connect` upgrade | Hand the socket to `RealtimeHub`. |
 
 Neither public response contains a route, PID, port, start time, or data-directory detail. Clients retain their resolved configuration URL as the authoritative HTTP and WebSocket route.
 
 ## WebSocket protocol
 
-`A2A_PROTOCOL_VERSION` is `5`.
+`A2A_PROTOCOL_VERSION` is `6`.
 
 ### Handshake
 
 1. A new socket must send `hello`; the client waits at most 5 seconds by default and may cancel through a caller `AbortSignal`.
-2. The frame supplies protocol version, Project, and temporary name.
-3. The Hub verifies the Project and protocol, then claims the name in `PresenceRegistry`.
+2. The frame supplies protocol version, Room, and temporary name.
+3. The Hub verifies the Room and protocol, then claims the name in `PresenceRegistry`.
 4. The claimant receives `claimed` with a new `presenceId` and current peer snapshot.
 5. Existing peers receive `presence_joined`.
 
-Handshake failure, timeout, or cancellation terminates the unpublished socket and waits for its close before returning. The first settled handshake outcome remains authoritative through teardown: caller cancellation preserves its exact reason only when abort wins, and a later abort cannot replace a timeout, protocol, or transport failure. Lifecycle timeout overrides must be finite, positive, and no greater than the 5-second handshake, 1-second goodbye, and 2-second close bounds; invalid or over-limit options reject before opening a socket. One socket can claim one name. One name can be held by one current socket inside a Project. A duplicate fails with `name_in_use`; it never replaces the owner.
+Handshake failure, timeout, or cancellation terminates the unpublished socket and waits for its close before returning. The first settled handshake outcome remains authoritative through teardown: caller cancellation preserves its exact reason only when abort wins, and a later abort cannot replace a timeout, protocol, or transport failure. Lifecycle timeout overrides must be finite, positive, and no greater than the 5-second handshake, 1-second goodbye, and 2-second close bounds; invalid or over-limit options reject before opening a socket. One socket can claim one name. One name can be held by one current socket inside a Room. A duplicate fails with `name_in_use`; it never replaces the owner.
 
 ### Message request
 
@@ -63,7 +63,7 @@ The client sends `message` with `requestId`, opaque `messageId`, a non-empty req
 - A repeated, content-identical `messageId` (including user-approval receipt presence/value) returns the canonical stored Message as `replayed: true` without resolving or enumerating Presence and without delivery. Target names are canonicalized to a sorted unique set before comparison.
 - A new named target resolves every name and binds each resolved `presenceId` before persistence; any missing name, the sender's own name, an empty list, a duplicate, or mixing `@all` with names fails before persistence.
 - A new `@all` target is validated and atomically persisted before `PresenceRegistry` is enumerated exactly once into a local array excluding the sender.
-- `HubStore` validates the Project row, exact text and attachment wire shapes, canonical Base64, valid unique attachment basenames, decoded gzip data, and causal references, then atomically commits one immutable Message—including attachments—and the next Project sequence.
+- `HubStore` validates the Room row, exact text and attachment wire shapes, canonical Base64, valid unique attachment basenames, decoded gzip data, and causal references, then atomically commits one immutable Message—including attachments—and the next Room sequence.
 - New acceptance sends `accepted` with `replayed: false`, the canonical Message, and selected recipient names. Replay sends `replayed: true` with no recipients field.
 - The Hub loops over the local array and immediately enqueues the canonical `message` frame to each concrete socket. Recipient arrays are never persisted.
 
@@ -92,37 +92,37 @@ Presence and Delivery events are realtime-only and never enter `HubStore`.
 `PresenceRegistry` keeps two synchronized indexes:
 
 ```text
-Project -> name -> Presence
+Room -> name -> Presence
 WebSocket -> Presence
 ```
 
-`claim`, `remove`, and `close` are the only state transitions. A `Presence` contains Project, temporary name, random `presenceId`, socket, and connection timestamp. No member file, offline state, stale state, lease, or cursor exists.
+`claim`, `remove`, and `close` are the only state transitions. A `Presence` contains Room, temporary name, random `presenceId`, socket, and connection timestamp. No member file, offline state, stale state, lease, or cursor exists.
 
 ## HubStore invariants
 
-`HubStore` owns `<dataDir>/messages.sqlite` with WAL and `synchronous = FULL`. It is the only production owner of durable Project metadata, Project sequences, and Messages.
+`HubStore` owns `<dataDir>/messages.sqlite` with WAL and `synchronous = FULL`. It is the only production owner of durable Room metadata, Room sequences, and Messages.
 
 ### Durable facts
 
-- one Project row containing `name`, optional display metadata, creation time, and optional creator cwd;
-- one monotonically increasing sequence per Project;
+- one Room row containing `name`, optional display metadata, creation time, and optional creator cwd;
+- one monotonically increasing sequence per Room;
 - one immutable message row per accepted message;
 - globally idempotent `messageId` content comparison;
 - sender name and accepting `presenceId`;
 - the canonical target kind (`all` for `@all`, or `agents` with sorted target names and resolved target `presenceId`s);
 - canonical encoded text and ordered attachment names/content;
-- creation timestamp and optional same-Project causal parent sequence;
+- creation timestamp and optional same-Room causal parent sequence;
 - optional `userApproval: {kind:"omp-ui"}` receipt.
 
-Project recipient arrays, pending ACK records, and Delivery events are not durable facts.
+Room recipient arrays, pending ACK records, and Delivery events are not durable facts.
 
-Message references use `<project>:<sequence>`. Parsing rejects invalid Project names, non-positive/unsafe sequences, and cross-Project history cursors.
+Message references use `<room>:<sequence>`. Parsing rejects invalid Room names, non-positive/unsafe sequences, and cross-Room history cursors.
 
-### Project lifecycle
+### Room lifecycle
 
-Project create/get/list/delete are synchronous store operations. Listing preserves name sorting. `deleteProject` uses one `BEGIN IMMEDIATE` transaction to delete Messages, Project sequence, and metadata, returning whether the Project existed. A failure in any delete statement rolls back all three. Recreating the name therefore starts with sequence `1` and empty history.
+Room create/get/list/delete are synchronous store operations. Listing preserves name sorting. `deleteRoom` uses one `BEGIN IMMEDIATE` transaction to delete Messages, Room sequence, and metadata, returning whether the Room existed. A failure in any delete statement rolls back all three. Recreating the name therefore starts with sequence `1` and empty history.
 
-`server.ts` rejects deletion while `RealtimeHub` reports an active Presence. Both claim and delete consult this store fact synchronously without a second blocked/deleted set: claim-first rejects deletion, and delete-first rejects claim as an unknown Project.
+`server.ts` rejects deletion while `RealtimeHub` reports an active Presence. Both claim and delete consult this store fact synchronously without a second blocked/deleted set: claim-first rejects deletion, and delete-first rejects claim as an unknown Room.
 
 ### History
 
@@ -131,17 +131,17 @@ Project create/get/list/delete are synchronous store operations. Listing preserv
 - `before` or `after`, never both;
 - optional exact sender-name filter;
 - a default 50-item page or any explicit positive integer limit;
-- deterministic Project-sequence ordering.
+- deterministic Room-sequence ordering.
 
 ### Idempotency and causality
 
-Reusing `messageId` with the same Project, sender name, target kind/names, text encoding/data, ordered attachment names/encoding/data, causal parent, and user-approval receipt presence/value returns the canonical stored Message with `replayed: true`. A difference in any compared field raises `MessageIdConflictError`.
+Reusing `messageId` with the same Room, sender name, target kind/names, text encoding/data, ordered attachment names/encoding/data, causal parent, and user-approval receipt presence/value returns the canonical stored Message with `replayed: true`. A difference in any compared field raises `MessageIdConflictError`.
 
-`replyTo` must resolve to an existing message in the same Project or `UnknownReplyTargetError` is raised.
+`replyTo` must resolve to an existing message in the same Room or `UnknownReplyTargetError` is raised.
 
 ### Storage schema
 
-`messages.sqlite` carries `MESSAGE_STORAGE_VERSION = 3`, independent of `A2A_PROTOCOL_VERSION`. A new database creates exactly four current non-internal schema objects in one transaction: tables `projects`, `project_sequences`, and `messages`, plus index `messages_project_sender`; it sets `PRAGMA user_version` to `3`. The `messages` table includes target `presenceId`s and the user-approval flag alongside canonical payload and attachments.
+`messages.sqlite` carries `MESSAGE_STORAGE_VERSION = 4`, independent of `A2A_PROTOCOL_VERSION`. A new database creates exactly four current non-internal schema objects in one transaction: tables `rooms`, `room_sequences`, and `messages`, plus index `messages_room_sender`; it sets `PRAGMA user_version` to `4`. The `messages` table includes target `presenceId`s and the user-approval flag alongside canonical payload and attachments.
 
 Opening an existing database requires the exact current storage version and exact four-object set of current non-internal tables and indexes. Any missing, changed, or unexpected schema object fails startup with `unsupported pre-release storage; start with an empty data directory`; no schema conversion or fallback runs. SQLite-owned autoindexes remain valid.
 
@@ -158,7 +158,7 @@ Opening an existing database requires the exact current storage version and exac
 
 `resolveHubUrl` precedence is explicit argument, then the first existing global config. Missing configuration fails explicitly. That resolved URL remains authoritative for HTTP and WebSocket connections; `HubClient` strictly decodes only `protocolVersion` from metadata and never replaces its `baseUrl`. Existing malformed global configuration fails immediately. `probeHub` uses a 1.5-second metadata deadline: only a classified `HubTransportError` means unavailable, while expiry propagates the named deadline error.
 
-`HubClient` gives metadata, Project CRUD, and history requests a 15-second default deadline, composes caller cancellation with that deadline, and keeps the bound active through response-body reading. Fetch and body network failures become `HubTransportError` only after cancellation and deadline expiry are ruled out. One request/JSON seam preserves non-2xx status and URL details, then operation-specific decoders require exact response shapes. History snapshots its query before dispatch and verifies ordering, canonical references, and causal references. Requests are not retried. Realtime operations belong to `A2aConnection`; server routes and realtime claims use the same `HubStore`.
+`HubClient` gives metadata, Room CRUD, and history requests a 15-second default deadline, composes caller cancellation with that deadline, and keeps the bound active through response-body reading. Fetch and body network failures become `HubTransportError` only after cancellation and deadline expiry are ruled out. One request/JSON seam preserves non-2xx status and URL details, then operation-specific decoders require exact response shapes. History snapshots its query before dispatch and verifies ordering, canonical references, and causal references. Requests are not retried. Realtime operations belong to `A2aConnection`; server routes and realtime claims use the same `HubStore`.
 
 `cli.ts` alone resolves `--host`, `--port`, and `--data-dir` with flag → environment → default precedence, rejecting a selected blank value; direct `startHubServer` calls supply all three explicitly and never read the environment. The CLI readiness line reports status, service, and `A2A_PROTOCOL_VERSION` but no listener URL.
 
@@ -176,8 +176,8 @@ Opening an existing database requires the exact current storage version and exac
 
 ## Test coverage
 
-- `hub-realtime.test.ts`: bounded/cancellable handshake and teardown, exact goodbye ordering, Project claims, persist-before-enumerate routing, replay without redelivery, one-shot Delivery acknowledgement/failure cleanup, attachment persistence, large same-version payload/attachment-count paths, and restart.
-- `message-store.test.ts`: Project CRUD/reopen/sorting, atomic delete rollback, ordering, idempotency, causality, cursor/filter/default/explicit-limit behavior, current schema creation/reopen, fail-closed guards, integrity, and deletion.
+- `hub-realtime.test.ts`: bounded/cancellable handshake and teardown, exact goodbye ordering, Room claims, persist-before-enumerate routing, replay without redelivery, one-shot Delivery acknowledgement/failure cleanup, attachment persistence, large same-version payload/attachment-count paths, and restart.
+- `message-store.test.ts`: Room CRUD/reopen/sorting, atomic delete rollback, ordering, idempotency, causality, cursor/filter/default/explicit-limit behavior, current schema creation/reopen, fail-closed guards, integrity, and deletion.
 - `hub-control.test.ts`: minimal metadata/health, authoritative configured URLs, explicit/wildcard listeners, CLI parsing/executability, deployment limits, independent Hubs, uncapped HTTP request bodies, claim/delete ordering, active-Presence rejection with unchanged history, storage startup rejection, cleanup, and concurrent stop.
 - `payload.test.ts`: identity/gzip/Base64 round trips, compression choice, uncapped attachment parsing, exact wire shapes, safe unique names, and malformed codec failures.
 - `operations.test.ts`: client/runtime integration, HTTP caller cancellation, pre-dispatch message cancellation, strong new/replayed acceptance, and successful/failed Delivery callbacks.

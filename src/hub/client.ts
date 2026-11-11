@@ -4,7 +4,7 @@ import * as path from "node:path";
 import { type as omptype } from "@oh-my-pi/omptype";
 import { parseWithSchema } from "../config-document";
 import { a2aRoot } from "../paths";
-import { type A2aProject, PROJECT_NAME_RE } from "../types";
+import { type A2aRoom, ROOM_NAME_RE } from "../types";
 import {
 	A2A_PROTOCOL_VERSION,
 	decodeRealtimeMessage,
@@ -67,7 +67,7 @@ export class HubResponseError extends Error {
 type Decoder<T> = (value: unknown) => T;
 
 const HUB_META_KEYS = ["protocolVersion"] as const;
-const PROJECT_KEYS = [
+const ROOM_KEYS = [
 	"name",
 	"displayName",
 	"description",
@@ -141,53 +141,51 @@ function decodeHubMeta(value: unknown): HubMeta {
 	};
 }
 
-function decodeProject(value: unknown): A2aProject {
-	const project = exactRecord(value, "project", PROJECT_KEYS);
-	const name = stringField(project, "name", "project");
-	if (!PROJECT_NAME_RE.test(name)) throw new Error("project.name is invalid");
-	const decoded: A2aProject = {
+function decodeRoom(value: unknown): A2aRoom {
+	const room = exactRecord(value, "room", ROOM_KEYS);
+	const name = stringField(room, "name", "room");
+	if (!ROOM_NAME_RE.test(name)) throw new Error("room.name is invalid");
+	const decoded: A2aRoom = {
 		name,
-		createdAt: safeIntegerField(project, "createdAt", "project", 0),
+		createdAt: safeIntegerField(room, "createdAt", "room", 0),
 	};
-	const displayName = optionalStringField(project, "displayName", "project");
-	const description = optionalStringField(project, "description", "project");
-	const createdByCwd = optionalStringField(project, "createdByCwd", "project");
+	const displayName = optionalStringField(room, "displayName", "room");
+	const description = optionalStringField(room, "description", "room");
+	const createdByCwd = optionalStringField(room, "createdByCwd", "room");
 	if (displayName !== undefined) decoded.displayName = displayName;
 	if (description !== undefined) decoded.description = description;
 	if (createdByCwd !== undefined) decoded.createdByCwd = createdByCwd;
 	return decoded;
 }
 
-function decodeProjectList(value: unknown): A2aProject[] {
-	const projects = exactRecord(value, "Project list response", [
-		"projects",
-	]).projects;
-	if (!Array.isArray(projects))
-		throw new Error("Project list response.projects must be an array");
-	return projects.map(decodeProject);
+function decodeRoomList(value: unknown): A2aRoom[] {
+	const rooms = exactRecord(value, "Room list response", ["rooms"]).rooms;
+	if (!Array.isArray(rooms))
+		throw new Error("Room list response.rooms must be an array");
+	return rooms.map(decodeRoom);
 }
 
-function decodeProjectDeletion(value: unknown): boolean {
-	const response = exactRecord(value, "Project deletion response", [
+function decodeRoomDeletion(value: unknown): boolean {
+	const response = exactRecord(value, "Room deletion response", [
 		"ok",
 		"deleted",
 	]);
 	if (response.ok !== true)
-		throw new Error("Project deletion response.ok must be true");
+		throw new Error("Room deletion response.ok must be true");
 	if (typeof response.deleted !== "boolean")
-		throw new Error("Project deletion response.deleted must be a boolean");
+		throw new Error("Room deletion response.deleted must be a boolean");
 	return response.deleted;
 }
 
-function decodeHistoryPage(value: unknown, project: string): HistoryPage {
+function decodeHistoryPage(value: unknown, room: string): HistoryPage {
 	const response = exactRecord(value, "history response", ["messages"]);
 	if (!Array.isArray(response.messages))
 		throw new Error("history response.messages must be an array");
 	const messages = response.messages.map(decodeRealtimeMessage);
 	let previousSequence = 0;
 	for (const message of messages) {
-		if (message.project !== project)
-			throw new Error("history response contains another Project");
+		if (message.room !== room)
+			throw new Error("history response contains another Room");
 		if (message.sequence <= previousSequence)
 			throw new Error("history response sequences must be strictly increasing");
 		previousSequence = message.sequence;
@@ -306,7 +304,7 @@ export function resolveHubUrl(options?: {
 		return stripTrailingSlash(config.hubUrl);
 	}
 	throw new Error(
-		"A2A Hub URL is not configured; set hubUrl in the Project or global A2A config",
+		"A2A Hub URL is not configured; set hubUrl in the Room or global A2A config",
 	);
 }
 
@@ -386,7 +384,7 @@ export class HubClient {
 		);
 	}
 
-	async createProject(
+	async createRoom(
 		body: {
 			name: string;
 			displayName?: string;
@@ -394,16 +392,14 @@ export class HubClient {
 			createdByCwd?: string;
 		},
 		options?: HubRequestOptions,
-	): Promise<A2aProject> {
+	): Promise<A2aRoom> {
 		return await this.#request(
-			"Project creation",
-			"Project creation response",
-			"/v1/projects",
+			"Room creation",
+			"Room creation response",
+			"/v1/rooms",
 			(value) => {
-				const response = exactRecord(value, "Project creation response", [
-					"project",
-				]);
-				return decodeProject(response.project);
+				const response = exactRecord(value, "Room creation response", ["room"]);
+				return decodeRoom(response.room);
 			},
 			options,
 			{
@@ -414,26 +410,26 @@ export class HubClient {
 		);
 	}
 
-	async deleteProject(
+	async deleteRoom(
 		name: string,
 		options?: HubRequestOptions,
 	): Promise<boolean> {
 		return await this.#request(
-			"Project deletion",
-			"Project deletion response",
-			`/v1/projects/${encodeURIComponent(name)}`,
-			decodeProjectDeletion,
+			"Room deletion",
+			"Room deletion response",
+			`/v1/rooms/${encodeURIComponent(name)}`,
+			decodeRoomDeletion,
 			options,
 			{ method: "DELETE" },
 		);
 	}
 
-	async listProjects(options?: HubRequestOptions): Promise<A2aProject[]> {
+	async listRooms(options?: HubRequestOptions): Promise<A2aRoom[]> {
 		return await this.#request(
-			"Project listing",
-			"Project list response",
-			"/v1/projects",
-			decodeProjectList,
+			"Room listing",
+			"Room list response",
+			"/v1/rooms",
+			decodeRoomList,
 			options,
 		);
 	}
@@ -442,8 +438,8 @@ export class HubClient {
 		query: HistoryQuery,
 		options?: HubRequestOptions,
 	): Promise<HistoryPage> {
-		const { project: requestedProject, before, after, from, limit } = query;
-		const parameters = new URLSearchParams({ project: requestedProject });
+		const { room: requestedRoom, before, after, from, limit } = query;
+		const parameters = new URLSearchParams({ room: requestedRoom });
 		if (before) parameters.set("before", before);
 		if (after) parameters.set("after", after);
 		if (from) parameters.set("from", from);
@@ -452,7 +448,7 @@ export class HubClient {
 			"History request",
 			"history response",
 			`/v1/history?${parameters}`,
-			(value) => decodeHistoryPage(value, requestedProject),
+			(value) => decodeHistoryPage(value, requestedRoom),
 			options,
 		);
 	}

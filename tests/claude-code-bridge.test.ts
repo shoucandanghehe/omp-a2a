@@ -85,13 +85,13 @@ async function setup(
 	});
 	cleanups.push(() => hub.stop());
 	const hubClient = new HubClient(hub.listenUrl);
-	await hubClient.createProject({ name: "team" });
+	await hubClient.createRoom({ name: "team" });
 
 	const projectDir = tempDir("omp-a2a-cc-project-");
 	mkdirSync(join(projectDir, ".omp"));
 	writeFileSync(
 		join(projectDir, ".omp", "a2a.yml"),
-		`hubUrl: ${hub.listenUrl}\nproject: team\nname: omp-agent\n`,
+		`hubUrl: ${hub.listenUrl}\nroom: team\nname: omp-agent\n`,
 	);
 
 	const peerInbox = queue<MessageView>();
@@ -369,7 +369,7 @@ test("cancelling approval sends nothing and is not remembered", async () => {
 	expect(peerInbox.size).toBe(0);
 });
 
-test("control commands manage connection and Projects", async () => {
+test("control commands manage connection and Rooms", async () => {
 	const { peer, hubClient, call } = await setup({
 		elicit: () => ({ action: "accept", content: {} }),
 	});
@@ -393,15 +393,15 @@ test("control commands manage connection and Projects", async () => {
 	).toBe("Connected to team as cc2");
 
 	expect(
-		(await call("a2a_control", { command: "project create scratch" })).text,
-	).toBe("Created Project scratch");
+		(await call("a2a_control", { command: "room create scratch" })).text,
+	).toBe("Created Room scratch");
+	expect((await call("a2a_control", { command: "room list" })).text).toContain(
+		"- scratch",
+	);
 	expect(
-		(await call("a2a_control", { command: "project list" })).text,
-	).toContain("- scratch");
-	expect(
-		(await call("a2a_control", { command: "project delete scratch" })).text,
-	).toBe("Deleted Project scratch");
-	expect((await hubClient.listProjects()).map((p) => p.name)).toEqual(["team"]);
+		(await call("a2a_control", { command: "room delete scratch" })).text,
+	).toBe("Deleted Room scratch");
+	expect((await hubClient.listRooms()).map((p) => p.name)).toEqual(["team"]);
 });
 
 test("server instructions fit Claude Code's 2048-character limit", () => {
@@ -415,7 +415,7 @@ test("global Hub config alone waits for an explicit connect", async () => {
 		dataDir: tempDir("omp-a2a-cc-hub-"),
 	});
 	cleanups.push(() => hub.stop());
-	await new HubClient(hub.listenUrl).createProject({ name: "gxb" });
+	await new HubClient(hub.listenUrl).createRoom({ name: "gxb" });
 	const home = tempDir("omp-a2a-cc-home-");
 	mkdirSync(join(home, ".omp", "a2a"), { recursive: true });
 	writeFileSync(
@@ -443,7 +443,7 @@ test("global Hub config alone waits for an explicit connect", async () => {
 		return (result.content as Array<{ text: string }>)[0]?.text ?? "";
 	};
 	expect(await call("status")).toContain("Not connected");
-	expect(await call("project list")).toContain("- gxb");
+	expect(await call("room list")).toContain("- gxb");
 	expect(await call("connect gxb --as claude")).toBe(
 		"Connected to gxb as claude",
 	);

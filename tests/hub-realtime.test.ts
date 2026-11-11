@@ -52,7 +52,7 @@ class FrameQueue<Frame = ServerFrame> {
 
 async function connect(
 	baseUrl: string,
-	project: string,
+	room: string,
 	name: string,
 ): Promise<{ socket: WebSocket; frames: FrameQueue }> {
 	const socket = new WebSocket(`${baseUrl.replace(/^http/, "ws")}/v1/connect`);
@@ -68,7 +68,7 @@ async function connect(
 		JSON.stringify({
 			type: "hello",
 			protocolVersion: A2A_PROTOCOL_VERSION,
-			project,
+			room,
 			name,
 		}),
 	);
@@ -117,8 +117,8 @@ type MessageLedger = ConstructorParameters<typeof RealtimeHub>[1];
 function messageFromDraft(draft: MessageDraft): RealtimeMessage {
 	return {
 		messageId: draft.messageId,
-		messageRef: `${draft.project}:1`,
-		project: draft.project,
+		messageRef: `${draft.room}:1`,
+		room: draft.room,
 		sequence: 1,
 		from: { ...draft.from },
 		target: { ...draft.target },
@@ -133,7 +133,7 @@ function messageFromDraft(draft: MessageDraft): RealtimeMessage {
 function acceptingLedger(appendError?: Error): MessageLedger {
 	const stored = new Map<string, RealtimeMessage>();
 	return {
-		getProject(name) {
+		getRoom(name) {
 			return name === "room" ? { name, createdAt: 1 } : null;
 		},
 		append(draft) {
@@ -180,7 +180,7 @@ function claimedFrame(name: string): ServerFrame {
 	return {
 		type: "claimed",
 		protocolVersion: A2A_PROTOCOL_VERSION,
-		project: "room",
+		room: "room",
 		self: { name, presenceId: `${name}-presence` },
 		peers: [],
 	};
@@ -197,7 +197,7 @@ function acceptedFrame(
 		message: {
 			messageId,
 			messageRef: "room:1",
-			project: "room",
+			room: "room",
 			sequence: 1,
 			from: { name: "api", presenceId: "api-presence" },
 			target: { type: "all" },
@@ -237,13 +237,13 @@ test("transport close releases Presence and allows name reuse", async () => {
 	});
 	hubs.push(hub);
 	const client = new HubClient(hub.listenUrl);
-	await client.createProject({ name: "room" });
+	await client.createRoom({ name: "room" });
 
 	const api = await connect(hub.listenUrl, "room", "api");
 	const apiClaimed = await api.frames.next();
 	expect(apiClaimed).toMatchObject({
 		type: "claimed",
-		project: "room",
+		room: "room",
 		self: { name: "api" },
 		peers: [],
 	});
@@ -299,7 +299,7 @@ test("Unicode Agent names connect and target by up to 32 characters", async () =
 	});
 	hubs.push(hub);
 	const client = new HubClient(hub.listenUrl);
-	await client.createProject({ name: "unicode-names" });
+	await client.createRoom({ name: "unicode-names" });
 
 	const senderName = "甲".repeat(32);
 	const sender = await connect(hub.listenUrl, "unicode-names", senderName);
@@ -358,7 +358,7 @@ test("direct messages and broadcasts bind the current concrete Presences", async
 	});
 	hubs.push(hub);
 	const client = new HubClient(hub.listenUrl);
-	await client.createProject({ name: "chat" });
+	await client.createRoom({ name: "chat" });
 
 	const api = await connect(hub.listenUrl, "chat", "api");
 	await api.frames.next();
@@ -508,7 +508,7 @@ test("direct messages and broadcasts bind the current concrete Presences", async
 	const replacementClaimed = await replacement.frames.next();
 	if (replacementClaimed.type !== "claimed")
 		throw new Error("expected replacement claim");
-	const history = (await client.history({ project: "chat", from: "api" }))
+	const history = (await client.history({ room: "chat", from: "api" }))
 		.messages;
 	expect(
 		history.find((message) => message.messageId === "direct-1")?.userApproval,
@@ -542,7 +542,7 @@ test("one message fans out to several named Presences with one canonical target"
 	});
 	hubs.push(hub);
 	const client = new HubClient(hub.listenUrl);
-	await client.createProject({ name: "multi" });
+	await client.createRoom({ name: "multi" });
 
 	const api = await connect(hub.listenUrl, "multi", "api");
 	await api.frames.next();
@@ -615,7 +615,7 @@ test("one message fans out to several named Presences with one canonical target"
 		message: { messageRef: "multi:1" },
 	});
 
-	const history = (await client.history({ project: "multi" })).messages;
+	const history = (await client.history({ room: "multi" })).messages;
 	expect(history).toHaveLength(1);
 	const target = history[0]?.target;
 	if (target?.type !== "agents") throw new Error("expected agents target");
@@ -637,7 +637,7 @@ test("named targets must all be present and uniquely named", async () => {
 	});
 	hubs.push(hub);
 	const client = new HubClient(hub.listenUrl);
-	await client.createProject({ name: "strict" });
+	await client.createRoom({ name: "strict" });
 	const api = await connect(hub.listenUrl, "strict", "api");
 	await api.frames.next();
 	const web = await connect(hub.listenUrl, "strict", "web");
@@ -693,7 +693,7 @@ test("named targets must all be present and uniquely named", async () => {
 			message: scenario.message,
 		});
 	}
-	expect((await client.history({ project: "strict" })).messages).toEqual([]);
+	expect((await client.history({ room: "strict" })).messages).toEqual([]);
 
 	api.socket.close();
 	web.socket.close();
@@ -709,7 +709,7 @@ test("the Hub rejects malformed user approval receipts without persistence", asy
 	});
 	hubs.push(hub);
 	const client = new HubClient(hub.listenUrl);
-	await client.createProject({ name: "approval-shape" });
+	await client.createRoom({ name: "approval-shape" });
 	const api = await connect(hub.listenUrl, "approval-shape", "api");
 	await api.frames.next();
 
@@ -736,9 +736,9 @@ test("the Hub rejects malformed user approval receipts without persistence", asy
 			code: "message_rejected",
 		});
 	}
-	expect(
-		(await client.history({ project: "approval-shape" })).messages,
-	).toEqual([]);
+	expect((await client.history({ room: "approval-shape" })).messages).toEqual(
+		[],
+	);
 	api.socket.close();
 });
 
@@ -752,7 +752,7 @@ test("message history survives Hub restart while Presence does not", async () =>
 	});
 	hubs.push(first);
 	const firstClient = new HubClient(first.listenUrl);
-	await firstClient.createProject({ name: "durable-chat" });
+	await firstClient.createRoom({ name: "durable-chat" });
 	const api = await connect(first.listenUrl, "durable-chat", "api");
 	await api.frames.next();
 	const web = await connect(first.listenUrl, "durable-chat", "web");
@@ -792,7 +792,7 @@ test("message history survives Hub restart while Presence does not", async () =>
 	hubs.push(second);
 	const secondClient = new HubClient(second.listenUrl);
 	const history = await secondClient.history({
-		project: "durable-chat",
+		room: "durable-chat",
 		limit: 10,
 	});
 	expect(history.messages).toHaveLength(1);
@@ -819,7 +819,7 @@ test("client handshake timeout leaves no socket or Presence", async () => {
 	const stalled = await startTestTransport();
 	const timedOut = A2aConnection.connect({
 		baseUrl: stalled.baseUrl,
-		project: "room",
+		room: "room",
 		name: "api",
 		timeoutMs: 250,
 	});
@@ -837,7 +837,7 @@ test("caller abort leaves no socket or Presence", async () => {
 	const abortReason = new Error("caller cancelled handshake");
 	const abortedHandshake = A2aConnection.connect({
 		baseUrl: abortedTransport.baseUrl,
-		project: "room",
+		room: "room",
 		name: "api",
 		signal: inFlightController.signal,
 	});
@@ -854,19 +854,19 @@ test("caller abort leaves no socket or Presence", async () => {
 	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
 	hubs.push(hub);
 	const client = new HubClient(hub.listenUrl);
-	await client.createProject({ name: "abort-room" });
+	await client.createRoom({ name: "abort-room" });
 	const preAborted = new AbortController();
 	const preAbortReason = new Error("caller cancelled before handshake");
 	preAborted.abort(preAbortReason);
 	await expect(
 		A2aConnection.connect({
 			baseUrl: hub.listenUrl,
-			project: "abort-room",
+			room: "abort-room",
 			name: "api",
 			signal: preAborted.signal,
 		}),
 	).rejects.toBe(preAbortReason);
-	expect(await client.deleteProject("abort-room")).toBe(true);
+	expect(await client.deleteRoom("abort-room")).toBe(true);
 });
 
 test("a later handshake abort cannot replace the failure that won", async () => {
@@ -876,7 +876,7 @@ test("a later handshake abort cannot replace the failure that won", async () => 
 		const lateAbort = new Error(`late abort after ${scenario} failure`);
 		const connecting = A2aConnection.connect({
 			baseUrl: transport.baseUrl,
-			project: "room",
+			room: "room",
 			name: scenario,
 			signal: controller.signal,
 			timeoutMs: scenario === "timeout" ? 20 : 5_000,
@@ -916,7 +916,7 @@ test("connection lifecycle timeout overrides reject invalid and over-limit value
 	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
 	hubs.push(hub);
 	const client = new HubClient(hub.listenUrl);
-	await client.createProject({ name: "invalid-timeouts" });
+	await client.createRoom({ name: "invalid-timeouts" });
 	const cases: Array<{
 		label: string;
 		options: {
@@ -939,7 +939,7 @@ test("connection lifecycle timeout overrides reject invalid and over-limit value
 	for (const [index, { label, options }] of cases.entries()) {
 		const outcome = await A2aConnection.connect({
 			baseUrl: hub.listenUrl,
-			project: "invalid-timeouts",
+			room: "invalid-timeouts",
 			name: `invalid-${index}`,
 			...options,
 		}).then(
@@ -953,14 +953,14 @@ test("connection lifecycle timeout overrides reject invalid and over-limit value
 
 	const atLimit = await A2aConnection.connect({
 		baseUrl: hub.listenUrl,
-		project: "invalid-timeouts",
+		room: "invalid-timeouts",
 		name: "at-limit",
 		timeoutMs: 5_000,
 		goodbyeTimeoutMs: 1_000,
 		closeTimeoutMs: 2_000,
 	});
 	await atLimit.close();
-	expect(await client.deleteProject("invalid-timeouts")).toBe(true);
+	expect(await client.deleteRoom("invalid-timeouts")).toBe(true);
 });
 
 test("the Hub rejects non-exact goodbye without releasing Presence", async () => {
@@ -969,7 +969,7 @@ test("the Hub rejects non-exact goodbye without releasing Presence", async () =>
 	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
 	hubs.push(hub);
 	const client = new HubClient(hub.listenUrl);
-	await client.createProject({ name: "exact-goodbye" });
+	await client.createRoom({ name: "exact-goodbye" });
 	const api = await connect(hub.listenUrl, "exact-goodbye", "api");
 	await api.frames.next();
 
@@ -999,7 +999,7 @@ test("the Hub closes transport after acknowledging goodbye", async () => {
 	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
 	hubs.push(hub);
 	const client = new HubClient(hub.listenUrl);
-	await client.createProject({ name: "server-goodbye" });
+	await client.createRoom({ name: "server-goodbye" });
 	const observer = await connect(hub.listenUrl, "server-goodbye", "observer");
 	await observer.frames.next();
 	const api = await connect(hub.listenUrl, "server-goodbye", "api");
@@ -1027,7 +1027,7 @@ test("the Hub terminates a transport whose close frames cannot reach the peer", 
 	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
 	hubs.push(hub);
 	const client = new HubClient(hub.listenUrl);
-	await client.createProject({ name: "server-terminate" });
+	await client.createRoom({ name: "server-terminate" });
 	const observer = await connect(hub.listenUrl, "server-terminate", "observer");
 	await observer.frames.next();
 	const api = await connect(hub.listenUrl, "server-terminate", "api");
@@ -1064,7 +1064,7 @@ test("client reports a non-exact goodbye acknowledgement", async () => {
 	const protocolError = Promise.withResolvers<Error>();
 	const connecting = A2aConnection.connect({
 		baseUrl: transport.baseUrl,
-		project: "room",
+		room: "room",
 		name: "api",
 		goodbyeTimeoutMs: 50,
 		closeTimeoutMs: 50,
@@ -1090,12 +1090,12 @@ test("close shares one goodbye barrier and releases the name before resolving", 
 	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
 	hubs.push(hub);
 	const client = new HubClient(hub.listenUrl);
-	await client.createProject({ name: "goodbye-room" });
+	await client.createRoom({ name: "goodbye-room" });
 	const observer = await connect(hub.listenUrl, "goodbye-room", "observer");
 	await observer.frames.next();
 	const api = await A2aConnection.connect({
 		baseUrl: hub.listenUrl,
-		project: "goodbye-room",
+		room: "goodbye-room",
 		name: "api",
 	});
 	expect(await observer.frames.next()).toMatchObject({
@@ -1114,7 +1114,7 @@ test("close shares one goodbye barrier and releases the name before resolving", 
 
 	const replacement = await A2aConnection.connect({
 		baseUrl: hub.listenUrl,
-		project: "goodbye-room",
+		room: "goodbye-room",
 		name: "api",
 	});
 	expect(await observer.frames.next()).toMatchObject({
@@ -1131,7 +1131,7 @@ test("close shares one goodbye barrier and releases the name before resolving", 
 	observer.socket.send(JSON.stringify({ type: "goodbye" }));
 	expect(await observer.frames.next()).toEqual({ type: "goodbye" });
 	await observerClosed.promise;
-	expect(await client.deleteProject("goodbye-room")).toBe(true);
+	expect(await client.deleteRoom("goodbye-room")).toBe(true);
 });
 
 test("close completes normally when the peer omits its goodbye acknowledgement", async () => {
@@ -1139,7 +1139,7 @@ test("close completes normally when the peer omits its goodbye acknowledgement",
 	const closed = Promise.withResolvers<{ code: number }>();
 	const connecting = A2aConnection.connect({
 		baseUrl: transport.baseUrl,
-		project: "room",
+		room: "room",
 		name: "api",
 		goodbyeTimeoutMs: 100,
 		closeTimeoutMs: 100,
@@ -1165,7 +1165,7 @@ test("client termination bounds a close whose frames cannot reach the Hub", asyn
 	const connection = await (async () => {
 		const connecting = A2aConnection.connect({
 			baseUrl: transport.baseUrl,
-			project: "room",
+			room: "room",
 			name: "api",
 			goodbyeTimeoutMs: 25,
 			closeTimeoutMs: 25,
@@ -1217,7 +1217,7 @@ test("aborted and timed out message requests ignore late acceptance and errors",
 	const unexpectedErrors: Error[] = [];
 	const connecting = A2aConnection.connect({
 		baseUrl: transport.baseUrl,
-		project: "room",
+		room: "room",
 		name: "api",
 		goodbyeTimeoutMs: 10,
 		closeTimeoutMs: 10,
@@ -1400,7 +1400,7 @@ test("malformed accepted frames reject the matching request", async () => {
 		const transport = await startTestTransport();
 		const connecting = A2aConnection.connect({
 			baseUrl: transport.baseUrl,
-			project: "room",
+			room: "room",
 			name: "api",
 		});
 		const socket = await transport.socket;
@@ -1427,7 +1427,7 @@ test("message timeout overrides reject invalid and over-limit values before disp
 	const transport = await startTestTransport();
 	const connecting = A2aConnection.connect({
 		baseUrl: transport.baseUrl,
-		project: "room",
+		room: "room",
 		name: "api",
 		goodbyeTimeoutMs: 50,
 		closeTimeoutMs: 50,
@@ -1493,7 +1493,7 @@ test("delivery cleanup is fenced by recipient and sender Presence", async () => 
 	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
 	hubs.push(hub);
 	const client = new HubClient(hub.listenUrl);
-	await client.createProject({ name: "cleanup" });
+	await client.createRoom({ name: "cleanup" });
 	const sender = await connect(hub.listenUrl, "cleanup", "sender");
 	await sender.frames.next();
 	const recipient = await connect(hub.listenUrl, "cleanup", "recipient");
@@ -1749,17 +1749,17 @@ test("same-version clients carry large messages and arbitrary attachment counts"
 	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
 	hubs.push(hub);
 	const client = new HubClient(hub.listenUrl);
-	await client.createProject({ name: "trusted-payloads" });
+	await client.createRoom({ name: "trusted-payloads" });
 	const inbound = Promise.withResolvers<RealtimeMessage>();
 	const receiver = await A2aConnection.connect({
 		baseUrl: hub.listenUrl,
-		project: "trusted-payloads",
+		room: "trusted-payloads",
 		name: "receiver",
 		events: { onMessage: inbound.resolve },
 	});
 	const sender = await A2aConnection.connect({
 		baseUrl: hub.listenUrl,
-		project: "trusted-payloads",
+		room: "trusted-payloads",
 		name: "sender",
 	});
 	const largeBytes = Buffer.alloc(4_800_000, 0x61);

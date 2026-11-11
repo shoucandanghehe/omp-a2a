@@ -1,6 +1,6 @@
 ---
-description: omp-a2a status, connection, Projects, and history
-argument-hint: "[status | connect <project> [--as <name>] | disconnect | peers | project list|create|delete <name> | history [--before <ref>|--after <ref>] [--limit <n>] [--from <name>]]"
+description: omp-a2a status, connection, Rooms, and history
+argument-hint: "[status | connect <room> [--as <name>] | disconnect | peers | room list|create|delete <name> | history [--before <ref>|--after <ref>] [--limit <n>] [--from <name>]]"
 ---
 
 The user ran `/a2a $ARGUMENTS`.

@@ -30,19 +30,19 @@ import {
 	renderInboundMessage,
 } from "./presentation";
 import { escapeUnicode, safeJson } from "./safe-json";
-import { type A2aLocalConfig, AGENT_NAME_RE, PROJECT_NAME_RE } from "./types";
+import { type A2aLocalConfig, AGENT_NAME_RE, ROOM_NAME_RE } from "./types";
 
 const ASYNC_REPLY_GUIDANCE =
 	"Sending is fire-and-forget. Do not wait, sleep, or poll a2a_history for replies. Continue other work you already have, or end the turn.";
 
 const A2A_COMMAND_TYPE = "/a2a";
 
-const A2A_TOOL_GUIDANCE = `A2A connects this session to other agent sessions in the same Project. The latest extension-injected [a2a connection] message gives your current status, Project, and name. xd://a2a_peers lists the peers online now, xd://a2a_message sends, and xd://a2a_history reads past messages. Address peers only by names from a2a_peers or inbound messages, or ${ALL_TARGET} for every current peer. Replies are pushed to you automatically.`;
+const A2A_TOOL_GUIDANCE = `A2A connects this session to other agent sessions in the same A2A room. The latest extension-injected [a2a connection] message gives your current status, room, and name. xd://a2a_peers lists the peers online now, xd://a2a_message sends, and xd://a2a_history reads past messages. Address peers only by names from a2a_peers or inbound messages, or ${ALL_TARGET} for every current peer. Replies are pushed to you automatically.`;
 
 const A2A_SENDING_GUIDANCE = [
 	"When to send an A2A message:",
 	"- Send only when a specific peer needs it: you ask it to do or answer something, you deliver a result it asked for, or you changed something that affects its current work (shared files, branches, services, ports, data).",
-	`- Choose recipients for each message from its content. Being online, in the Project, or a past collaborator is not a reason to include a peer. Use ${ALL_TARGET} only when every peer is affected.`,
+	`- Choose recipients for each message from its content. Being online, in the room, or a past collaborator is not a reason to include a peer. Use ${ALL_TARGET} only when every peer is affected.`,
 	"- Report your own progress and results to your user, not to peers.",
 	"- Do not send acknowledgements, thanks, or status-only notes, and do not reply to a message that asks nothing of you.",
 	"- Write plainly and self-contained: what you need or what changed, the facts needed to act on it (paths, refs, commands, output), and what you want back. Set replyTo when answering a message.",
@@ -117,13 +117,13 @@ interface CompletionOption {
 const ROOT_COMPLETIONS: CompletionOption[] = [
 	{ token: "hub", description: "Show Hub status" },
 	{
-		token: "project",
-		description: "Create, list, or delete Projects",
+		token: "room",
+		description: "Create, list, or delete Rooms",
 		continues: true,
 	},
 	{
 		token: "connect",
-		description: "Connect this OMP session to a Project",
+		description: "Connect this OMP session to a Room",
 		continues: true,
 	},
 	{ token: "disconnect", description: "Disconnect the current Presence" },
@@ -131,18 +131,18 @@ const ROOT_COMPLETIONS: CompletionOption[] = [
 	{ token: "peers", description: "List currently present Agents" },
 	{
 		token: "history",
-		description: "Query persistent Project history",
+		description: "Query persistent Room history",
 		continues: true,
 	},
 	{ token: "help", description: "Show A2A command help" },
 ];
 
-const PROJECT_COMPLETIONS: CompletionOption[] = [
-	{ token: "create", description: "Create a Project", continues: true },
-	{ token: "list", description: "List Projects" },
+const ROOM_COMPLETIONS: CompletionOption[] = [
+	{ token: "create", description: "Create a Room", continues: true },
+	{ token: "list", description: "List Rooms" },
 	{
 		token: "delete",
-		description: "Delete a Project and its history",
+		description: "Delete a Room and its history",
 		continues: true,
 	},
 ];
@@ -197,8 +197,8 @@ function completeA2aArguments(
 	if (words.length === 0) return completionItems("", current, ROOT_COMPLETIONS);
 
 	const command = words[0];
-	if (command === "project" && words.length === 1) {
-		return completionItems("project ", current, PROJECT_COMPLETIONS);
+	if (command === "room" && words.length === 1) {
+		return completionItems("room ", current, ROOM_COMPLETIONS);
 	}
 	if (command === "connect" && words.length === 2) {
 		return completionItems(`connect ${words[1]} `, current, [
@@ -241,10 +241,10 @@ function usage(): string {
 		"A2A anonymous realtime Agent chat",
 		"",
 		"/a2a hub",
-		"/a2a project create <name>",
-		"/a2a project list",
-		"/a2a project delete <name>",
-		"/a2a connect <project> --as <name>",
+		"/a2a room create <name>",
+		"/a2a room list",
+		"/a2a room delete <name>",
+		"/a2a connect <room> --as <name>",
 		"/a2a disconnect",
 		"/a2a status",
 		"/a2a peers",
@@ -260,7 +260,7 @@ type PendingMaterializedMessage = {
 	dispose(): Promise<void>;
 };
 type DesiredConnection = {
-	project: string;
+	room: string;
 	name: string;
 	hubUrl: string;
 	client?: HubClient;
@@ -272,7 +272,7 @@ type A2aContextMessage = {
 };
 type ConnectionState =
 	| { status: "disconnected" }
-	| { status: "connected"; project: string; name: string };
+	| { status: "connected"; room: string; name: string };
 
 function combineAbortSignals(
 	first: AbortSignal,
@@ -384,7 +384,7 @@ function formatApprovalDialog(options: {
 	attachments: EncodedAttachment[];
 }): string {
 	const target = options.target.includes(ALL_TARGET)
-		? "Everyone in this Project"
+		? "Everyone in this Room"
 		: `Agent${options.target.length === 1 ? "" : "s"} ${options.target
 				.map((name) => `\`${name}\``)
 				.join(", ")}`;
@@ -419,7 +419,7 @@ function formatMessageForModel(message: MaterializedMessageView): string {
 		`[a2a message] metadata=${safeJson({
 			ref: message.messageRef,
 			from: message.from,
-			project: message.project,
+			room: message.room,
 			at: new Date(message.createdAt).toISOString(),
 			target: message.target,
 			replyTo: message.replyTo ?? null,
@@ -523,11 +523,11 @@ export default function a2aExtension(
 		return target.client;
 	};
 
-	const desiredTarget = (project: string, name: string): DesiredConnection => {
+	const desiredTarget = (room: string, name: string): DesiredConnection => {
 		if (configState.status === "invalid") throw configState.error;
 		if (configState.status === "unloaded")
 			throw new Error("A2A config is not loaded for the active Session");
-		return { project, name, hubUrl: configState.hubUrl };
+		return { room, name, hubUrl: configState.hubUrl };
 	};
 
 	const publishConnectionState = (state: ConnectionState): void => {
@@ -537,7 +537,7 @@ export default function a2aExtension(
 			customType: "a2a-connection",
 			content:
 				state.status === "connected"
-					? `[a2a connection] status=connected project=${state.project} name=${state.name}`
+					? `[a2a connection] status=connected room=${state.room} name=${state.name}`
 					: "[a2a connection] status=disconnected",
 			display: false,
 		};
@@ -686,7 +686,7 @@ export default function a2aExtension(
 			? runtime.connectionToken()
 			: null;
 		try {
-			await runtime.connect(target.project, target.name, () =>
+			await runtime.connect(target.room, target.name, () =>
 				desiredClient(target),
 			);
 			if (desiredConnection !== target) return;
@@ -696,13 +696,13 @@ export default function a2aExtension(
 			reconnectTimer = undefined;
 			reconnectDelayMs = 500;
 			activeContext?.ui.notify(
-				`Connected to ${target.project} as ${target.name}`,
+				`Connected to ${target.room} as ${target.name}`,
 				"info",
 			);
 			if (connectionChanged)
 				publishConnectionState({
 					status: "connected",
-					project: target.project,
+					room: target.room,
 					name: target.name,
 				});
 		} catch (error) {
@@ -712,7 +712,7 @@ export default function a2aExtension(
 				const published = runtime.publishedTarget;
 				desiredConnection = published
 					? {
-							project: published.project,
+							room: published.room,
 							name: published.name,
 							hubUrl: published.client.baseUrl,
 							client: published.client,
@@ -768,7 +768,7 @@ export default function a2aExtension(
 		}
 		if (sessionLifecycle !== lifecycle) return;
 		if (!config || config.autoConnect === false) return;
-		const target = desiredTarget(config.project, config.name);
+		const target = desiredTarget(config.room, config.name);
 		desiredConnection = target;
 		await connectDesired(target);
 	};
@@ -821,7 +821,7 @@ export default function a2aExtension(
 	});
 
 	pi.registerCommand("a2a", {
-		description: "A2A realtime chat connection and Project administration",
+		description: "A2A realtime chat connection and Room administration",
 		getArgumentCompletions: completeA2aArguments,
 		handler: async (raw, context) => {
 			const sessionToken = sessionLifecycle.signal;
@@ -855,62 +855,60 @@ export default function a2aExtension(
 					);
 					return;
 				}
-				if (command === "project" && positional[1] === "create") {
+				if (command === "room" && positional[1] === "create") {
 					const name = positional[2];
-					if (!name || !PROJECT_NAME_RE.test(name))
-						throw new Error("usage: /a2a project create <name>");
-					await runtime.createProject({ name, createdByCwd: context.cwd });
-					context.ui.notify(`Created Project ${name}`, "info");
+					if (!name || !ROOM_NAME_RE.test(name))
+						throw new Error("usage: /a2a room create <name>");
+					await runtime.createRoom({ name, createdByCwd: context.cwd });
+					context.ui.notify(`Created Room ${name}`, "info");
 					return;
 				}
 				if (
-					command === "project" &&
+					command === "room" &&
 					(positional[1] === "list" || positional[1] === undefined)
 				) {
-					const projects = await runtime.listProjects();
+					const rooms = await runtime.listRooms();
 					publishCommandOutput(
 						raw,
-						projects.length === 0
-							? "No Projects."
-							: projects.map((project) => project.name).join("\n"),
+						rooms.length === 0
+							? "No Rooms."
+							: rooms.map((room) => room.name).join("\n"),
 					);
 					return;
 				}
-				if (command === "project" && positional[1] === "delete") {
+				if (command === "room" && positional[1] === "delete") {
 					const name = positional[2];
-					if (!name || !PROJECT_NAME_RE.test(name))
-						throw new Error("usage: /a2a project delete <name>");
+					if (!name || !ROOM_NAME_RE.test(name))
+						throw new Error("usage: /a2a room delete <name>");
 					if (
 						!(await context.ui.confirm(
-							"Delete A2A Project",
+							"Delete A2A Room",
 							`Delete ${name} and its complete message history?`,
 						))
 					)
 						return;
-					const deleted = await runtime.deleteProject(name);
+					const deleted = await runtime.deleteRoom(name);
 					context.ui.notify(
-						deleted
-							? `Deleted Project ${name}`
-							: `Project ${name} does not exist`,
+						deleted ? `Deleted Room ${name}` : `Room ${name} does not exist`,
 						"info",
 					);
 					return;
 				}
 				if (command === "connect") {
-					const project = positional[1];
+					const room = positional[1];
 					const name = typeof flags.as === "string" ? flags.as : undefined;
 					if (
-						!project ||
-						!PROJECT_NAME_RE.test(project) ||
+						!room ||
+						!ROOM_NAME_RE.test(room) ||
 						!name ||
 						!AGENT_NAME_RE.test(name)
 					) {
-						throw new Error("usage: /a2a connect <project> --as <name>");
+						throw new Error("usage: /a2a connect <room> --as <name>");
 					}
 
 					clearTimeout(reconnectTimer);
 					reconnectTimer = undefined;
-					const target = desiredTarget(project, name);
+					const target = desiredTarget(room, name);
 					desiredConnection = target;
 					await connectDesired(target);
 					return;
@@ -920,7 +918,7 @@ export default function a2aExtension(
 					publishCommandOutput(
 						raw,
 						status.connection
-							? `Project: ${status.connection.project}\nName: ${status.connection.name}\nConnection: connected\nPeers: ${status.connection.peers.length}\nHub: ${status.hub.baseUrl}`
+							? `Room: ${status.connection.room}\nName: ${status.connection.name}\nConnection: connected\nPeers: ${status.connection.peers.length}\nHub: ${status.hub.baseUrl}`
 							: `Connection: disconnected\nHub: ${status.hub.baseUrl}`,
 					);
 					return;
@@ -993,7 +991,7 @@ export default function a2aExtension(
 	pi.registerTool<typeof peersParameters, PeersDetails>({
 		name: "a2a_peers",
 		label: "A2A Peers",
-		description: `Show this Agent's roster name and the exact other A2A roster names currently addressable in this Project. Use only these names as a2a_message target entries, or the magic target ${ALL_TARGET} for every current peer.`,
+		description: `Show this Agent's roster name and the exact other A2A roster names currently addressable in this Room. Use only these names as a2a_message target entries, or the magic target ${ALL_TARGET} for every current peer.`,
 		parameters: peersParameters,
 		describeCall: () => ({ tool: { title: "A2A Peers" } }),
 		describeResult: describePeers,
@@ -1037,7 +1035,7 @@ export default function a2aExtension(
 	pi.registerTool<typeof messageParameters>({
 		name: "a2a_message",
 		label: "A2A Message",
-		description: `Send to one or more current peers, or everyone. target is a non-empty array of names from a2a_peers, or ["${ALL_TARGET}"] for every current peer; every named peer must be present. Set replyTo to reply to an earlier Project message. Attachments must be current-session local:// regular files. Set requestUserSignature=true when an action you ask for needs user approval; your local OMP UI asks your user before sending. Rejection, cancellation, or unavailable UI sends nothing. ${ASYNC_REPLY_GUIDANCE}`,
+		description: `Send to one or more current peers, or everyone. target is a non-empty array of names from a2a_peers, or ["${ALL_TARGET}"] for every current peer; every named peer must be present. Set replyTo to reply to an earlier Room message. Attachments must be current-session local:// regular files. Set requestUserSignature=true when an action you ask for needs user approval; your local OMP UI asks your user before sending. Rejection, cancellation, or unavailable UI sends nothing. ${ASYNC_REPLY_GUIDANCE}`,
 		parameters: messageParameters,
 		describeCall: describeMessageCall,
 		describeResult: describeToolText,
@@ -1084,12 +1082,11 @@ export default function a2aExtension(
 				const messageId = parameters.messageId ?? randomUUID();
 				const target = normalizeRequestTarget(parameters.target);
 				if (parameters.requestUserSignature) {
-					const project = runtime.project;
+					const room = runtime.room;
 					const from = runtime.self;
-					if (!project || !from)
-						throw new Error("A2A is not connected to a Project");
+					if (!room || !from) throw new Error("A2A is not connected to a Room");
 					const fingerprint = signatureFingerprint({
-						project,
+						room,
 						from,
 						target,
 						text: parameters.text,
@@ -1296,7 +1293,7 @@ export default function a2aExtension(
 		name: "a2a_history",
 		label: "A2A History",
 		description:
-			"Review earlier Project messages using before or after (mutually exclusive), limit, or from. Returned attachment links are valid in the current session. Use only for past context; never wait or poll for new replies.",
+			"Review earlier Room messages using before or after (mutually exclusive), limit, or from. Returned attachment links are valid in the current session. Use only for past context; never wait or poll for new replies.",
 		parameters: historyParameters,
 		describeCall: (args) => ({
 			tool: {

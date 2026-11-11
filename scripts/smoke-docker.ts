@@ -39,7 +39,7 @@ assert(
 		JSON.stringify({ ok: true, service: "omp-a2a-hub" }),
 	"Docker Hub health response stays minimal",
 );
-const project = `docker-${Date.now()}`;
+const room = `docker-${Date.now()}`;
 let api: A2aConnection | null = null;
 let web: A2aConnection | null = null;
 let resolveMessage!: (message: RealtimeMessage) => void;
@@ -50,15 +50,15 @@ const attachmentBytes = Buffer.from("# Docker handoff\nprotocol=3\n", "utf8");
 
 try {
 	console.log(`\n== Docker Hub ${client.baseUrl} ==`);
-	await client.createProject({ name: project });
+	await client.createRoom({ name: room });
 	api = await A2aConnection.connect({
 		baseUrl: client.baseUrl,
-		project,
+		room,
 		name: "api",
 	});
 	web = await A2aConnection.connect({
 		baseUrl: client.baseUrl,
-		project,
+		room,
 		name: "web",
 		events: { onMessage: resolveMessage },
 	});
@@ -71,11 +71,11 @@ try {
 				payload: encodeBinaryPayload(attachmentBytes),
 			},
 		],
-		messageId: `${project}-message`,
+		messageId: `${room}-message`,
 	});
 	assert(
-		accepted.message.messageRef === `${project}:1`,
-		"Docker Hub assigned Project sequence",
+		accepted.message.messageRef === `${room}:1`,
+		"Docker Hub assigned Room sequence",
 	);
 	const receivedMessage = await received;
 	assert(
@@ -92,7 +92,7 @@ try {
 	api = null;
 	await web.close();
 	web = null;
-	const history = await client.history({ project, limit: 10 });
+	const history = await client.history({ room, limit: 10 });
 	assert(history.messages.length === 1, "Docker Hub persisted message history");
 	const persistedAttachment = history.messages[0]?.attachments[0];
 	assert(
@@ -100,10 +100,10 @@ try {
 			decodeBinaryPayload(persistedAttachment.payload).equals(attachmentBytes),
 		"Docker Hub persisted attachment history",
 	);
-	assert(await client.deleteProject(project), "Docker smoke Project deleted");
+	assert(await client.deleteRoom(room), "Docker smoke Room deleted");
 	console.log("Docker Hub smoke OK");
 } finally {
 	await api?.close();
 	await web?.close();
-	await client.deleteProject(project).catch(() => false);
+	await client.deleteRoom(room).catch(() => false);
 }

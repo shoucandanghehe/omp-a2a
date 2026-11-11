@@ -7,18 +7,17 @@ import { HubDataLock } from "../src/hub/data-lock";
 import { HubStore, MESSAGE_STORAGE_VERSION } from "../src/hub/store";
 import { hubLockPath, hubStoreDatabasePath } from "../src/paths";
 
-export const LEGACY_STORAGE_VERSION = 2;
+export const LEGACY_STORAGE_VERSION = 3;
 
 export type StorageMigrationOutcome = "migrated" | "current";
 
 /**
- * Converts one version 2 `messages.sqlite` to the current storage version in a
- * single transaction. `ALTER TABLE ... RENAME COLUMN` leaves the stored schema
- * text identical to the canonical current DDL, so `HubStore` accepts the result
- * without a schema rebuild. Current storage is a no-op; any other version fails
- * loudly instead of converting an unknown database.
+ * Converts one version 3 `messages.sqlite` to the current storage version in a
+ * single transaction. Rebuilding the tables preserves canonical schema text:
+ * SQLite quotes renamed table names, which the exact-schema guard rejects.
+ * Current storage is a no-op; any other version fails loudly.
  */
-export function migrateStorageV2ToV3(
+export function migrateStorageV3ToV4(
 	databasePath: string,
 ): StorageMigrationOutcome {
 	if (!existsSync(databasePath))
@@ -35,17 +34,65 @@ export function migrateStorageV2ToV3(
 			);
 		}
 		database.transaction(() => {
+			database.run(`
+				CREATE TABLE rooms (
+					name TEXT PRIMARY KEY,
+					display_name TEXT,
+					description TEXT,
+					created_at INTEGER NOT NULL,
+					created_by_cwd TEXT
+				)
+			`);
+			database.run(`
+				INSERT INTO rooms(name, display_name, description, created_at, created_by_cwd)
+				SELECT name, display_name, description, created_at, created_by_cwd FROM projects
+			`);
+			database.run(`
+				CREATE TABLE room_sequences (
+					room TEXT PRIMARY KEY NOT NULL,
+					next_sequence INTEGER NOT NULL
+				)
+			`);
+			database.run(`
+				INSERT INTO room_sequences(room, next_sequence)
+				SELECT project, next_sequence FROM project_sequences
+			`);
+			database.run("ALTER TABLE messages RENAME TO legacy_messages");
+			database.run(`
+				CREATE TABLE messages (
+					room TEXT NOT NULL,
+					room_sequence INTEGER NOT NULL,
+					msg_id TEXT NOT NULL UNIQUE,
+					sender_name TEXT NOT NULL,
+					sender_presence_id TEXT NOT NULL,
+					target_kind TEXT NOT NULL,
+					target_names TEXT,
+					target_presence_ids TEXT,
+					encoding TEXT NOT NULL,
+					data TEXT NOT NULL,
+					attachments TEXT NOT NULL,
+					user_approved INTEGER NOT NULL CHECK (user_approved IN (0, 1)),
+					created_at INTEGER NOT NULL,
+					reply_to_sequence INTEGER,
+					PRIMARY KEY(room, room_sequence)
+				)
+			`);
+			database.run(`
+				INSERT INTO messages(
+					room, room_sequence, msg_id, sender_name, sender_presence_id,
+					target_kind, target_names, target_presence_ids, encoding, data,
+					attachments, user_approved, created_at, reply_to_sequence
+				)
+				SELECT project, project_sequence, msg_id, sender_name, sender_presence_id,
+					target_kind, target_names, target_presence_ids, encoding, data,
+					attachments, user_approved, created_at, reply_to_sequence
+				FROM legacy_messages
+			`);
+			database.run("DROP TABLE legacy_messages");
+			database.run("DROP TABLE project_sequences");
+			database.run("DROP TABLE projects");
 			database.run(
-				"ALTER TABLE messages RENAME COLUMN target_name TO target_names",
-			);
-			database.run(
-				"ALTER TABLE messages RENAME COLUMN target_presence_id TO target_presence_ids",
-			);
-			database.run(
-				"UPDATE messages SET target_kind = 'all', target_names = NULL, target_presence_ids = NULL WHERE target_kind = 'project'",
-			);
-			database.run(
-				"UPDATE messages SET target_kind = 'agents', target_names = json_array(target_names), target_presence_ids = CASE WHEN target_presence_ids IS NULL THEN NULL ELSE json_array(target_presence_ids) END WHERE target_kind = 'agent'",
+				"CREATE INDEX messages_room_sender ON messages(room, sender_name, room_sequence)",
 			);
 			database.run(`PRAGMA user_version = ${MESSAGE_STORAGE_VERSION}`);
 		})();
@@ -74,7 +121,7 @@ async function run(): Promise<void> {
 	}
 	const lock = new HubDataLock(hubLockPath(dataDir), dataDir);
 	try {
-		const outcome = migrateStorageV2ToV3(databasePath);
+		const outcome = migrateStorageV3ToV4(databasePath);
 		// Reopen through the canonical store so the guard proves the result.
 		if (outcome === "migrated") new HubStore(databasePath).close();
 		console.log(

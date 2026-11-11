@@ -3,7 +3,7 @@ import { type OmpErrors, type as omptype } from "@oh-my-pi/omptype";
 import { parseWithSchema } from "./config-document";
 import { localConfigCandidates } from "./paths";
 import type { A2aLocalConfig } from "./types";
-import { AGENT_NAME_RE, PROJECT_NAME_RE } from "./types";
+import { AGENT_NAME_RE, ROOM_NAME_RE } from "./types";
 
 const trimmedNonBlankString = omptype("string")
 	.pipe((value) => value.trim())
@@ -12,10 +12,10 @@ const trimmedNonBlankString = omptype("string")
 			value.length > 0 || context.mustBe("a non-blank string"),
 	);
 
-const projectName = trimmedNonBlankString.narrow(
+const roomName = trimmedNonBlankString.narrow(
 	(value, context) =>
-		PROJECT_NAME_RE.test(value) ||
-		context.mustBe("a valid Project name using [a-zA-Z0-9._-], max 64"),
+		ROOM_NAME_RE.test(value) ||
+		context.mustBe("a valid Room name using [a-zA-Z0-9._-], max 64"),
 );
 
 const agentName = trimmedNonBlankString.narrow(
@@ -27,7 +27,7 @@ const agentName = trimmedNonBlankString.narrow(
 );
 
 const localConfigSchema = omptype({
-	project: projectName,
+	room: roomName,
 	name: agentName,
 	"hubUrl?": trimmedNonBlankString,
 	autoConnect: omptype("boolean").default(true),
@@ -37,6 +37,9 @@ const localConfigSchema = omptype({
 function formatLocalConfigErrors(errors: OmpErrors): string | undefined {
 	for (const error of errors) {
 		const field = error.path[0];
+		if (field === "project") {
+			return 'a2a config field "project" was renamed to "room"';
+		}
 		if (
 			field === "agentId" ||
 			field === "agent_id" ||

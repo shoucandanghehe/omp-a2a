@@ -92,7 +92,7 @@ function renderDocument(children: readonly NativeChild[]): TspNode[] {
 const first: MaterializedMessageView = {
 	messageId: "first-id",
 	messageRef: "test:1",
-	project: "test",
+	room: "test",
 	sequence: 1,
 	from: { name: "sender", presenceId: "sender-presence" },
 	target: {

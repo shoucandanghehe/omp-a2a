@@ -107,10 +107,10 @@ test("listener metadata stays minimal and configured client URL remains authorit
 
 		const client = await HubClient.connect({ hubUrl: `${hub.listenUrl}/` });
 		expect(client.baseUrl).toBe(hub.listenUrl);
-		await client.createProject({ name: "configured-route" });
+		await client.createRoom({ name: "configured-route" });
 		const connection = await A2aConnection.connect({
 			baseUrl: client.baseUrl,
-			project: "configured-route",
+			room: "configured-route",
 			name: "remote",
 		});
 		expect(connection.self.name).toBe("remote");
@@ -262,8 +262,8 @@ test("Hub rejects unsupported message storage before listening", async () => {
 	).rejects.toThrow(UNSUPPORTED_STORAGE_MESSAGE);
 });
 
-describe("Hub Project control plane", () => {
-	test("different Hub data directories own independent Projects", async () => {
+describe("Hub Room control plane", () => {
+	test("different Hub data directories own independent Rooms", async () => {
 		const first = await startHubServer({
 			host: "127.0.0.1",
 			port: 0,
@@ -277,12 +277,12 @@ describe("Hub Project control plane", () => {
 		hubs.push(first, second);
 		const firstClient = new HubClient(first.listenUrl);
 		const secondClient = new HubClient(second.listenUrl);
-		await firstClient.createProject({ name: "alpha" });
+		await firstClient.createRoom({ name: "alpha" });
 
-		expect(
-			(await firstClient.listProjects()).map((project) => project.name),
-		).toEqual(["alpha"]);
-		expect(await secondClient.listProjects()).toEqual([]);
+		expect((await firstClient.listRooms()).map((room) => room.name)).toEqual([
+			"alpha",
+		]);
+		expect(await secondClient.listRooms()).toEqual([]);
 	});
 
 	test("control requests have no application body cap", async () => {
@@ -293,11 +293,11 @@ describe("Hub Project control plane", () => {
 		});
 		hubs.push(hub);
 		const description = "x".repeat(6 * 1024 * 1024 + 1);
-		const project = await new HubClient(hub.listenUrl).createProject({
+		const room = await new HubClient(hub.listenUrl).createRoom({
 			name: "large-control-body",
 			description,
 		});
-		expect(project.description).toBe(description);
+		expect(room.description).toBe(description);
 	});
 
 	test("the same Hub data directory cannot be opened twice", async () => {
@@ -313,7 +313,7 @@ describe("Hub Project control plane", () => {
 		).rejects.toThrow("already in use");
 	});
 
-	test("connecting to an unknown Project fails at the claim boundary", async () => {
+	test("connecting to an unknown Room fails at the claim boundary", async () => {
 		const hub = await startHubServer({
 			host: "127.0.0.1",
 			port: 0,
@@ -323,13 +323,13 @@ describe("Hub Project control plane", () => {
 		await expect(
 			A2aConnection.connect({
 				baseUrl: hub.listenUrl,
-				project: "missing",
+				room: "missing",
 				name: "api",
 			}),
 		).rejects.toThrow("claim_rejected");
 	});
 
-	test("Project deletion is idempotent and rejects active Presences", async () => {
+	test("Room deletion is idempotent and rejects active Presences", async () => {
 		const hub = await startHubServer({
 			host: "127.0.0.1",
 			port: 0,
@@ -337,10 +337,10 @@ describe("Hub Project control plane", () => {
 		});
 		hubs.push(hub);
 		const client = new HubClient(hub.listenUrl);
-		await client.createProject({ name: "active" });
+		await client.createRoom({ name: "active" });
 		const connection = await A2aConnection.connect({
 			baseUrl: hub.listenUrl,
-			project: "active",
+			room: "active",
 			name: "api",
 		});
 		const accepted = await connection.send({
@@ -348,22 +348,22 @@ describe("Hub Project control plane", () => {
 			text: "must survive rejected deletion",
 			messageId: "active-history",
 		});
-		const beforeDelete = await client.history({ project: "active" });
+		const beforeDelete = await client.history({ room: "active" });
 		expect(beforeDelete.messages).toHaveLength(1);
 		expect(beforeDelete.messages[0]?.messageRef).toBe(
 			accepted.message.messageRef,
 		);
 
-		await expect(client.deleteProject("active")).rejects.toThrow(
+		await expect(client.deleteRoom("active")).rejects.toThrow(
 			"active Presences",
 		);
-		expect(await client.history({ project: "active" })).toEqual(beforeDelete);
+		expect(await client.history({ room: "active" })).toEqual(beforeDelete);
 		await connection.close();
-		expect(await client.deleteProject("active")).toBe(true);
-		expect(await client.deleteProject("active")).toBe(false);
+		expect(await client.deleteRoom("active")).toBe(true);
+		expect(await client.deleteRoom("active")).toBe(false);
 	});
 
-	test("deletion that wins before a claim makes the Project unknown", async () => {
+	test("deletion that wins before a claim makes the Room unknown", async () => {
 		const hub = await startHubServer({
 			host: "127.0.0.1",
 			port: 0,
@@ -371,20 +371,20 @@ describe("Hub Project control plane", () => {
 		});
 		hubs.push(hub);
 		const client = new HubClient(hub.listenUrl);
-		await client.createProject({ name: "deleted-first" });
-		expect(await client.deleteProject("deleted-first")).toBe(true);
+		await client.createRoom({ name: "deleted-first" });
+		expect(await client.deleteRoom("deleted-first")).toBe(true);
 
 		await expect(
 			A2aConnection.connect({
 				baseUrl: hub.listenUrl,
-				project: "deleted-first",
+				room: "deleted-first",
 				name: "api",
 			}),
-		).rejects.toThrow("unknown project: deleted-first");
+		).rejects.toThrow("unknown room: deleted-first");
 	});
 });
 
-test("deleting and recreating a Project does not reuse its history", async () => {
+test("deleting and recreating a Room does not reuse its history", async () => {
 	const hub = await startHubServer({
 		host: "127.0.0.1",
 		port: 0,
@@ -392,15 +392,15 @@ test("deleting and recreating a Project does not reuse its history", async () =>
 	});
 	hubs.push(hub);
 	const client = new HubClient(hub.listenUrl);
-	await client.createProject({ name: "reused" });
+	await client.createRoom({ name: "reused" });
 	const api = await A2aConnection.connect({
 		baseUrl: hub.listenUrl,
-		project: "reused",
+		room: "reused",
 		name: "api",
 	});
 	const web = await A2aConnection.connect({
 		baseUrl: hub.listenUrl,
-		project: "reused",
+		room: "reused",
 		name: "web",
 	});
 	await api.send({
@@ -410,9 +410,9 @@ test("deleting and recreating a Project does not reuse its history", async () =>
 	});
 	await api.close();
 	await web.close();
-	expect(await client.deleteProject("reused")).toBe(true);
-	await client.createProject({ name: "reused" });
-	expect(await client.history({ project: "reused" })).toEqual({ messages: [] });
+	expect(await client.deleteRoom("reused")).toBe(true);
+	await client.createRoom({ name: "reused" });
+	expect(await client.history({ room: "reused" })).toEqual({ messages: [] });
 });
 
 test("listener startup failure releases the SQLite store and data lock", async () => {
@@ -447,7 +447,7 @@ test("listener startup failure releases the SQLite store and data lock", async (
 	});
 	hubs.push(restarted);
 	const client = new HubClient(restarted.listenUrl);
-	expect((await client.listProjects()).length).toBe(0);
+	expect((await client.listRooms()).length).toBe(0);
 });
 
 test("concurrent stops share and await one cleanup", async () => {
