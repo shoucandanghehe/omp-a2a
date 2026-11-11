@@ -106,9 +106,9 @@ const CONTROL_HELP = [
 	"/a2a connect [<room>] [--as <name>]  Connect (defaults from .omp/a2a.yml)",
 	"/a2a disconnect                  Leave the Room",
 	"/a2a peers                       List present Agents",
-	"/a2a room list                List Rooms",
-	"/a2a room create <name>       Create a Room",
-	"/a2a room delete <name>       Delete a Room and its history",
+	"/a2a room list                   List Rooms",
+	"/a2a room create <name>          Create a Room",
+	"/a2a room delete <name>          Delete a Room and its history",
 	"/a2a history [--before <ref> | --after <ref>] [--limit <n>] [--from <name>]",
 ].join("\n");
 
