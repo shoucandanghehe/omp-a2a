@@ -4,7 +4,7 @@ import type {
 	ExtensionContext,
 	ExtensionUIContext,
 } from "@oh-my-pi/pi-coding-agent";
-import { signatureFingerprint } from "./approval";
+import { rejectionText, signatureFingerprint } from "./approval";
 import { loadLocalConfig } from "./config";
 import { HubClient, resolveHubUrl } from "./hub/client";
 import {
@@ -415,10 +415,13 @@ function formatMessageForModel(message: MaterializedMessageView): string {
 	return [
 		`[a2a message] metadata=${safeJson({
 			ref: message.messageRef,
-			from: message.from,
+			from: message.from.name,
 			room: message.room,
 			at: new Date(message.createdAt).toISOString(),
-			target: message.target,
+			target:
+				message.target.type === "all"
+					? ALL_TARGET
+					: message.target.names.join(","),
 			replyTo: message.replyTo ?? null,
 			senderUserApproval:
 				message.userApproval?.kind === "omp-ui" ? "confirmed" : "unsigned",
@@ -557,7 +560,7 @@ export default function a2aExtension(
 		pi.sendMessage(
 			{
 				customType: "a2a-presence",
-				content: `[a2a presence] ${name} ${status}`,
+				content: `[a2a presence] ${status}=${name}`,
 				display: false,
 			},
 			{ deliverAs: "steer", triggerTurn: false },
@@ -1096,7 +1099,7 @@ export default function a2aExtension(
 							content: [
 								{
 									type: "text" as const,
-									text: reason ?? "User rejected the A2A message",
+									text: rejectionText(reason),
 								},
 							],
 							details: { rejected: true, reason },
@@ -1105,7 +1108,7 @@ export default function a2aExtension(
 					}
 					if (pendingSignatureRequests.has(fingerprint)) {
 						const message =
-							"An identical user signature request is already pending; message was not sent";
+							"An identical approval request is already pending; message was not sent";
 						return {
 							content: [{ type: "text" as const, text: message }],
 							details: { pending: true },
@@ -1181,7 +1184,8 @@ export default function a2aExtension(
 								"A2A message approval cancelled after session or connection change",
 							);
 						if (decision !== "Approve and send" && decision !== "Reject") {
-							const message = "User cancelled the A2A message";
+							const message =
+								"User cancelled the A2A message; nothing was sent";
 							return {
 								content: [{ type: "text" as const, text: message }],
 								details: { cancelled: true },
@@ -1203,7 +1207,8 @@ export default function a2aExtension(
 									"A2A message rejection cancelled after session or connection change",
 								);
 							if (rejection === undefined) {
-								const message = "User cancelled the A2A message";
+								const message =
+									"User cancelled the A2A message; nothing was sent";
 								return {
 									content: [{ type: "text" as const, text: message }],
 									details: { cancelled: true },
@@ -1216,7 +1221,7 @@ export default function a2aExtension(
 								content: [
 									{
 										type: "text" as const,
-										text: reason ?? "User rejected the A2A message",
+										text: rejectionText(reason),
 									},
 								],
 								details: { rejected: true, reason },
@@ -1249,7 +1254,7 @@ export default function a2aExtension(
 						: target.join(", ");
 				const result = accepted.replayed
 					? `Previously accepted ref=${accepted.message.messageRef}; no redelivery was attempted`
-					: `Sent to ${recipientLabel} ref=${accepted.message.messageRef} attachments=${attachments.length}`;
+					: `Sent to ${recipientLabel} ref=${accepted.message.messageRef} attachments=${attachments.length}${parameters.requestUserSignature ? " with user approval" : ""}`;
 				return {
 					content: [
 						{

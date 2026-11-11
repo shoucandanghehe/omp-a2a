@@ -27,3 +27,10 @@ export function signatureFingerprint(options: {
 	];
 	return createHash("sha256").update(JSON.stringify(value)).digest("hex");
 }
+
+/** Tool result for a user-rejected outbound message, shared by both adapters. */
+export function rejectionText(reason: string | null): string {
+	return reason
+		? `User rejected the A2A message: ${reason}`
+		: "User rejected the A2A message";
+}

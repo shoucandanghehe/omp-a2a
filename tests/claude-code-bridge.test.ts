@@ -351,7 +351,10 @@ test("rejection returns the reason, sends nothing, and suppresses repeats", asyn
 		text: "User rejected the A2A message: not now",
 	});
 	const repeat = await call("a2a_message", args);
-	expect(repeat).toEqual({ isError: true, text: "not now" });
+	expect(repeat).toEqual({
+		isError: true,
+		text: "User rejected the A2A message: not now",
+	});
 	expect(prompts).toHaveLength(2);
 	await Bun.sleep(100);
 	expect(peerInbox.size).toBe(0);

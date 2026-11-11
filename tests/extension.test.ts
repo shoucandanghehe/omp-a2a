@@ -968,6 +968,9 @@ test("a2a_message preserves user approval and attachments in delivery and histor
 		expect(unsignedReceived.content).toContain(
 			'"senderUserApproval":"unsigned"',
 		);
+		expect(unsignedReceived.content).toContain('"from":"sender","room":');
+		expect(unsignedReceived.content).toContain('"target":"receiver"');
+		expect(unsignedReceived.content).not.toContain("presenceId");
 		expect(unsignedReceived.content).toContain(
 			`text=${JSON.stringify(unsignedText)}`,
 		);
@@ -1305,7 +1308,9 @@ test("user approval rejection, cancellation, and headless requests fail closed p
 			context,
 		);
 		expect(rejected).toMatchObject({
-			content: [{ type: "text", text: rawReason }],
+			content: [
+				{ type: "text", text: `User rejected the A2A message: ${rawReason}` },
+			],
 			details: { rejected: true, reason: rawReason },
 			isError: true,
 		});
@@ -1316,7 +1321,9 @@ test("user approval rejection, cancellation, and headless requests fail closed p
 			undefined,
 			context,
 		);
-		expect(cachedRejection.content[0]?.text).toBe(rawReason);
+		expect(cachedRejection.content[0]?.text).toBe(
+			`User rejected the A2A message: ${rawReason}`,
+		);
 		expect(approvalDialogs).toHaveLength(1);
 		expect(rejectionInputs).toBe(1);
 		const changedMessageId = await messageTool.execute(
@@ -1326,7 +1333,9 @@ test("user approval rejection, cancellation, and headless requests fail closed p
 			undefined,
 			context,
 		);
-		expect(changedMessageId.content[0]?.text).toBe(rawReason);
+		expect(changedMessageId.content[0]?.text).toBe(
+			`User rejected the A2A message: ${rawReason}`,
+		);
 		expect(approvalDialogs).toHaveLength(2);
 		expect(rejectionInputs).toBe(2);
 
@@ -1339,7 +1348,9 @@ test("user approval rejection, cancellation, and headless requests fail closed p
 			undefined,
 			context,
 		);
-		expect(afterReconnect.content[0]?.text).toBe(rawReason);
+		expect(afterReconnect.content[0]?.text).toBe(
+			`User rejected the A2A message: ${rawReason}`,
+		);
 		expect(approvalDialogs).toHaveLength(3);
 		expect(rejectionInputs).toBe(3);
 
@@ -1352,7 +1363,9 @@ test("user approval rejection, cancellation, and headless requests fail closed p
 			undefined,
 			context,
 		);
-		expect(afterStart.content[0]?.text).toBe(rawReason);
+		expect(afterStart.content[0]?.text).toBe(
+			`User rejected the A2A message: ${rawReason}`,
+		);
 		expect(approvalDialogs).toHaveLength(4);
 
 		await sessionSwitch({ type: "session_switch" }, context);
@@ -1364,7 +1377,9 @@ test("user approval rejection, cancellation, and headless requests fail closed p
 			undefined,
 			context,
 		);
-		expect(afterSwitch.content[0]?.text).toBe(rawReason);
+		expect(afterSwitch.content[0]?.text).toBe(
+			`User rejected the A2A message: ${rawReason}`,
+		);
 		expect(approvalDialogs).toHaveLength(5);
 
 		await sessionShutdown();

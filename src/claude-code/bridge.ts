@@ -7,7 +7,7 @@ import {
 	ListToolsRequestSchema,
 	type Tool,
 } from "@modelcontextprotocol/sdk/types.js";
-import { signatureFingerprint } from "../approval";
+import { rejectionText, signatureFingerprint } from "../approval";
 import { loadLocalConfig } from "../config";
 import { HubClient, resolveHubUrl } from "../hub/client";
 import {
@@ -519,7 +519,7 @@ export class A2aBridge {
 			});
 			if (this.#rejections.has(fingerprint))
 				return text(
-					this.#rejections.get(fingerprint) ?? "User rejected the A2A message",
+					rejectionText(this.#rejections.get(fingerprint) ?? null),
 					true,
 				);
 			if (this.#pendingApprovals.has(fingerprint))
@@ -545,12 +545,7 @@ export class A2aBridge {
 				return text("User cancelled the A2A message; nothing was sent", true);
 			if (outcome.kind === "rejected") {
 				this.#rejections.set(fingerprint, outcome.reason);
-				return text(
-					outcome.reason
-						? `User rejected the A2A message: ${outcome.reason}`
-						: "User rejected the A2A message",
-					true,
-				);
+				return text(rejectionText(outcome.reason), true);
 			}
 		}
 
