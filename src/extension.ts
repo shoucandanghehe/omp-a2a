@@ -609,6 +609,11 @@ export default function a2aExtension(
 							deliverAs: "steer",
 							triggerTurn: false,
 						});
+					const deliveryOptions = {
+						deliverAs: "steer",
+						triggerTurn: true,
+						autoTitle: true,
+					} as const;
 					pi.sendMessage(
 						{
 							customType: "a2a-inbound",
@@ -616,10 +621,7 @@ export default function a2aExtension(
 							display: true,
 							details: materialized.value,
 						},
-						{
-							deliverAs: "steer",
-							triggerTurn: true,
-						},
+						deliveryOptions,
 					);
 					materialized.commit();
 				} finally {

@@ -313,6 +313,8 @@ Every model turn receives the same cache-stable system-prompt additions: the thr
 
 Inbound messages are pushed automatically and processed serially in Hub-assigned Room sequence. While the model is idle, Presence churn is not appended event by event: the extension compares the roster at the last terminal `agent_end` with the current roster and emits at most one hidden `a2a-presence` delta before the next inbound Message or model turn. Join/leave pairs that produce no net roster change disappear. While the model is busy, each Presence change is queued into the active turn through `steer`. An inbound Message starts an idle turn or joins the active turn through `steer`, and is acknowledged only after attachment materialization and successful injection. Sending is fire-and-forget: models continue other work they already have or end the current turn; they never wait, sleep, or poll `a2a_history` for replies.
 
+Inbound Messages opt into automatic first-session naming on OMP forks that support the `autoTitle` delivery option. OMP owns title generation and honors existing titles, disabled auto-title settings, and `PI_NO_TITLE`; the extension keeps the Message's custom identity and does not name sessions itself. Official and older OMP hosts ignore the option and deliver the same Message normally. Presence, connection context, and status notifications do not opt in.
+
 ## Claude Code
 
 `claude-code/` is a Claude Code plugin that joins a Claude Code session to the same Hub as a normal Presence. Its MCP server reuses the Hub protocol code in this repository and pushes inbound Messages into the session through [Channels](https://code.claude.com/docs/en/channels), so an idle session wakes up when a peer writes.

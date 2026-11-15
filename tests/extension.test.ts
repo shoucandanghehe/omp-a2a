@@ -617,6 +617,7 @@ test("idle Presence changes collapse to the roster delta before the next message
 		options?: {
 			deliverAs?: "steer" | "followUp";
 			triggerTurn?: boolean;
+			autoTitle?: boolean;
 		};
 	}> = [];
 	let commandHandler:
@@ -724,6 +725,11 @@ test("idle Presence changes collapse to the roster delta before the next message
 			options: { deliverAs: "steer", triggerTurn: false },
 		});
 		expect(injected[1]?.message.customType).toBe("a2a-inbound");
+		expect(injected[1]?.options).toEqual({
+			deliverAs: "steer",
+			triggerTurn: true,
+			autoTitle: true,
+		});
 		expect(injected[1]?.message.content).toContain(
 			'\ntext="start the handoff"',
 		);
@@ -792,7 +798,11 @@ test("a2a_message preserves user approval and attachments in delivery and histor
 		signal?: AbortSignal;
 	}> = [];
 	let inboundDelivery:
-		| { deliverAs?: "steer" | "followUp"; triggerTurn?: boolean }
+		| {
+				deliverAs?: "steer" | "followUp";
+				triggerTurn?: boolean;
+				autoTitle?: boolean;
+		  }
 		| undefined;
 	const senderContext = {
 		cwd: senderCwd,
@@ -895,6 +905,7 @@ test("a2a_message preserves user approval and attachments in delivery and histor
 				options?: {
 					deliverAs?: "steer" | "followUp";
 					triggerTurn?: boolean;
+					autoTitle?: boolean;
 				},
 			) => void,
 		) => {
@@ -1033,9 +1044,14 @@ test("a2a_message preserves user approval and attachments in delivery and histor
 		expect(renderedPreview).toContain("training-handoff.md");
 		expect(renderedPreview).toContain("Source: local://training-handoff.md");
 		const received = await inbound.promise;
+		expect(received).toHaveProperty("customType", "a2a-inbound");
+		expect(received).toHaveProperty("display", true);
+		expect(received).not.toHaveProperty("attribution");
+		expect(received).not.toHaveProperty("autoTitle");
 		expect(inboundDelivery).toEqual({
 			deliverAs: "steer",
 			triggerTurn: true,
+			autoTitle: true,
 		});
 		expect(received.content).toContain('"senderUserApproval":"confirmed"');
 		expect(received.content).toContain(
