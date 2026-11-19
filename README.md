@@ -213,15 +213,43 @@ rooms:
 ```
 
 OMP joins each configured Room on session start by default. Set
-`autoConnect: false` to disable this. `/a2a save` stores the Hub URL and every
-currently connected Room and name, with auto-connect enabled. It updates the
-existing project config in its current format, or creates `.omp/a2a.yml`.
+`autoConnect: false` to disable this, or use `rooms: []` to configure the Hub
+without any startup Rooms. `/a2a save` replaces the full startup list with
+every currently connected Room and name, records the Hub URL, and enables
+auto-connect. It updates the existing project config in its current format,
+or creates `.omp/a2a.yml`.
 
 The removed fields `agentId`, `autoJoin`, and `project` fail with an explicit migration error. Rename them to `name`, `autoConnect`, and `room`.
 
 If a repository configuration becomes invalid during a command reload, the Extension closes all current connections, cancels reconnect, and blocks fallback Hub access. `/a2a disconnect` remains available without reparsing the invalid file. Fix the file and reload or switch the Session to recover.
 
 ## Human commands
+
+Run **`/a2a`** to open the Room workbench. It groups this session's Rooms
+above those available to join. Select a Room to see its online members in a
+list. The full-width **Message history** row opens a separate view with sender
+filtering, older pages, and attachment links on demand. History is available
+before joining. Join and leave in place; closing the workbench keeps Rooms
+connected.
+In Tern, double-click a discovered Room to open its join form, or type an
+unused name in search to create and join it. Use the Room's context menu to
+delete it, with confirmation. ANSI terminals offer keyboard navigation with
+a separate Room detail view on narrow screens.
+
+The A2A workbench is available in English and Simplified Chinese. The
+extension checks `A2A_LANG`, `LC_ALL`, `LC_MESSAGES`,
+then `LANG`; the first set value starting with `zh` selects Chinese. Use
+`A2A_LANG=zh omp` to force Chinese or `A2A_LANG=en omp` to force English.
+Command names, Room names, and message text keep their original language.
+Buttons supplied by OMP itself follow the host.
+
+Use the Room's startup-list action to add or remove just that Room.
+**Project Settings** sits below the Room list and opens on the right in
+Tern. Open **Startup Rooms** to edit each Room in place.
+**Save Project Settings** writes the draft to
+`.omp/a2a.*` and keeps current connections open. If the startup Hub changes,
+the workbench continues to use the current Hub until its last Room is
+disconnected.
 
 Humans manage Rooms, their own connection, and read-only views:
 
@@ -245,7 +273,7 @@ Humans manage Rooms, their own connection, and read-only views:
 /a2a help
 ```
 
-`/a2a room` is shorthand for `/a2a room list`. Bare `/a2a`, `/a2a --help`, and `/a2a -h` show help without loading configuration.
+`/a2a room` is shorthand for `/a2a room list`. `/a2a help`, `/a2a --help`, and `/a2a -h` show help without loading configuration. Bare `/a2a` also shows help in headless sessions.
 
 Connecting to a new Room keeps the other Rooms connected. Each Room reconnects
 independently. With multiple Rooms, pass a Room to `disconnect` and `--room`

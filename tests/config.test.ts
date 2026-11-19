@@ -9,7 +9,11 @@ import {
 } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadLocalConfig, saveLocalConnections } from "../src/config";
+import {
+	loadLocalConfig,
+	saveLocalConnections,
+	saveLocalDefaults,
+} from "../src/config";
 
 const roots: string[] = [];
 
@@ -81,8 +85,19 @@ test("local YAML accepts multiple Rooms with shared settings", () => {
 	});
 });
 
+test("a Hub-only YAML config needs no startup Room", () => {
+	const root = createRoot();
+	writeConfig(root, "a2a.yml", "rooms: []\nhubUrl: http://hub:4173\n");
+	expect(loadLocalConfig(root)).toEqual({
+		rooms: [],
+		hubUrl: "http://hub:4173",
+		autoConnect: true,
+	});
+});
+
 test.each([
-	{ rooms: [] },
+	{ rooms: [], room: "billing" },
+	{ rooms: null },
 	{ rooms: [{ room: "billing", name: "api" }], room: "billing" },
 	{ rooms: [{ room: "billing", name: "api" }], name: "api" },
 	{ rooms: [{ room: "billing", name: "api", autoConnect: false }] },
@@ -301,4 +316,38 @@ test("saving unchanged connections leaves an existing YAML file untouched", () =
 		}),
 	).toBe(file);
 	expect(readFileSync(file, "utf8")).toBe(content);
+});
+
+test("saving project defaults clears the Hub override and preserves disabled auto-connect", () => {
+	const root = createRoot();
+	const file = writeConfig(
+		root,
+		"a2a.json",
+		'{"room":"billing","name":"old","hubUrl":"http://hub:4173"}',
+	);
+	const rooms = [{ room: "support", name: "triage" }];
+	expect(saveLocalDefaults(root, { rooms, autoConnect: false })).toBe(file);
+	expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+		room: "support",
+		name: "triage",
+		autoConnect: false,
+	});
+	expect(loadLocalConfig(root)).toEqual({ rooms, autoConnect: false });
+});
+
+test("saving after removing the last startup Room keeps the project Hub", () => {
+	const root = createRoot();
+	const file = writeConfig(
+		root,
+		"a2a.json",
+		'{"room":"billing","name":"api","hubUrl":"http://hub:4173"}',
+	);
+	const defaults = {
+		rooms: [],
+		hubUrl: "http://hub:4173",
+		autoConnect: false,
+	};
+	expect(saveLocalDefaults(root, defaults)).toBe(file);
+	expect(JSON.parse(readFileSync(file, "utf8"))).toEqual(defaults);
+	expect(loadLocalConfig(root)).toEqual(defaults);
 });

@@ -21,6 +21,7 @@ type RoomConnectionEvents = {
 };
 
 type ConnectionTarget = { name: string };
+type ConnectFailure = { error: Error; retrying: boolean };
 
 type RoomConnection = {
 	room: string;
@@ -59,7 +60,28 @@ export class RoomConnections {
 		return Array.from(this.#rooms, ([room, { runtime }]) => [room, runtime]);
 	}
 
-	async connect(room: string, name: string, hubUrl: string): Promise<void> {
+	snapshots() {
+		return Array.from(this.#rooms, ([room, connection]) => {
+			const { runtime } = connection;
+			const self = runtime.self;
+			return {
+				room,
+				state: self
+					? ("connected" as const)
+					: connection.reconnectDelayMs > INITIAL_RECONNECT_DELAY_MS
+						? ("reconnecting" as const)
+						: ("connecting" as const),
+				self: self?.name,
+				peers: self ? runtime.peers().map(({ name }) => name) : [],
+			};
+		});
+	}
+
+	async connect(
+		room: string,
+		name: string,
+		hubUrl: string,
+	): Promise<ConnectFailure | undefined> {
 		const pinned = this.hubUrl;
 		if (pinned !== undefined && pinned !== hubUrl) {
 			throw new Error(
@@ -76,7 +98,7 @@ export class RoomConnections {
 			connection = this.#createRoom(room, hubUrl, target);
 			this.#rooms.set(room, connection);
 		}
-		await this.#attempt(connection, target);
+		return await this.#attempt(connection, target);
 	}
 
 	async disconnect(room?: string): Promise<boolean> {
@@ -145,7 +167,7 @@ export class RoomConnections {
 	async #attempt(
 		connection: RoomConnection,
 		target: ConnectionTarget,
-	): Promise<void> {
+	): Promise<ConnectFailure | undefined> {
 		const { room, runtime } = connection;
 		const isCurrent = () =>
 			this.#rooms.get(room) === connection && connection.target === target;
@@ -161,7 +183,8 @@ export class RoomConnections {
 		} catch (error) {
 			if (!isCurrent()) return;
 			connection.connecting = false;
-			const message = error instanceof Error ? error.message : String(error);
+			const failure = error instanceof Error ? error : new Error(String(error));
+			const { message } = failure;
 			const retrying = !message.startsWith("name_in_use:");
 			if (retrying) {
 				this.#scheduleReconnect(connection);
@@ -175,7 +198,7 @@ export class RoomConnections {
 				}
 			}
 			this.#events.onConnectError?.(room, message, retrying);
-			return;
+			return { error: failure, retrying };
 		}
 
 		if (!isCurrent()) return;

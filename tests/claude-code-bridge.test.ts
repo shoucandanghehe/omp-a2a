@@ -333,6 +333,8 @@ test("dialogs follow the configured language", async () => {
 	expect(detectDialogLanguage({ A2A_LANG: "en", LANG: "zh_CN.UTF-8" })).toBe(
 		"en",
 	);
+	expect(detectDialogLanguage({ LC_ALL: "en", LC_MESSAGES: "zh" })).toBe("en");
+	expect(detectDialogLanguage({ LC_MESSAGES: "zh_TW", LANG: "en" })).toBe("zh");
 	expect(detectDialogLanguage({})).toBe("en");
 });
 

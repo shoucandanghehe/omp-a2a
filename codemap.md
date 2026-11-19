@@ -84,7 +84,7 @@ Hub URL precedence is:
 
 Missing configuration fails explicitly. The resolved client URL is authoritative for HTTP and WebSocket connections. Hub metadata is exactly `{protocolVersion}` and only validates compatibility; health is exactly `{ok:true,service:"omp-a2a-hub"}`. Neither response advertises a route. In-process server callers receive a `listenUrl` that preserves an explicit bind host and maps wildcard IPv4/IPv6 binds to loopback.
 
-Repository-local defaults accept a flat `room`/`name` or a non-empty `rooms` list of those pairs with unique Room names; `autoConnect` defaults to enabled. Removed `agentId` and `autoJoin` fields fail with an explicit migration error.
+Repository-local defaults accept a flat `room`/`name` or a `rooms` list of those pairs with unique Room names, including an empty list for a Hub-only setup. `autoConnect` defaults to enabled. Removed `agentId` and `autoJoin` fields fail with an explicit migration error.
 
 If a command reload finds the repository-local configuration invalid, the Extension closes all Room connections, cancels reconnect, and blocks fallback Hub access until a successful reload or Session switch.
 
@@ -93,6 +93,8 @@ The Hub runs locally with `bun run hub` or in Docker Compose. The CLI alone reso
 ## User surfaces
 
 ### Human commands
+
+Bare `/a2a` opens the interactive Room workbench through `ctx.ui.custom`; the same component describes a pointer-first Tern view and renders a keyboard-driven ANSI view. Tern puts creation in Room search and deletion in the Room context menu. The Room overview lists current members and opens message history on demand. Project settings start below the Room list and open in the workbench's detail pane. Settings commit their draft to project configuration without replacing live connections. Explicit subcommands remain available.
 
 `/a2a connect` adds or replaces a single Room connection, preserving the others on the same Hub. `/a2a disconnect <room>` leaves one Room and `/a2a save` persists every live Room and its local name. Status and peers group by Room. Completion uses the Hub Room list for `connect` and `room delete`, tracked Rooms for `disconnect`, and connected Rooms for `history --room`.
 

@@ -1,9 +1,14 @@
+import type { A2aLanguage } from "../locale";
+
+export {
+	type A2aLanguage as DialogLanguage,
+	detectA2aLanguage as detectDialogLanguage,
+} from "../locale";
+
 /**
  * Text for the elicitation dialogs shown to the local user. Claude Code
  * renders its own Accept/Decline buttons, so only the prose is localized.
  */
-export type DialogLanguage = "en" | "zh";
-
 export type DialogText = {
 	approvalHeader: string[];
 	to: string;
@@ -15,7 +20,7 @@ export type DialogText = {
 	deleteRoom: (name: string) => string;
 };
 
-const DIALOG_TEXT: Record<DialogLanguage, DialogText> = {
+const DIALOG_TEXT: Record<A2aLanguage, DialogText> = {
 	en: {
 		approvalHeader: [
 			"Approve this A2A message? Accept sends it with your approval; Decline rejects it.",
@@ -48,15 +53,6 @@ const DIALOG_TEXT: Record<DialogLanguage, DialogText> = {
 	},
 };
 
-/** Pick the dialog language from A2A_LANG, then the POSIX locale variables. */
-export function detectDialogLanguage(
-	env: Record<string, string | undefined> = process.env,
-): DialogLanguage {
-	const locale =
-		env.A2A_LANG || env.LC_ALL || env.LC_MESSAGES || env.LANG || "";
-	return locale.toLowerCase().startsWith("zh") ? "zh" : "en";
-}
-
-export function dialogText(language: DialogLanguage): DialogText {
+export function dialogText(language: A2aLanguage): DialogText {
 	return DIALOG_TEXT[language];
 }

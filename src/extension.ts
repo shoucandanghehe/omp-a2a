@@ -5,10 +5,17 @@ import type {
 	ExtensionUIContext,
 } from "@oh-my-pi/pi-coding-agent";
 import { rejectionText, signatureFingerprint } from "./approval";
-import { loadLocalConfig, saveLocalConnections } from "./config";
+import {
+	loadLocalConfig,
+	saveLocalConnections,
+	saveLocalDefaults,
+} from "./config";
+import { A2aConsole } from "./console-view";
 import { HubClient, resolveHubUrl } from "./hub/client";
+import { decodeBinaryPayload, decodeTextPayload } from "./hub/payload";
 import {
 	ALL_TARGET,
+	formatMessageRef,
 	type MessageRequestTarget,
 	normalizeRequestTarget,
 	parseMessageRef,
@@ -19,6 +26,7 @@ import {
 	materializeLocalAttachments,
 	snapshotLocalAttachments,
 } from "./local-attachments";
+import { detectA2aLanguage } from "./locale";
 import type { A2aRuntime, MessageView } from "./operations";
 import {
 	describeHistory,
@@ -35,6 +43,57 @@ import { escapeUnicode, safeJson } from "./safe-json";
 import { type A2aLocalConfig, AGENT_NAME_RE, ROOM_NAME_RE } from "./types";
 
 const A2A_COMMAND_TYPE = "/a2a";
+
+const EN_CONSOLE_FEEDBACK = {
+	connected: (room: string, name: string | null) =>
+		`Connected to ${room} as ${name}`,
+	disconnected: (room: string) => `Disconnected from ${room}`,
+	reconnecting: (room: string) =>
+		`[a2a] ${room}: connection lost; reconnecting`,
+	connectFailed: (room: string, detail: string) =>
+		`A2A connect to ${room} failed: ${detail}`,
+	presence: (room: string, name: string, status: "joined" | "left") =>
+		`[a2a] ${room}: ${name} ${status}`,
+	notConnected: "A2A is not connected",
+	savedCurrent: (entries: string[], file: string) =>
+		`Saved ${entries.join(", ")} for auto-connect in ${file}`,
+	savedName: (room: string, name: string) => `${room} as ${name}`,
+	created: (room: string) => `Created Room ${room}`,
+	deleted: (room: string) => `Deleted Room ${room}`,
+	missingRoom: (room: string) => `Room ${room} does not exist`,
+	deleteTitle: "Delete A2A Room",
+	confirmDelete: (room: string) =>
+		`Delete ${room} and its complete message history?`,
+	startupHubChanged:
+		"The project startup list is for a different Hub. Edit it in Project settings.",
+	invalidRoom: "Enter a valid Room name",
+	invalidName: "Enter a valid name",
+	nameInUse: (name: string) => `${name} is already in use. Try another name.`,
+	missingMessage: (ref: string) => `Message ${ref} was not found`,
+};
+
+const ZH_CONSOLE_FEEDBACK: typeof EN_CONSOLE_FEEDBACK = {
+	connected: (room, name) => `已加入房间 ${room}，使用名字 ${name}`,
+	disconnected: (room) => `已退出房间 ${room}`,
+	reconnecting: (room) => `[a2a] ${room} 的连接已断开，正在重连`,
+	connectFailed: (room, detail) => `连接房间 ${room} 失败：${detail}`,
+	presence: (room, name, status) =>
+		`[a2a] ${name} ${status === "joined" ? "加入了" : "退出了"}房间 ${room}`,
+	notConnected: "当前没有已连接的 A2A 房间",
+	savedCurrent: (entries, file) =>
+		`已保存 ${entries.join("、")}，下次启动时自动连接。配置文件：${file}`,
+	savedName: (room, name) => `${room}（${name}）`,
+	created: (room) => `已创建房间 ${room}`,
+	deleted: (room) => `已删除房间 ${room}`,
+	missingRoom: (room) => `房间 ${room} 不存在`,
+	deleteTitle: "删除 A2A 房间",
+	confirmDelete: (room) => `要删除房间 ${room} 及其全部消息历史吗？`,
+	startupHubChanged: "项目启动列表使用另一个 Hub。可在项目设置中编辑。",
+	invalidRoom: "请输入有效的房间名",
+	invalidName: "请输入有效的名字",
+	nameInUse: (name) => `${name} 已有人使用，请换个名字。`,
+	missingMessage: (ref) => `找不到消息 ${ref}`,
+};
 
 const A2A_TOOL_GUIDANCE = `A2A connects this session to other agents in one or more Rooms. The latest extension-injected [a2a connection] message lists the connected Rooms and your names. xd://a2a_peers lists online peers grouped by Room, xd://a2a_message sends, and xd://a2a_history reads past messages. When connected to multiple Rooms, specify room to send a new message or read history; replyTo selects the Room of that message. Use only peer names in the selected Room or ${ALL_TARGET} for everyone in it. Replies are pushed to you automatically. After sending, do not wait, sleep, or poll a2a_history; continue other work or end the turn.`;
 
@@ -292,6 +351,7 @@ function completeA2aArguments(
 function usage(): string {
 	return [
 		"A2A anonymous realtime Agent chat",
+		"/a2a — open the A2A console",
 		"",
 		"/a2a hub",
 		"/a2a room create <name>",
@@ -500,12 +560,16 @@ export default function a2aExtension(
 		dependencies.materializeAttachments ?? materializeLocalAttachments;
 	const snapshotAttachments =
 		dependencies.snapshotAttachments ?? snapshotLocalAttachments;
+	const language = detectA2aLanguage();
+	const feedback =
+		language === "zh" ? ZH_CONSOLE_FEEDBACK : EN_CONSOLE_FEEDBACK;
 
 	let configState: ConfigState = { status: "unloaded" };
 	let activeContext: ExtensionContext | null = null;
 	let sessionLifecycle = new AbortController();
 	const modelPeerNames = new Map<string, Set<string>>();
 	let pendingConnectionMessage: A2aContextMessage | undefined;
+	let redrawConsole: (() => void) | undefined;
 	// Set once this session tries to join A2A; keeps the guidance stable across reconnects.
 	let a2aEngaged = false;
 	const sessionRejections = new Map<string, string | null>();
@@ -643,6 +707,7 @@ export default function a2aExtension(
 		});
 
 	const publishConnectionState = (): void => {
+		redrawConsole?.();
 		const context = activeContext;
 		if (!context) return;
 		const rooms = connectedTargets().map(({ room, name }) => ({ room, name }));
@@ -670,9 +735,10 @@ export default function a2aExtension(
 		name: string,
 		status: "joined" | "left",
 	): void => {
+		redrawConsole?.();
 		const context = activeContext;
 		if (!context) return;
-		context.ui.notify(`[a2a] ${room}: ${name} ${status}`, "info");
+		context.ui.notify(feedback.presence(room, name, status), "info");
 		if (context.isIdle()) return;
 		pi.sendMessage(
 			{
@@ -690,7 +756,7 @@ export default function a2aExtension(
 		events: {
 			onConnected: (room, runtime, changed) => {
 				activeContext?.ui.notify(
-					`Connected to ${room} as ${runtime.name}`,
+					feedback.connected(room, runtime.name),
 					"info",
 				);
 				if (!changed) return;
@@ -700,14 +766,12 @@ export default function a2aExtension(
 			onDisconnected: (room) => {
 				modelPeerNames.delete(room);
 				publishConnectionState();
-				activeContext?.ui.notify(
-					`[a2a] ${room}: connection lost; reconnecting`,
-					"warning",
-				);
+				activeContext?.ui.notify(feedback.reconnecting(room), "warning");
 			},
 			onConnectError: (room, message, retrying) => {
+				redrawConsole?.();
 				activeContext?.ui.notify(
-					`A2A connect to ${room} failed: ${message}`,
+					feedback.connectFailed(room, message),
 					retrying ? "warning" : "error",
 				);
 			},
@@ -845,7 +909,7 @@ export default function a2aExtension(
 			return;
 		}
 		if (sessionLifecycle !== lifecycle) return;
-		if (!config || config.autoConnect === false) return;
+		if (!config?.rooms.length || !config.autoConnect) return;
 		a2aEngaged = true;
 		const hubUrl = configuredHubUrl();
 		await Promise.all(
@@ -902,6 +966,245 @@ export default function a2aExtension(
 		await connections.disconnect();
 	});
 
+	const leaveRoom = async (room: string): Promise<boolean> => {
+		const wasConnected = connections.get(room)?.connected;
+		const teardown = connections.disconnect(room);
+		modelPeerNames.delete(room);
+		if (wasConnected) publishConnectionState();
+		return await teardown;
+	};
+
+	const saveCurrentRooms = (context: ExtensionContext): void => {
+		const targets = connectedTargets();
+		const first = targets[0];
+		if (!first) throw new Error(feedback.notConnected);
+		const file = saveLocalConnections(context.cwd, {
+			rooms: targets.map(({ room, name }) => ({ room, name })),
+			hubUrl: first.client.baseUrl,
+		});
+		const entries = targets.map(({ room, name }) =>
+			feedback.savedName(room, name),
+		);
+		context.ui.notify(feedback.savedCurrent(entries, file), "info");
+	};
+
+	const createRoom = async (
+		context: ExtensionContext,
+		name: string,
+		signal: AbortSignal,
+	): Promise<void> => {
+		await (await hubClient()).createRoom(
+			{ name, createdByCwd: context.cwd },
+			{ signal },
+		);
+		signal.throwIfAborted();
+		roomSuggestions = undefined;
+		context.ui.notify(feedback.created(name), "info");
+	};
+
+	const deleteRoom = async (
+		context: ExtensionContext,
+		name: string,
+		signal: AbortSignal,
+	): Promise<void> => {
+		const client = await hubClient();
+		signal.throwIfAborted();
+		const deleted = await client.deleteRoom(name, { signal });
+		signal.throwIfAborted();
+		roomSuggestions = undefined;
+		context.ui.notify(
+			deleted ? feedback.deleted(name) : feedback.missingRoom(name),
+			"info",
+		);
+	};
+
+	const openConsole = async (
+		context: ExtensionContext,
+		session: AbortSignal,
+	): Promise<void> => {
+		let startupConfig: A2aLocalConfig | null = null;
+		let mounted: typeof redrawConsole;
+		try {
+			const closed = await context.ui.custom(
+				(tui, _theme, _keys, done) => {
+					const render = () => tui.requestRender();
+					const view = new A2aConsole({
+						language,
+						redraw: render,
+						close: () => done(true),
+						snapshot: () => {
+							const startupHubUrl =
+								configState.status === "ready" ? configState.hubUrl : undefined;
+							const hubUrl = connections.hubUrl ?? startupHubUrl;
+							return {
+								hubUrl,
+								startupHubUrl,
+								autoConnect: startupConfig?.autoConnect ?? true,
+								startup:
+									hubUrl && hubUrl === startupHubUrl
+										? (startupConfig?.rooms ?? [])
+										: [],
+								rooms: connections.snapshots(),
+							};
+						},
+						list: async (caller) => {
+							const signal = combineAbortSignals(session, caller);
+							const config = await refreshLocalConfig(context.cwd);
+							signal.throwIfAborted();
+							startupConfig = config;
+							render();
+							const client = await hubClient();
+							return (await client.listRooms({ signal })).map(
+								({ name }) => name,
+							);
+						},
+						history: async (room, query, caller) => {
+							const signal = combineAbortSignals(session, caller);
+							const { limit, ...filters } = query;
+							const { messages } = await (await hubClient()).history(
+								{ room, ...filters, limit: limit + 1 },
+								{ signal },
+							);
+							const page = messages.slice(-limit).reverse();
+							return {
+								messages: page.map((message) => ({
+									ref: message.messageRef,
+									from: message.from.name,
+									text: decodeTextPayload(message.payload),
+									replyTo: message.replyTo,
+									attachments: message.attachments.map(({ name }) => name),
+								})),
+								nextBefore:
+									messages.length > limit ? page.at(-1)?.messageRef : undefined,
+							};
+						},
+						attachments: async (room, ref, caller) => {
+							const { sequence } = parseMessageRef(ref);
+							// The wire exposes keyset history, not a single-message route.
+							const range =
+								sequence === 1
+									? { before: formatMessageRef(room, 2) }
+									: { after: formatMessageRef(room, sequence - 1) };
+							const signal = combineAbortSignals(session, caller);
+							const { messages } = await (await hubClient()).history(
+								{ room, ...range, limit: 1 },
+								{ signal },
+							);
+							const message = messages[0];
+							if (message?.messageRef !== ref)
+								throw new Error(feedback.missingMessage(ref));
+							const files = await materializeAttachments(
+								message.attachments.map(({ name, payload }) => ({
+									name,
+									bytes: decodeBinaryPayload(payload),
+								})),
+								context.localProtocolOptions,
+								signal,
+							);
+							try {
+								signal.throwIfAborted();
+								files.commit();
+								return files.attachments;
+							} finally {
+								await files.dispose();
+							}
+						},
+						join: async (room, name) => {
+							session.throwIfAborted();
+							if (!AGENT_NAME_RE.test(name))
+								throw new Error(feedback.invalidName);
+							a2aEngaged = true;
+							const failure = await connections.connect(
+								room,
+								name,
+								connections.hubUrl ?? configuredHubUrl(),
+							);
+							session.throwIfAborted();
+							if (failure)
+								throw failure.retrying
+									? failure.error
+									: new Error(feedback.nameInUse(name));
+						},
+						leave: async (room) => {
+							session.throwIfAborted();
+							await leaveRoom(room);
+						},
+						create: async (room, caller) => {
+							if (!ROOM_NAME_RE.test(room))
+								throw new Error(feedback.invalidRoom);
+							await createRoom(
+								context,
+								room,
+								combineAbortSignals(session, caller),
+							);
+						},
+						delete: (room, caller) =>
+							deleteRoom(context, room, combineAbortSignals(session, caller)),
+						setStartup: (room, name) => {
+							session.throwIfAborted();
+							const config = loadLocalConfig(context.cwd);
+							const startupHubUrl = resolveHubUrl({ hubUrl: config?.hubUrl });
+							if (startupHubUrl !== (connections.hubUrl ?? configuredHubUrl()))
+								throw new Error(feedback.startupHubChanged);
+							const rooms = (config?.rooms ?? []).filter(
+								(entry) => entry.room !== room,
+							);
+							if (name !== undefined) rooms.push({ room, name });
+							const autoConnect = config?.autoConnect ?? true;
+							saveLocalDefaults(context.cwd, {
+								rooms,
+								hubUrl: config?.hubUrl,
+								autoConnect,
+							});
+							startupConfig = { rooms, hubUrl: config?.hubUrl, autoConnect };
+						},
+						loadSettings: () => {
+							session.throwIfAborted();
+							let inheritedHub: string | undefined;
+							try {
+								inheritedHub = resolveHubUrl();
+							} catch {
+								// The project can define its own Hub.
+							}
+							return {
+								config: loadLocalConfig(context.cwd),
+								inheritedHub,
+							};
+						},
+						listStartupRooms: async (hubUrl, caller) => {
+							const signal = combineAbortSignals(session, caller);
+							const client = new HubClient(resolveHubUrl({ hubUrl }), {
+								requestTimeoutMs: 2_500,
+							});
+							return await client.listRooms({ signal });
+						},
+						saveSettings: async (config) => {
+							session.throwIfAborted();
+							resolveHubUrl({ hubUrl: config.hubUrl });
+							saveLocalDefaults(context.cwd, config);
+							startupConfig = await refreshLocalConfig(context.cwd);
+						},
+					});
+					redrawConsole = mounted = render;
+					return view;
+				},
+				{
+					overlay: true,
+					overlayOptions: {
+						anchor: "center",
+						width: "90%",
+						maxHeight: "90%",
+					},
+					signal: session,
+				},
+			);
+			session.throwIfAborted();
+			if (!closed) publishCommandOutput("", usage());
+		} finally {
+			if (redrawConsole === mounted) redrawConsole = undefined;
+		}
+	};
+
 	pi.registerCommand("a2a", {
 		description: "A2A realtime chat connection and Room administration",
 		// @ts-expect-error OMP's TUI awaits the callback, but the extension SDK still types it as synchronous.
@@ -922,6 +1225,10 @@ export default function a2aExtension(
 			const { positional, flags } = parseArgs(raw);
 			const command = positional[0] ?? "help";
 			try {
+				if (!raw.trim() && context.hasUI) {
+					await openConsole(context, sessionToken);
+					return;
+				}
 				if (command === "disconnect") {
 					let room = positional[1];
 					if (positional.length > 2 || Object.keys(flags).length > 0)
@@ -934,16 +1241,13 @@ export default function a2aExtension(
 							);
 						room = rooms[0]?.[0];
 					}
-					const wasConnected =
-						room !== undefined && connections.get(room)?.connected;
-					const teardown =
-						room === undefined ? undefined : connections.disconnect(room);
-					if (room !== undefined) modelPeerNames.delete(room);
-					if (wasConnected) publishConnectionState();
-					const disconnected = await teardown;
+					const disconnected =
+						room === undefined ? false : await leaveRoom(room);
 					if (sessionToken.aborted) return;
 					context.ui.notify(
-						disconnected ? `Disconnected from ${room}` : "A2A is not connected",
+						disconnected && room !== undefined
+							? feedback.disconnected(room)
+							: feedback.notConnected,
 						"info",
 					);
 					return;
@@ -954,17 +1258,7 @@ export default function a2aExtension(
 				}
 				if (command === "save") {
 					if (raw.trim() !== "save") throw new Error("usage: /a2a save");
-					const targets = connectedTargets();
-					const first = targets[0];
-					if (!first) throw new Error("A2A is not connected");
-					const file = saveLocalConnections(context.cwd, {
-						rooms: targets.map(({ room, name }) => ({ room, name })),
-						hubUrl: first.client.baseUrl,
-					});
-					context.ui.notify(
-						`Saved ${targets.map(({ room, name }) => `${room} as ${name}`).join(", ")} for auto-connect in ${file}`,
-						"info",
-					);
+					saveCurrentRooms(context);
 					return;
 				}
 				await refreshLocalConfig(context.cwd);
@@ -983,13 +1277,7 @@ export default function a2aExtension(
 					const name = positional[2];
 					if (!name || !ROOM_NAME_RE.test(name))
 						throw new Error("usage: /a2a room create <name>");
-					await (await hubClient()).createRoom(
-						{ name, createdByCwd: context.cwd },
-						{ signal: sessionToken },
-					);
-					sessionToken.throwIfAborted();
-					roomSuggestions = undefined;
-					context.ui.notify(`Created Room ${name}`, "info");
+					await createRoom(context, name, sessionToken);
 					return;
 				}
 				if (
@@ -1009,22 +1297,15 @@ export default function a2aExtension(
 					const name = positional[2];
 					if (!name || !ROOM_NAME_RE.test(name))
 						throw new Error("usage: /a2a room delete <name>");
-					const client = await hubClient();
 					if (
 						!(await context.ui.confirm(
-							"Delete A2A Room",
-							`Delete ${name} and its complete message history?`,
+							feedback.deleteTitle,
+							feedback.confirmDelete(name),
+							{ signal: sessionToken },
 						))
 					)
 						return;
-					sessionToken.throwIfAborted();
-					const deleted = await client.deleteRoom(name);
-					sessionToken.throwIfAborted();
-					roomSuggestions = undefined;
-					context.ui.notify(
-						deleted ? `Deleted Room ${name}` : `Room ${name} does not exist`,
-						"info",
-					);
+					await deleteRoom(context, name, sessionToken);
 					return;
 				}
 				if (command === "connect") {

@@ -1,4 +1,4 @@
-import { expect, test, vi } from "bun:test";
+import { afterEach, beforeEach, expect, test, vi } from "bun:test";
 import {
 	existsSync,
 	mkdirSync,
@@ -34,6 +34,16 @@ import {
 } from "../src/hub/realtime-types";
 import { startHubServer } from "../src/hub/server";
 import { materializeLocalAttachments } from "../src/local-attachments";
+
+let previousLanguage: string | undefined;
+beforeEach(() => {
+	previousLanguage = process.env.A2A_LANG;
+	process.env.A2A_LANG = "en";
+});
+afterEach(() => {
+	if (previousLanguage === undefined) delete process.env.A2A_LANG;
+	else process.env.A2A_LANG = previousLanguage;
+});
 
 interface CompletionItem {
 	value: string;
@@ -190,6 +200,17 @@ test("human commands and model tools expose separate A2A surfaces", async () => 
 	);
 	expect(messageRegistration.parameters).not.toHaveProperty("userApproval");
 	if (!commandHandler) throw new Error("a2a command was not registered");
+	await commandHandler("", {
+		cwd: process.cwd(),
+		ui: { notify() {} },
+	});
+	expect(commandOutput).toMatchObject({
+		message: {
+			customType: "/a2a",
+			content: expect.stringContaining("/a2a help"),
+		},
+		options: { triggerTurn: false },
+	});
 	await commandHandler("help", {
 		cwd: process.cwd(),
 		ui: { notify() {} },

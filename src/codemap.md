@@ -14,6 +14,8 @@ The central seam is `A2aRuntime`: extension callbacks and commands depend on one
 | `presentation.ts` | Native TSP descriptions for inbound messages and tool calls/results, with ANSI inbound rendering through OMP components. | `renderInboundMessage`, `describeMessageCall`, `describePeers`, `describeHistory` |
 | `local-attachments.ts` | Cancellable snapshot of uncapped sender-session `local://` file bytes and leak-free materialization of validated attachment basenames into the calling session. | `snapshotLocalAttachments`, `materializeLocalAttachments` |
 | `operations.ts` | Connected runtime over one WebSocket plus HTTP Room/history operations. | `A2aRuntime`, `A2aRuntimeEvents`, `MessageView`, `AcceptedMessageView`, `RuntimeStatus` |
+| `console-view.ts` | Room workbench: current and available Rooms, join/leave, history, and nested project settings for Tern and ANSI. | `A2aConsole` |
+| `locale.ts` | Shared language selection for the OMP console and Claude Code dialogs. | `detectA2aLanguage` |
 | `room-connections.ts` | Tracks independently connected or reconnecting Room runtimes on one Hub. | `RoomConnections` |
 | `config.ts` | Strict repository-local YAML/JSON connection defaults. | `loadLocalConfig`, `saveLocalConnections` |
 | `config-document.ts` | Read YAML/JSON documents, apply an owner-supplied omptype schema, and report path-qualified errors. | `parseWithSchema` |
@@ -51,6 +53,8 @@ On `session_shutdown`, the extension aborts Session work and disconnects every R
 ## Human command surface
 
 `/a2a` is administration and inspection only:
+
+Bare `/a2a` mounts the Room workbench. Tern keeps search as a native field in the overview, uses Room list click/activation and context-menu actions for selection, joining and deletion, and exposes create-and-join only for a valid unmatched search. It holds Room selection and search across navigation, including Project Settings below the Room list and its Startup Rooms and individual Room editor pages in the same detail pane. The extension owns Hub calls, the connection lifecycle, and configuration writes. Project settings stage changes until Save, while the per-Room startup action updates one entry directly. The current Hub remains pinned until the last tracked Room is left. The Room view lists online members vertically and fetches history when opened, without requiring a Presence; attachments are materialized on demand.
 
 - `hub`
 - `room create <name>`

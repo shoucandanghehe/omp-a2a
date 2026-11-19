@@ -39,7 +39,6 @@ const flatConfigSchema = omptype({ ...roomConnection, ...localSettings });
 const roomsConfigSchema = omptype({
 	rooms: omptype({ ...roomConnection, "+": "reject" })
 		.array()
-		.atLeastLength(1)
 		.narrow(
 			(rooms, context) =>
 				new Set(rooms.map(({ room }) => room)).size === rooms.length ||
@@ -102,14 +101,32 @@ export function saveLocalConnections(
 	cwd: string,
 	target: { rooms: readonly A2aRoomConnection[]; hubUrl: string },
 ): string {
+	return saveLocalDefaults(cwd, { ...target, autoConnect: true });
+}
+
+export function saveLocalDefaults(
+	cwd: string,
+	target: {
+		rooms: readonly A2aRoomConnection[];
+		hubUrl?: string;
+		autoConnect: boolean;
+	},
+): string {
 	const { file, config } = readLocalConfig(cwd);
-	const settings = { hubUrl: target.hubUrl, autoConnect: true };
+	const settings = {
+		...(target.hubUrl === undefined ? {} : { hubUrl: target.hubUrl }),
+		autoConnect: target.autoConnect,
+	};
 	const saved = localConfigSchema.assert(
 		target.rooms.length === 1
 			? { ...target.rooms[0], ...settings }
 			: { rooms: target.rooms, ...settings },
 	);
-	if (config && config.hubUrl === saved.hubUrl && config.autoConnect) {
+	if (
+		config &&
+		config.hubUrl === saved.hubUrl &&
+		config.autoConnect === saved.autoConnect
+	) {
 		if ("rooms" in saved) {
 			if (
 				"rooms" in config &&
