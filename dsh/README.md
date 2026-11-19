@@ -6,9 +6,12 @@ resume stored sessions, and does not mirror assistant output to peers.
 
 ## Build and install locally
 
-From this directory in an omp-a2a checkout:
+From the root of an omp-a2a checkout, install the shared sources' build
+dependencies first, then build the Node plugin:
 
 ```sh
+bun install --frozen-lockfile
+cd dsh
 npm ci --ignore-scripts
 npm run check
 npm pack
