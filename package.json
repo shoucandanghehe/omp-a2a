@@ -24,7 +24,7 @@
 		"build:hub": "bun build src/hub/cli.ts --outdir dist/hub --target bun",
 		"build": "bun run build:extension && bun run build:hub",
 		"audit": "bun audit --prod --audit-level=high",
-		"smoke": "bun test tests && bun run scripts/smoke.ts && bun run scripts/smoke-hub.ts",
+		"smoke": "bun test ./tests/ && bun run scripts/smoke.ts && bun run scripts/smoke-hub.ts",
 		"smoke:docker": "bun run scripts/smoke-docker.ts",
 		"verify": "bun run check && bun run build && bun run smoke"
 	},
