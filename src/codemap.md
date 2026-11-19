@@ -14,7 +14,8 @@ The central seam is `A2aRuntime`: extension callbacks and commands depend on one
 | `presentation.ts` | Native TSP descriptions for inbound messages and tool calls/results, with ANSI inbound rendering through OMP components. | `renderInboundMessage`, `describeMessageCall`, `describePeers`, `describeHistory` |
 | `local-attachments.ts` | Cancellable snapshot of uncapped sender-session `local://` file bytes and leak-free materialization of validated attachment basenames into the calling session. | `snapshotLocalAttachments`, `materializeLocalAttachments` |
 | `operations.ts` | Connected runtime over one WebSocket plus HTTP Room/history operations. | `A2aRuntime`, `A2aRuntimeEvents`, `MessageView`, `AcceptedMessageView`, `RuntimeStatus` |
-| `config.ts` | Strict repository-local YAML/JSON connection defaults. | `loadLocalConfig` |
+| `room-connections.ts` | Tracks independently connected or reconnecting Room runtimes on one Hub. | `RoomConnections` |
+| `config.ts` | Strict repository-local YAML/JSON connection defaults. | `loadLocalConfig`, `saveLocalConnections` |
 | `config-document.ts` | Read YAML/JSON documents, apply an owner-supplied omptype schema, and report path-qualified errors. | `parseWithSchema` |
 | `paths.ts` | Hub SQLite storage, data-lock, and local config candidate paths. | path functions |
 | `types.ts` | Room/config domain shapes and name validation regexes. | `A2aRoom`, `A2aLocalConfig` |
@@ -24,26 +25,26 @@ The central seam is `A2aRuntime`: extension callbacks and commands depend on one
 
 ## Extension lifecycle
 
-`a2aExtension(pi, dependencies?)` owns the active OMP `ExtensionContext`, one Session lifecycle `AbortController`, one explicit `unloaded | invalid | ready` configuration state, the desired `{ hubUrl, client?, room, name }` reconnect target, and one bounded exponential reconnect timer from 500 ms to 10 seconds. `A2aRuntime`, not the Extension, owns connection transitions and published connection lifetime.
+`a2aExtension(pi, dependencies?)` owns the active OMP `ExtensionContext`, one Session lifecycle `AbortController`, and `unloaded | invalid | ready` configuration state. `RoomConnections` owns the desired name and bounded exponential reconnect timer (500 ms to 10 seconds) per Room. The first tracked Room pins the Hub URL until the last Room leaves. Each Room has one `A2aRuntime`, which owns the connection transition and its published lifetime.
 
 On `session_start` and `session_switch`, the extension:
 
-1. replaces and aborts the prior Session lifecycle controller, then synchronously clears the active context, cached Hub selection, desired target, and reconnect timer;
-2. cancels and awaits the published Presence or pending handshake;
+1. replaces and aborts the prior Session lifecycle controller, then clears the active context, cached Hub selection, and every Room's reconnect intent;
+2. cancels and awaits all published connections and pending handshakes;
 3. activates the new context and loads its strict repository-local configuration only if that lifecycle is still current;
 4. reports invalid or missing Hub configuration and preserves that error so Hub and Room operations cannot use a prior client;
-5. captures the selected Hub URL in the desired target and auto-connects only when configuration is valid, present, and `autoConnect !== false`.
+5. joins each configured Room on the resolved Hub if `autoConnect !== false`.
 
-Commands reload the current Session configuration. A valid local `hubUrl` wins; otherwise the global config is required. An invalid reload publishes fail-closed state, cancels reconnect intent, and closes the current Presence before reporting its path-qualified error. `disconnect` and `help` remain available without reparsing configuration.
+Hub commands and queries reload the Session configuration. A valid local `hubUrl` wins over the global config, and Room administration uses the pinned Hub while Rooms are tracked. An invalid reload cancels all reconnects and closes the connections before reporting its path-qualified error. `disconnect` and `help` do not require a valid configuration; `save` validates the local file before replacing it.
 
-On `session_shutdown`, the extension aborts Session work, clears active and reconnect state, and disconnects the Runtime. Slash history and model attachment work combine caller, Session, and published-connection cancellation; stale work cannot inject, send, or notify a retired Session. Graceful close releases Presence before acknowledging `goodbye`, then bounds WebSocket teardown. Unexpected close reconnects only the current desired target using its captured accepting Hub client. A `name_in_use` candidate is terminal for that target; an older published connection becomes the reconnect intent.
+On `session_shutdown`, the extension aborts Session work and disconnects every Room. A Room disconnect only cancels its own history, sends, approvals, and inbound work. A rejoin waits for that Room's prior teardown. Unexpected close reconnects only the affected Room using its accepting Hub client. A `name_in_use` failure ends the attempt; on a failed rename the previous name remains the reconnect target if its connection is still published.
 
 ### Inbound events
 
-- Only events from the currently published connection reach the Extension; candidate and retired connection events are discarded.
+- Only events from a Room's published connection reach the Extension; candidate and retired connection events are discarded.
 - Successful publication, manual disconnect, invalid-config teardown, and unexpected close publish hidden `a2a-connection` state without changing the model's fixed system-prompt prefix. Idle transitions coalesce to the latest state for the next turn or inbound Message; busy transitions use `steer`. A simultaneous idle connection update and Presence delta become one ordered `a2a-context` message.
-- `presence_joined` and `presence_left` always update the UI. Busy sessions receive each change as a hidden-display `a2a-presence` custom message through `steer`. Idle changes are collapsed into at most one joined/left roster delta between the last terminal `agent_end` snapshot and the current Presence; net-zero churn is discarded, and the delta is injected before the next inbound Message or returned by `before_agent_start` for the next model turn.
-- `delivery` reports the selected peer name and terminal `delivered` or `failed` outcome; failures include an explicit receiver error or an unconfirmed write, disconnect, or ACK-timeout reason.
+- Presence events and delivery notifications identify their Room. Idle Presence deltas compare current rosters to the last terminal `agent_end` per Room; only net changes enter model context. Busy sessions receive each change through `steer`.
+- Delivery reports the selected peer name and terminal `delivered` or `failed` outcome; failures include an explicit receiver error or an unconfirmed write, disconnect, or ACK-timeout reason.
 - Distinct Messages run serially in Hub-assigned Room sequence. Each callback captures the Session lifecycle token and Runtime-owned published-connection token, carries both through attachment materialization, then verifies both before injecting an `a2a-inbound` OMP custom message through `steer`. Idle sessions start a turn and busy sessions queue the Message into the active turn. Session changes, connection replacement, disconnect, or socket close cancel injection and dispose every uncommitted attachment directory. Candidate and retired sockets fail delivery rather than acknowledging work that never reached the current Session.
 - Socket/protocol errors from the published connection are written to the extension logger.
 
@@ -57,13 +58,14 @@ On `session_shutdown`, the extension aborts Session work, clears active and reco
 - `room list`
 - `room delete <name>` with UI confirmation
 - `connect <room> --as <name>`
-- `disconnect`
+- `save` (every currently connected Room)
+- `disconnect [<room>]` (implicit when exactly one Room is tracked)
 - `status`
 - `peers`
-- `history [--before <ref> | --after <ref>] [--limit <n>] [--from <name>]`
+- `history [--room <room>] [--before <ref> | --after <ref>] [--limit <n>] [--from <name>]`
 - `help` (also accepted as `--help` or `-h`)
 
-`completeA2aArguments` provides synchronous, context-sensitive completion. It preserves the full argument prefix in each returned value, removes already-used flags, and enforces the `before`/`after` mutual exclusion in suggestions.
+`completeA2aArguments` provides synchronous completion, including tracked Room names for `disconnect` and `history --room`. It preserves the full argument prefix, removes used history flags, and enforces the `before`/`after` mutual exclusion in suggestions.
 
 Read-only result commands (`help`/`--help`/`-h`, `hub`, `room`/`room list`, `status`, `peers`, and `history`) publish a visible transcript card whose custom-message title is the trimmed `/a2a` invocation, without triggering a model turn. The `context` hook removes only custom messages whose type is `/a2a` or starts with `/a2a ` before provider requests, preserving the contract that human command output stays outside model context. Mutating action results, connection lifecycle, Presence, delivery, and errors remain transient UI notifications.
 
@@ -75,9 +77,9 @@ The extension uses the injected ArkType module as the canonical schema authoring
 
 | Tool | Contract |
 | --- | --- |
-| `a2a_peers` | Returns the connected Agent's own roster name plus the other current Presence names that are valid `a2a_message` targets. The magic target `@all` addresses every current peer. |
-| `a2a_message` | Requires a non-empty target name list or `["@all"]` and text; accepts optional current-session `local://` attachment sources, `replyTo`, `messageId`, and local UI approval of the sending Agent's exact outbound Message. Forked OMP versions advertise `askDialogCapabilities.allowCustomInput` when their `localAskDialog` can disable custom input; official OMP and older forks lack that marker and fall back to `confirm`/`input`, so Type is absent on every supported path. The UI review uses a human-readable Target/Message/Attachments layout containing only the target, text, and attachment names and source URLs; the Extension separately binds approval to the current sending Presence, Room, resolved `messageId`, target, text, causal parent, and snapshotted attachment names and bytes before dispatch. A receiver never asks its local user on the sender's behalf; it returns an unsigned approval-gated request with instructions to preserve target, content, causal parent, and attachments while using a new `messageId` and sender-owned approval. Rejection returns the user's optional reason without sending and suppresses only an identical request from the same Presence for the Session. The tool forwards combined cancellation, fences the initiating connection, distinguishes new acceptance from replay, and keeps replies push-driven. |
-| `a2a_history` | Accepts mutually exclusive `before`/`after` cursors, plus `limit` and `from`; rematerializes persisted attachments into the calling session; it is only for deliberate review of persisted context, never waiting for a new reply. |
+| `a2a_peers` | Lists your own name and addressable peers grouped by Room. |
+| `a2a_message` | Routes by explicit `room`, by `replyTo`, or by the only tracked Room. Conflicting `room` and `replyTo` are rejected; `@all` targets the selected Room. It snapshots optional session-local attachments, shows the Room in the approval preview, and fences dispatch to that same Presence. |
+| `a2a_history` | Queries the explicit or sole Room, with mutually exclusive `before`/`after` cursors and optional `limit` and `from`. It rematerializes attachments into the calling session. |
 
 Approval previews use escaped, wrapping Markdown paragraphs rather than fenced code, preserving literal message text, line breaks, and attachment facts. Both Approve and Reject carry the same complete preview.
 
@@ -112,7 +114,9 @@ Attachment snapshot and materialization combine caller, Session, and published-c
 2. `.omp/a2a.yaml`
 3. `.omp/a2a.json`
 
-The selected file is authoritative: read, syntax, and schema failures include its path and never fall through to a later candidate. The local omptype schema requires `room` and `name`, permits optional `hubUrl`, defaults `autoConnect` to enabled, trims strings, rejects blanks, narrows Room/name values through their regexes, and uses `"+": "reject"` for every undeclared field. Removed `agentId`/`agent_id` and `autoJoin`/`auto_join` error paths are rendered as explicit migration errors rather than aliases.
+The selected file is authoritative: read, syntax, and schema failures include its path and do not fall through. The schema accepts either flat `room`/`name` fields or `rooms` with a non-empty list of unique `{ room, name }` entries. Both forms support `hubUrl` and `autoConnect` (default true), reject undeclared fields, and retain path-qualified migration errors for removed fields.
+
+`/a2a save` uses every published Room and name and the shared accepting Hub URL. `saveLocalConnections` atomically writes the first existing config in its format, or creates `.omp/a2a.yml`. It writes one Room in the flat form and multiple Rooms in the `rooms` form, with auto-connect enabled.
 
 The global Hub URL resolver (`src/hub/client.ts:resolveHubUrl`) uses the same authoritative first-existing-file rule under `~/.omp/a2a/`, scanning `config.yml`, `config.yaml`, then `config.json`. Its owner schema trims and requires one nonblank string `hubUrl` and uses `"+": "reject"`; the former `hub_url`/`url` aliases therefore fail as undeclared fields, and the resolved URL has trailing slashes stripped.
 
@@ -127,7 +131,7 @@ The global Hub URL resolver (`src/hub/client.ts:resolveHubUrl`) uses the same au
 - Room: starts alphanumeric, then `[a-zA-Z0-9._-]`, maximum 64 characters.
 - Agent name: starts with a Unicode letter or number, then Unicode letters, numbers, marks, or `._-`, maximum 32 characters.
 
-A name identifies only the lifetime of one current WebSocket Presence. It is not durable identity. `A2aRoom` (`src/types.ts`) contains `name` and `createdAt`, with optional `displayName`, `description`, and `createdByCwd`; `A2aLocalConfig` contains required `room` and `name`, with optional `hubUrl` and `autoConnect`.
+A name identifies the lifetime of one WebSocket Presence. `A2aRoom` contains `name` and `createdAt`, with optional `displayName`, `description`, and `createdByCwd`. `A2aLocalConfig` presents either disk format to clients as a list of Room/name pairs and shared Hub settings.
 
 ## Data flow
 

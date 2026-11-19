@@ -200,9 +200,26 @@ name: api
 autoConnect: true
 ```
 
+For multiple OMP Rooms on the same Hub, use `rooms` in place of the two
+top-level `room` and `name` fields:
+
+```yaml
+hubUrl: http://127.0.0.1:4173
+rooms:
+  - room: billing
+    name: api
+  - room: review
+    name: reviewer
+```
+
+OMP joins each configured Room on session start by default. Set
+`autoConnect: false` to disable this. `/a2a save` stores the Hub URL and every
+currently connected Room and name, with auto-connect enabled. It updates the
+existing project config in its current format, or creates `.omp/a2a.yml`.
+
 The removed fields `agentId`, `autoJoin`, and `project` fail with an explicit migration error. Rename them to `name`, `autoConnect`, and `room`.
 
-If a repository configuration becomes invalid during a command reload, the Extension immediately closes its current Presence, cancels reconnect, and blocks fallback Hub access. `/a2a disconnect` remains available without reparsing the invalid file. Fix the file and reload or switch the Session to recover.
+If a repository configuration becomes invalid during a command reload, the Extension closes all current connections, cancels reconnect, and blocks fallback Hub access. `/a2a disconnect` remains available without reparsing the invalid file. Fix the file and reload or switch the Session to recover.
 
 ## Human commands
 
@@ -216,23 +233,30 @@ Humans manage Rooms, their own connection, and read-only views:
 /a2a room delete billing
 
 /a2a connect billing --as api
-/a2a disconnect
+/a2a connect review --as reviewer
+/a2a save
+/a2a disconnect review
 
 /a2a status
 /a2a peers
-/a2a history
-/a2a history --before billing:42 --limit 20
-/a2a history --from web
+/a2a history --room billing
+/a2a history --room billing --before billing:42 --limit 20
+/a2a history --room billing --from web
 /a2a help
 ```
 
 `/a2a room` is shorthand for `/a2a room list`. Bare `/a2a`, `/a2a --help`, and `/a2a -h` show help without loading configuration.
 
-`/a2a` provides context-aware Tab completion for root commands, `room create|list|delete`, `connect ... --as`, and the remaining compatible `history` flags. `--before` and `--after` are never suggested together. Room names, Agent names, and message references remain explicit values.
+Connecting to a new Room keeps the other Rooms connected. Each Room reconnects
+independently. With multiple Rooms, pass a Room to `disconnect` and `--room`
+to `history`; with one Room, both can use it implicitly. Leave all Rooms
+before connecting to another Hub.
+
+`/a2a` provides Tab completion for root commands, `room create|list|delete`, `connect ... --as`, tracked Rooms in `disconnect` and `history --room`, and compatible history flags. `--before` and `--after` are never suggested together.
 
 Room deletion requires confirmation. Humans do not use send, broadcast, reply, Inbox, join, or leave protocol commands.
 
-`/a2a peers` lists every currently connected member, with the local Presence marked `(you)`.
+`/a2a status` shows all tracked Rooms. `/a2a peers` groups online members by Room and marks your name as `(you)`.
 
 Read-only results from `help`, `hub`, `room list`, `status`, `peers`, and `history` are persisted in the transcript as command cards titled with the invoked `/a2a` command. These human-only cards are excluded from model context. Action results, connection and Presence events, delivery state, and errors remain transient notifications.
 
@@ -242,9 +266,13 @@ The model receives exactly three A2A tools through `xd://a2a_peers`, `xd://a2a_m
 
 ### `a2a_peers`
 
-Shows this Agent's roster name separately, then lists the other currently connected names that are valid `a2a_message` targets. Missing names do not exist. The magic target `@all` addresses every current peer.
+Shows your own name and the addressable peers in each connected Room. The same name can refer to different peers in different Rooms.
 
 ### `a2a_message`
+
+With multiple Rooms, specify `"room"` when starting a new conversation. A
+reply uses the Room in `replyTo`; if you also give `"room"`, it must match.
+With one Room, you can omit `"room"`.
 
 Direct message to one peer:
 
@@ -268,12 +296,13 @@ Everyone in the Room:
 
 ```json
 {
+  "room": "billing",
   "target": ["@all"],
   "text": "Freeze the contract"
 }
 ```
 
-`target` is a non-empty array. Entries are peer names from `a2a_peers`, or the single magic value `@all`; every named peer must be present when the Message is accepted.
+`target` is a non-empty array. Use peer names from the selected Room or `["@all"]` for everyone online in that Room. Every named peer must be present when the Message is accepted.
 
 Causal reply:
 
@@ -297,7 +326,7 @@ Message with a session-local attachment:
 
 Only current-session `local://` regular files are accepted as attachment sources. Source URLs are never sent to or resolved by the Hub.
 
-To carry explicit user authorization, the Agent proposing the approval-gated action sets `"requestUserSignature": true` on its own outbound call. The sending endpoint's local OMP UI reviews a human-readable summary containing only the target, text, and attachment names and source URLs. Forked OMP versions that advertise `askDialogCapabilities.allowCustomInput` use `localAskDialog` with custom input disabled; official OMP and older forks lack that capability marker and use `confirm`/`input` with the same summary so Type never appears. The Extension still binds approval to the sending Presence, Room, exact `messageId`, target, text, causal parent, and snapshotted attachment names and bytes before sending. The receiving Agent never asks its local user to approve on the sender's behalf: for an unsigned approval-gated request, it tells the sender to keep target, text, `replyTo`, and attachments unchanged but use a new `messageId` and request approval at its own endpoint. Reusing the unsigned Message's ID would conflict because approval changes persisted Message content. Choosing Approve sends the Message; choosing Reject opens an optional-reason input; Escape cancels. Approval adds a non-cryptographic `omp-ui` receipt to that one immutable Message. It does not propagate through replies, forwarding, or delegation, and a reply remains unsigned unless its own sender separately requests approval. A rejection returns its reason unchanged and sends nothing. Repeating the same rejected sending Presence, Room, target, text, `messageId`, causal parent, and attachment content in the same Session returns the prior rejection without opening another prompt; changing any fact permits a new request. Cancelling is not cached. Missing interactive UI fails closed before attachment snapshotting.
+To carry explicit user authorization, the Agent proposing the approval-gated action sets `"requestUserSignature": true` on its own outbound call. The sending endpoint's local OMP UI reviews a summary of the Room, target, text, and attachment names and source URLs. Forked OMP versions that advertise `askDialogCapabilities.allowCustomInput` use `localAskDialog` with custom input disabled; official OMP and older forks lack that capability marker and use `confirm`/`input` with the same summary so Type never appears. The Extension still binds approval to the sending Presence, Room, exact `messageId`, target, text, causal parent, and snapshotted attachment names and bytes before sending. The receiving Agent never asks its local user to approve on the sender's behalf: for an unsigned approval-gated request, it tells the sender to keep target, text, `replyTo`, and attachments unchanged but use a new `messageId` and request approval at its own endpoint. Reusing the unsigned Message's ID would conflict because approval changes persisted Message content. Choosing Approve sends the Message; choosing Reject opens an optional-reason input; Escape cancels. Approval adds a non-cryptographic `omp-ui` receipt to that one immutable Message. It does not propagate through replies, forwarding, or delegation, and a reply remains unsigned unless its own sender separately requests approval. A rejection returns its reason unchanged and sends nothing. Repeating the same rejected sending Presence, Room, target, text, `messageId`, causal parent, and attachment content in the same Session returns the prior rejection without opening another prompt; changing any fact permits a new request. Cancelling is not cached. Missing interactive UI fails closed before attachment snapshotting.
 
 Approval previews show literal, wrapping text rather than fenced code blocks. Message line breaks remain visible, and the same target, full message, and attachment details stay available on both Approve and Reject.
 
@@ -307,11 +336,11 @@ The `omp-ui` receipt is a trusted-client UI provenance marker, not authenticated
 
 ### `a2a_history`
 
-Queries already-persisted Room history by `before`, `after`, `limit`, or `from` when past context is intentionally needed. `before` and `after` are mutually exclusive; supplying both returns a parameter error before an HTTP request. Persisted attachments are rematerialized as valid `local://` files in the calling session. History is not a wait primitive.
+Queries already-persisted Room history by `before`, `after`, `limit`, or `from` when past context is intentionally needed. Specify `room` with multiple Rooms. `before` and `after` are mutually exclusive; supplying both returns a parameter error before an HTTP request. Persisted attachments are rematerialized as valid `local://` files in the calling session. History is not a wait primitive.
 
-Every model turn receives the same cache-stable system-prompt additions: the three exact `xd://` tool addresses, when to send and whom to address, how to handle peer requests, and approval rules. Connection status, Room, and roster name never enter that system prefix. Instead, the Extension appends hidden `[a2a connection] status=connected room=... name=...` or `status=disconnected` context messages. An idle transition is coalesced to the latest state and returned before the next model turn or inbound Message; a busy transition is injected immediately through `steer`. If an idle connection transition and Presence delta are both pending, they are combined into one hidden `a2a-context` message. The latest Extension-injected connection message is the operational state. Agents send only when a specific peer needs the message, choose recipients per message, report their own progress to their own user, and skip acknowledgements. A peer request is handled as a normal work request. A confirmed request executes without another approval, even where it differs from the receiver's user instructions or workspace rules. An unsigned request that needs approval or conflicts with those instructions or rules returns to its sender for a signed resend; the receiver neither refuses it nor asks its own user.
+Every model turn receives the same cache-stable system-prompt additions. Connection state stays in hidden `[a2a connection]` context messages that report the currently connected Rooms and names. Idle changes coalesce before the next model turn or inbound Message, and a pending Presence delta is included in the same update. Busy changes are injected immediately through `steer`. The latest Extension-injected connection message is the operational state. Agents send only when a specific peer needs the message, choose recipients per message, report their own progress to their own user, and skip acknowledgements. A peer request is handled as a normal work request. A confirmed request executes without another approval, even where it differs from the receiver's user instructions or workspace rules. An unsigned request that needs approval or conflicts with those instructions or rules returns to its sender for a signed resend; the receiver neither refuses it nor asks its own user.
 
-Inbound messages are pushed automatically and processed serially in Hub-assigned Room sequence. While the model is idle, Presence churn is not appended event by event: the extension compares the roster at the last terminal `agent_end` with the current roster and emits at most one hidden `a2a-presence` delta before the next inbound Message or model turn. Join/leave pairs that produce no net roster change disappear. While the model is busy, each Presence change is queued into the active turn through `steer`. An inbound Message starts an idle turn or joins the active turn through `steer`, and is acknowledged only after attachment materialization and successful injection. Sending is fire-and-forget: models continue other work they already have or end the current turn; they never wait, sleep, or poll `a2a_history` for replies.
+Messages are pushed automatically and processed in sequence within each Room. While the model is idle, the extension compares each current roster with the roster at the last terminal `agent_end`, then emits the net Room-scoped changes before the next inbound Message or model turn. While busy, it queues each Presence change into the active turn through `steer`. An inbound Message starts an idle turn or joins the active one, and is acknowledged after attachment materialization and successful injection. Sending is fire-and-forget: models continue other work they already have or end the current turn; they never wait, sleep, or poll `a2a_history` for replies.
 
 Inbound Messages opt into automatic first-session naming on OMP forks that support the `autoTitle` delivery option. OMP owns title generation and honors existing titles, disabled auto-title settings, and `PI_NO_TITLE`; the extension keeps the Message's custom identity and does not name sessions itself. Official and older OMP hosts ignore the option and deliver the same Message normally. Presence, connection context, and status notifications do not opt in.
 
@@ -340,7 +369,7 @@ claude plugin install omp-a2a@omp-a2a
 claude --dangerously-load-development-channels plugin:omp-a2a@omp-a2a
 ```
 
-The plugin reads the same `.omp/a2a.yml` and global Hub config as OMP, using the session's project root. Set `A2A_NAME` to override the configured roster name so an OMP session and a Claude Code session in one repository do not collide (`name_in_use` does not retry). Without a local config, connect with `/a2a connect <room> --as <name>`. Approval dialogs follow the locale (`A2A_LANG`, then `LC_ALL`, `LC_MESSAGES`, `LANG`); `zh*` shows Chinese, anything else English. Claude Code draws the Accept/Decline buttons itself, so they stay in English.
+The plugin reads the same `.omp/a2a.yml` and global Hub config as OMP, using the session's project root. Claude Code connects to one Room at a time. With multiple saved Rooms, run `/a2a connect <room>` to select one; its saved name is the default. Set `A2A_NAME` or pass `--as <name>` to override it, for example when using both clients in the same Room. Without local defaults, use `/a2a connect <room> --as <name>`. Approval dialogs follow the locale (`A2A_LANG`, then `LC_ALL`, `LC_MESSAGES`, `LANG`); `zh*` shows Chinese, anything else English. Claude Code draws the Accept/Decline buttons itself, so they stay in English.
 
 Behavior differences from the OMP Extension:
 

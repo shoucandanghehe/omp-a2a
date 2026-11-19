@@ -73,7 +73,8 @@ function queue<T>() {
 
 async function setup(
 	options: {
-		name?: string;
+		name?: string | null;
+		pluralConfig?: boolean;
 		language?: DialogLanguage;
 		elicit?: (message: string) => ElicitResult;
 	} = {},
@@ -86,12 +87,15 @@ async function setup(
 	cleanups.push(() => hub.stop());
 	const hubClient = new HubClient(hub.listenUrl);
 	await hubClient.createRoom({ name: "team" });
+	if (options.pluralConfig) await hubClient.createRoom({ name: "support" });
 
 	const projectDir = tempDir("omp-a2a-cc-project-");
 	mkdirSync(join(projectDir, ".omp"));
 	writeFileSync(
 		join(projectDir, ".omp", "a2a.yml"),
-		`hubUrl: ${hub.listenUrl}\nroom: team\nname: omp-agent\n`,
+		options.pluralConfig
+			? `hubUrl: ${hub.listenUrl}\nrooms:\n  - {room: team, name: omp-agent}\n  - {room: support, name: triage}\n`
+			: `hubUrl: ${hub.listenUrl}\nroom: team\nname: omp-agent\n`,
 	);
 
 	const peerInbox = queue<MessageView>();
@@ -104,10 +108,11 @@ async function setup(
 		await peer.disconnect();
 	});
 
+	const { name = "claude" } = options;
 	const bridge = new A2aBridge({
 		cwd: tempDir("omp-a2a-cc-cwd-"),
 		inboxRoot: tempDir("omp-a2a-cc-inbox-"),
-		nameOverride: options.name ?? "claude",
+		nameOverride: name ?? undefined,
 		language: options.language ?? "en",
 	});
 	cleanups.push(() => bridge.close());
@@ -405,6 +410,41 @@ test("control commands manage connection and Rooms", async () => {
 		(await call("a2a_control", { command: "room delete scratch" })).text,
 	).toBe("Deleted Room scratch");
 	expect((await hubClient.listRooms()).map((p) => p.name)).toEqual(["team"]);
+});
+
+test("plural project config waits for explicit Room selection and supplies that Room's name", async () => {
+	const { call, peer } = await setup({ pluralConfig: true, name: null });
+	const control = (command: string) => call("a2a_control", { command });
+
+	expect((await control("status")).text).toContain("Not connected");
+	const implicit = await control("connect --as cc");
+	expect(implicit.isError).toBe(true);
+	expect(implicit.text).toContain("select one explicitly");
+
+	expect(await control("connect support")).toEqual({
+		text: "Connected to support as triage",
+		isError: false,
+	});
+	expect((await call("a2a_peers")).text).toContain("Self: triage");
+	expect(await control("connect team")).toEqual({
+		text: "Connected to team as omp-agent",
+		isError: false,
+	});
+	await waitFor(() => peer.peers().some((p) => p.name === "omp-agent"));
+});
+
+test("Claude Code name overrides take precedence over a saved Room name", async () => {
+	const { call } = await setup({ pluralConfig: true, name: "env-name" });
+	expect(await call("a2a_control", { command: "connect support" })).toEqual({
+		text: "Connected to support as env-name",
+		isError: false,
+	});
+	expect(
+		await call("a2a_control", { command: "connect support --as cli-name" }),
+	).toEqual({
+		text: "Connected to support as cli-name",
+		isError: false,
+	});
 });
 
 test("server instructions fit Claude Code's 2048-character limit", () => {

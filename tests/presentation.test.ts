@@ -170,25 +170,43 @@ test("registered peer and history tool views preserve roster identity and messag
 		{
 			content: [],
 			details: {
-				self: { name: "receiver", presenceId: "receiver-presence" },
-				peers: [first.from],
+				rooms: [
+					{
+						room: "test",
+						self: { name: "receiver", presenceId: "receiver-presence" },
+						peers: [first.from],
+					},
+					{
+						room: "other",
+						self: { name: "api", presenceId: "api-presence" },
+						peers: [
+							{ name: first.from.name, presenceId: "other-sender-presence" },
+						],
+					},
+				],
 			},
 		},
 		options,
 	);
 	const roster = renderDocument(peers?.body ?? []);
 	expect(roster.find((node) => node.k === "table")?.p?.cols).toEqual([
+		{ id: "room", head: "Room" },
 		{ id: "name", head: "Name" },
 		{ id: "role", head: "Role" },
 	]);
 	expect(roster.find((node) => node.k === "table")?.p?.rows).toEqual([
 		{
 			id: "receiver-presence",
-			cells: { name: "receiver", role: "You" },
+			cells: { room: "test", name: "receiver", role: "You" },
 		},
 		{
 			id: "sender-presence",
-			cells: { name: "sender", role: "Peer" },
+			cells: { room: "test", name: "sender", role: "Peer" },
+		},
+		{ id: "api-presence", cells: { room: "other", name: "api", role: "You" } },
+		{
+			id: "other-sender-presence",
+			cells: { room: "other", name: "sender", role: "Peer" },
 		},
 	]);
 	const history = tools.get("a2a_history")?.describeResult;

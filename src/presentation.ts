@@ -20,7 +20,9 @@ export type MaterializedMessageView = Omit<MessageView, "attachments"> & {
 	attachments: LocalAttachmentReference[];
 };
 
-export type PeersDetails = { self: Peer; peers: Peer[] } | { error: string };
+export type PeersDetails =
+	| { rooms: Array<{ room: string; self: Peer; peers: Peer[] }> }
+	| { error: string };
 
 export type HistoryDetails =
 	| { messages: MaterializedMessageView[] }
@@ -129,23 +131,27 @@ export function describePeers(
 	result: ToolRenderResult<PeersDetails>,
 ): NativeToolView | undefined {
 	const details = result.details;
-	if (!details || !("peers" in details)) return undefined;
+	if (!details || !("rooms" in details)) return undefined;
 	return {
 		body: [
 			{
 				k: "table",
 				p: {
 					cols: [
+						{ id: "room", head: "Room" },
 						{ id: "name", head: "Name" },
 						{ id: "role", head: "Role" },
 					],
-					rows: [details.self, ...details.peers].map((peer, index) => ({
-						id: peer.presenceId,
-						cells: {
-							name: peer.name,
-							role: index === 0 ? "You" : "Peer",
-						},
-					})),
+					rows: details.rooms.flatMap(({ room, self, peers }) =>
+						[self, ...peers].map((peer, index) => ({
+							id: peer.presenceId,
+							cells: {
+								room,
+								name: peer.name,
+								role: index === 0 ? "You" : "Peer",
+							},
+						})),
+					),
 				},
 			},
 		],
@@ -182,6 +188,7 @@ export function describeHistory(
 }
 
 export function describeMessageCall(args: {
+	room?: string;
 	target?: string[];
 	text?: string;
 	attachments?: string[];
@@ -200,7 +207,10 @@ export function describeMessageCall(args: {
 		tool: {
 			title: "A2A Message",
 			target: args.target?.join(", "),
-			meta: args.replyTo ? [`Reply to ${args.replyTo}`] : undefined,
+			meta: [
+				...(args.room ? [`Room ${args.room}`] : []),
+				...(args.replyTo ? [`Reply to ${args.replyTo}`] : []),
+			],
 			note: args.requestUserSignature ? "approval requested" : undefined,
 		},
 		body,

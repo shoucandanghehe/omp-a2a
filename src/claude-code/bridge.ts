@@ -323,10 +323,12 @@ export class A2aBridge {
 		this.#projectDir = await this.#discoverProjectDir();
 		const config = this.#reloadConfig();
 		if (!config || config.autoConnect === false || this.#configError) return;
+		if (config.rooms.length !== 1) return;
+		const [connection] = config.rooms;
 		try {
 			await this.#connect(
-				config.room,
-				this.#options.nameOverride ?? config.name,
+				connection.room,
+				this.#options.nameOverride ?? connection.name,
 			);
 		} catch (error) {
 			this.#log(`auto-connect failed: ${errorMessage(error)}`);
@@ -696,9 +698,16 @@ export class A2aBridge {
 			case "connect": {
 				const config = this.#reloadConfig();
 				if (this.#configError) throw this.#configError;
-				const room = subcommand ?? config?.room;
+				if (!subcommand && config && config.rooms.length > 1)
+					throw new Error(
+						"Multiple Rooms are configured; select one explicitly with /a2a connect <room>.",
+					);
+				const connection =
+					config?.rooms.find(({ room }) => room === subcommand) ??
+					(config?.rooms.length === 1 ? config.rooms[0] : undefined);
+				const room = subcommand ?? connection?.room;
 				const name =
-					flags.get("as") ?? this.#options.nameOverride ?? config?.name;
+					flags.get("as") ?? this.#options.nameOverride ?? connection?.name;
 				if (!room || !name)
 					throw new Error(
 						"usage: /a2a connect <room> --as <name> (no defaults in .omp/a2a.yml)",

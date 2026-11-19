@@ -7,10 +7,14 @@ export interface A2aRoom {
 	createdByCwd?: string;
 }
 
-/** Per-repository connection defaults. */
-export interface A2aLocalConfig {
+export interface A2aRoomConnection {
 	room: string;
 	name: string;
+}
+
+/** Per-repository connection defaults. */
+export interface A2aLocalConfig {
+	rooms: A2aRoomConnection[];
 	hubUrl?: string;
 	autoConnect?: boolean;
 }

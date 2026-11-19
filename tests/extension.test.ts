@@ -67,7 +67,7 @@ type ContextHandler = (event: {
 }) => { messages?: unknown[] } | undefined;
 
 const A2A_TOOL_GUIDANCE =
-	"A2A connects this session to other agent sessions in the same A2A room. The latest extension-injected [a2a connection] message gives your current status, room, and name. xd://a2a_peers lists the peers online now, xd://a2a_message sends, and xd://a2a_history reads past messages. Address peers only by names from a2a_peers or inbound messages, or @all for every current peer. Replies are pushed to you automatically. After sending, do not wait, sleep, or poll a2a_history; continue other work or end the turn.";
+	"A2A connects this session to other agents in one or more Rooms. The latest extension-injected [a2a connection] message lists the connected Rooms and your names. xd://a2a_peers lists online peers grouped by Room, xd://a2a_message sends, and xd://a2a_history reads past messages. When connected to multiple Rooms, specify room to send a new message or read history; replyTo selects the Room of that message. Use only peer names in the selected Room or @all for everyone in it. Replies are pushed to you automatically. After sending, do not wait, sleep, or poll a2a_history; continue other work or end the turn.";
 
 const A2A_SENDING_GUIDANCE = [
 	"When to send an A2A message:",
@@ -204,6 +204,7 @@ test("human commands and model tools expose separate A2A surfaces", async () => 
 	});
 	const help = commandOutput?.message.content ?? "";
 	expect(help).toContain("/a2a connect <room> --as <name>");
+	expect(help).toContain("/a2a save");
 	expect(help).toContain("/a2a room delete <name>");
 	expect(help).not.toContain("/a2a send");
 	expect(help).not.toContain("/a2a inbox");
@@ -234,6 +235,7 @@ test("human commands and model tools expose separate A2A surfaces", async () => 
 		"hub",
 		"room",
 		"connect",
+		"save",
 		"disconnect",
 		"status",
 		"peers",
@@ -257,10 +259,254 @@ test("human commands and model tools expose separate A2A surfaces", async () => 
 	const historyCompletions = complete("history --before billing:42 ");
 	if (!historyCompletions) throw new Error("expected history flag completions");
 	expect(historyCompletions.map((item) => item.value)).toEqual([
+		"history --before billing:42 --room ",
 		"history --before billing:42 --limit ",
 		"history --before billing:42 --from ",
 	]);
 	expect(complete("history --limit ")).toBeNull();
+});
+
+test("save pins the connected Hub and enables auto-connect in the selected project config", async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-extension-save-"));
+	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
+	const cwd = join(dataDir, "project");
+	const configDir = join(cwd, ".omp");
+	const configFile = join(configDir, "a2a.json");
+	const context = {
+		cwd,
+		isIdle: () => true,
+		ui: { notify() {} },
+	};
+	let run:
+		| ((args: string, commandContext: typeof context) => Promise<void>)
+		| undefined;
+	try {
+		await new HubClient(hub.listenUrl).createRoom({ name: "billing" });
+		mkdirSync(configDir, { recursive: true });
+		const defaults = { room: "old", name: "old", autoConnect: false };
+		writeFileSync(
+			configFile,
+			JSON.stringify({ ...defaults, hubUrl: hub.listenUrl }),
+		);
+		a2aExtension({
+			arktype: type,
+			registerMessageRenderer() {},
+			setLabel() {},
+			on() {},
+			sendMessage() {},
+			registerCommand(_name: string, command: { handler: typeof run }) {
+				run = command.handler;
+			},
+			registerTool() {},
+		} as never);
+		if (!run) throw new Error("a2a command was not registered");
+
+		await run("connect billing --as api", context);
+		// Editing the configured Hub doesn't move the established connection.
+		writeFileSync(
+			configFile,
+			JSON.stringify({ ...defaults, hubUrl: "http://other.example:4173" }),
+		);
+		await run("save", context);
+
+		expect(readdirSync(configDir)).toEqual(["a2a.json"]);
+		expect(JSON.parse(readFileSync(configFile, "utf8"))).toEqual({
+			room: "billing",
+			name: "api",
+			hubUrl: hub.listenUrl,
+			autoConnect: true,
+		});
+	} finally {
+		await run?.("disconnect", context);
+		await hub.stop();
+		rmSync(dataDir, { recursive: true, force: true });
+	}
+});
+
+test("multiple Rooms route homonymous peers, replies and history independently and resume after save", async () => {
+	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-extension-multi-"));
+	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
+	const client = new HubClient(hub.listenUrl);
+	const cwd = join(dataDir, "project");
+	const configDir = join(cwd, ".omp");
+	const configFile = join(configDir, "a2a.yml");
+	const notifications: string[] = [];
+	const output = new Map<string, string>();
+	const tools = new Map<string, RegisteredTool>();
+	const context = {
+		cwd,
+		isIdle: () => true,
+		ui: { notify: (message: string) => notifications.push(message) },
+	};
+	let run:
+		| ((args: string, commandContext: typeof context) => Promise<void>)
+		| undefined;
+	let start:
+		| ((event: unknown, eventContext: typeof context) => Promise<void>)
+		| undefined;
+	let shutdown: (() => Promise<void>) | undefined;
+	const peers: A2aConnection[] = [];
+	const inbound = new Map([
+		["billing", Promise.withResolvers<string>()],
+		["review", Promise.withResolvers<string>()],
+	]);
+	try {
+		for (const room of inbound.keys()) {
+			await client.createRoom({ name: room });
+			peers.push(
+				await A2aConnection.connect({
+					baseUrl: hub.listenUrl,
+					room,
+					name: "reviewer",
+					events: { onMessage() {} },
+				}),
+			);
+		}
+		mkdirSync(configDir, { recursive: true });
+		writeFileSync(
+			configFile,
+			`room: billing\nname: api\nhubUrl: ${hub.listenUrl}\nautoConnect: false\n`,
+		);
+		a2aExtension({
+			arktype: type,
+			registerMessageRenderer() {},
+			setLabel() {},
+			on(event: string, handler: unknown) {
+				if (event === "session_start") start = handler as typeof start;
+				if (event === "session_shutdown") shutdown = handler as typeof shutdown;
+			},
+			sendMessage(message: {
+				customType: string;
+				content: string;
+				details?: { room: string };
+			}) {
+				if (message.customType === "a2a-inbound" && message.details)
+					inbound.get(message.details.room)?.resolve(message.content);
+				if (message.customType.startsWith("/a2a"))
+					output.set(message.customType, message.content);
+			},
+			registerCommand(_name: string, command: { handler: typeof run }) {
+				run = command.handler;
+			},
+			registerTool(tool: RegisteredTool) {
+				tools.set(tool.name, tool);
+			},
+		} as never);
+		const send = tools.get("a2a_message");
+		const history = tools.get("a2a_history");
+		const roster = tools.get("a2a_peers");
+		if (!run || !start || !shutdown || !send || !history || !roster)
+			throw new Error(
+				"A2A command, tools or lifecycle hooks were not registered",
+			);
+
+		await run("connect billing --as api", context);
+		await run("connect review --as judge", context);
+		await run("disconnect", context);
+		expect(notifications.at(-1)).toContain("Specify which Room");
+		const rosterResult = await roster.execute("roster", {} as never);
+		expect(rosterResult.details).toMatchObject({
+			rooms: [
+				{
+					room: "billing",
+					self: { name: "api" },
+					peers: [{ name: "reviewer" }],
+				},
+				{
+					room: "review",
+					self: { name: "judge" },
+					peers: [{ name: "reviewer" }],
+				},
+			],
+		});
+		for (const [index, peer] of peers.entries()) {
+			await peer.send({
+				target: [index === 0 ? "api" : "judge"],
+				text: `from ${peer.room}`,
+			});
+			expect(await inbound.get(peer.room)?.promise).toContain(
+				`"ref":"${peer.room}:1"`,
+			);
+		}
+
+		const ambiguous = await send.execute("ambiguous", {
+			target: ["reviewer"],
+			text: "unspecified Room",
+		} as never);
+		expect(ambiguous.content[0]?.text).toContain("Specify a Room");
+		const mismatch = await send.execute("mismatch", {
+			room: "review",
+			replyTo: "billing:1",
+			target: ["reviewer"],
+			text: "contradiction",
+		} as never);
+		expect(mismatch.content[0]?.text).toContain(
+			"replyTo belongs to Room billing",
+		);
+		await send.execute("reply", {
+			replyTo: "billing:1",
+			target: ["reviewer"],
+			text: "reply in billing",
+		} as never);
+		await send.execute("broadcast", {
+			room: "review",
+			target: ["@all"],
+			text: "review only",
+		} as never);
+		expect(
+			(await client.history({ room: "billing" })).messages.map(
+				({ messageRef, replyTo }) => [messageRef, replyTo],
+			),
+		).toEqual([
+			["billing:1", undefined],
+			["billing:2", "billing:1"],
+		]);
+		const ambiguousHistory = await history.execute(
+			"ambiguous-history",
+			{} as never,
+		);
+		expect(ambiguousHistory.content[0]?.text).toContain("Specify a Room");
+		const review = await history.execute("review-history", {
+			room: "review",
+		} as never);
+		expect(review.details).toMatchObject({
+			messages: [
+				{ messageRef: "review:1", text: "from review" },
+				{ messageRef: "review:2", text: "review only" },
+			],
+		});
+		await run("history --room billing", context);
+		expect(output.get("/a2a history --room billing")).toContain(
+			"reply in billing",
+		);
+		expect(output.get("/a2a history --room billing")).not.toContain(
+			"review only",
+		);
+
+		await run("save", context);
+		expect(Bun.YAML.parse(readFileSync(configFile, "utf8"))).toEqual({
+			hubUrl: hub.listenUrl,
+			autoConnect: true,
+			rooms: [
+				{ room: "billing", name: "api" },
+				{ room: "review", name: "judge" },
+			],
+		});
+		await shutdown();
+		await start({}, context);
+		await run("status", context);
+		expect(output.get("/a2a status")).toContain(
+			"Room: billing\nName: api\nConnection: connected",
+		);
+		expect(output.get("/a2a status")).toContain(
+			"Room: review\nName: judge\nConnection: connected",
+		);
+	} finally {
+		await shutdown?.();
+		await Promise.all(peers.map((peer) => peer.close()));
+		await hub.stop();
+		rmSync(dataDir, { recursive: true, force: true });
+	}
 });
 
 test("model tools stay push-driven and forward history cancellation", async () => {
@@ -359,15 +605,13 @@ test("model tools stay push-driven and forward history cancellation", async () =
 		if (!peersTool || !messageTool || !historyTool)
 			throw new Error("a2a model tools were not registered");
 
-		expect(peersTool.description).toBe(
-			"Show this Agent's roster name and the exact other A2A roster names currently addressable in this Room. Use only these names as a2a_message target entries, or the magic target @all for every current peer.",
-		);
+		expect(peersTool.description).toContain("each connected Room");
 
 		await commandHandler("peers", context);
 		expect(commandOutputs.at(-1)).toEqual({
 			message: {
 				customType: "/a2a peers",
-				content: "Members:\n- api (you)\n- worker",
+				content: `Room: ${room}\n- api (you)\n- worker`,
 				display: true,
 			},
 			options: { triggerTurn: false },
@@ -376,23 +620,21 @@ test("model tools stay push-driven and forward history cancellation", async () =
 		expect(peersResult.content).toEqual([
 			{
 				type: "text",
-				text: "Self: api\nAddressable peers:\n- worker",
+				text: `Room: ${room}\nSelf: api\nAddressable peers:\n- worker`,
 			},
 		]);
 		expect(peersResult.details).toMatchObject({
-			self: { name: "api" },
-			peers: [{ name: "worker" }],
+			rooms: [{ room, self: { name: "api" }, peers: [{ name: "worker" }] }],
 		});
 
-		expect(messageTool.description).toBe(
-			'Send to one or more current peers, or everyone. target is a non-empty array of names from a2a_peers, or ["@all"] for every current peer; every named peer must be present. Set replyTo to reply to an earlier Room message. Attachments must be current-session local:// regular files. Set requestUserSignature=true when an action you ask for needs user approval; your local OMP UI asks your user before sending. Rejection, cancellation, or unavailable UI sends nothing.',
-		);
-		expect(historyTool.description).toBe(
-			"Review earlier Room messages using before or after (mutually exclusive), limit, or from. Returned attachment links are valid in the current session. Use only for past context; never wait or poll for new replies.",
+		expect(messageTool.description).toContain("set replyTo to route");
+		expect(historyTool.description).toContain(
+			"never wait or poll for new replies",
 		);
 		const historySchema = historyTool.parameters as Type;
 		expect(historySchema.toJsonSchema()).toMatchObject({
 			properties: {
+				room: { type: "string" },
 				before: {
 					description: expect.stringContaining("mutually exclusive with after"),
 				},
@@ -640,8 +882,10 @@ test("idle Presence changes collapse to the roster delta before the next message
 		isIdle: () => true,
 		ui: {
 			notify(message: string) {
-				if (message === "[a2a] departing left") rosterSettled.resolve();
-				if (message === "[a2a] newcomer joined") newcomerJoined.resolve();
+				if (message === `[a2a] ${room}: departing left`)
+					rosterSettled.resolve();
+				if (message === `[a2a] ${room}: newcomer joined`)
+					newcomerJoined.resolve();
 			},
 		},
 	};
@@ -719,7 +963,7 @@ test("idle Presence changes collapse to the roster delta before the next message
 		expect(injected[0]).toEqual({
 			message: {
 				customType: "a2a-context",
-				content: `[a2a connection] status=connected room=${room} name=receiver\n[a2a presence] joined=worker left=departing`,
+				content: `[a2a connection] status=connected room=${room} name=receiver\n[a2a presence] room=${room} joined=worker left=departing`,
 				display: false,
 			},
 			options: { deliverAs: "steer", triggerTurn: false },
@@ -744,7 +988,7 @@ test("idle Presence changes collapse to the roster delta before the next message
 		expect(beforeAgentStart(beforeAgentStartEvent())).toEqual({
 			message: {
 				customType: "a2a-presence",
-				content: "[a2a presence] joined=newcomer",
+				content: `[a2a presence] room=${room} joined=newcomer`,
 				display: false,
 			},
 			systemPrompt: EXPECTED_SYSTEM_PROMPT,
@@ -1554,6 +1798,7 @@ test("user approval rejection, cancellation, and headless requests fail closed p
 		expect(legacy.isError).not.toBe(true);
 		expect(legacyReview).toBe(
 			[
+				`**Room:** \`${room}\``,
 				"**Target:** Agent `worker`",
 				"",
 				"**Message**",
@@ -1579,7 +1824,7 @@ test("user approval rejection, cancellation, and headless requests fail closed p
 	}
 });
 
-test("a2a_message cannot cross a Room switch after a slow snapshot", async () => {
+test("joining another Room does not move or cancel a send after a slow snapshot", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-extension-send-fence-"));
 	const cwd = join(dataDir, "client");
 	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
@@ -1654,16 +1899,19 @@ test("a2a_message cannot cross a Room switch after a slow snapshot", async () =>
 		await commandHandler("connect send-fence-b --as worker", context);
 		releaseSnapshot.resolve();
 
-		expect((await send).isError).toBe(true);
-		expect((await client.history({ room: "send-fence-a" })).messages).toEqual(
-			[],
-		);
+		expect((await send).details).toMatchObject({
+			message: { messageRef: "send-fence-a:1" },
+		});
+		expect(
+			(await client.history({ room: "send-fence-a" })).messages,
+		).toHaveLength(1);
 		expect((await client.history({ room: "send-fence-b" })).messages).toEqual(
 			[],
 		);
 	} finally {
 		releaseSnapshot.resolve();
-		if (commandHandler) await commandHandler("disconnect", context);
+		await commandHandler?.("disconnect send-fence-a", context);
+		await commandHandler?.("disconnect send-fence-b", context);
 		await hub.stop();
 		rmSync(dataDir, { recursive: true, force: true });
 	}
@@ -2033,7 +2281,7 @@ test("session switch cancels an in-flight inbound injection", async () => {
 	}
 });
 
-test("manual Room switch cancels old in-flight attachment injection", async () => {
+test("leaving one Room cancels its in-flight injection and leaves the other Room online", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-extension-room-switch-"));
 	const receiverCwd = join(dataDir, "receiver");
 	const receiverArtifacts = join(dataDir, "receiver-artifacts");
@@ -2129,12 +2377,14 @@ test("manual Room switch cancels old in-flight attachment injection", async () =
 		});
 		await materializationStarted.promise;
 		await commandHandler("connect room-b --as receiver", receiverContext);
+		await commandHandler("disconnect room-a", receiverContext);
 		releaseMaterialization.resolve();
-		await delivery.promise;
+		expect((await delivery.promise).status).toBe("failed");
 		await commandHandler("status", receiverContext);
 
 		expect(injected).toEqual([]);
 		expect(commandOutputs.at(-1)).toContain("Room: room-b");
+		expect(commandOutputs.at(-1)).not.toContain("Room: room-a");
 		expect(
 			existsSync(join(receiverArtifacts, "local"))
 				? readdirSync(join(receiverArtifacts, "local"))
@@ -2143,7 +2393,8 @@ test("manual Room switch cancels old in-flight attachment injection", async () =
 	} finally {
 		releaseMaterialization.resolve();
 		await sender?.close();
-		if (commandHandler) await commandHandler("disconnect", receiverContext);
+		await commandHandler?.("disconnect room-a", receiverContext);
+		await commandHandler?.("disconnect room-b", receiverContext);
 		await hub.stop();
 		rmSync(dataDir, { recursive: true, force: true });
 	}
@@ -2396,7 +2647,7 @@ test("session switch invalidates obsolete reconnect work before awaiting teardow
 	}
 });
 
-test("name conflict restores the accepting Hub as reconnect intent", async () => {
+test("a failed rename restores this Room's reconnect target without reconnecting its neighbor", async () => {
 	const dataDir = mkdtempSync(
 		join(tmpdir(), "omp-a2a-extension-name-conflict-"),
 	);
@@ -2419,14 +2670,10 @@ test("name conflict restores the accepting Hub as reconnect intent", async () =>
 	const baseUrl = `http://127.0.0.1:${(server.address() as AddressInfo).port}`;
 	const initialSocket = Promise.withResolvers<WebSocket>();
 	const connectionLost = Promise.withResolvers<void>();
-	const reconnectAttempt = Promise.withResolvers<"hub-a" | "hub-b">();
-	let watchReconnect = false;
-	let hubAClaims = 0;
+	const reconnected = Promise.withResolvers<void>();
+	const claims: Array<{ room: string; name: string }> = [];
 	let fakeTimers = false;
-	webSockets.on("connection", (socket, request) => {
-		const hub = request.url?.startsWith("/hub-a/")
-			? ("hub-a" as const)
-			: ("hub-b" as const);
+	webSockets.on("connection", (socket) => {
 		socket.on("message", (data) => {
 			const hello = JSON.parse(data.toString()) as {
 				type: string;
@@ -2434,21 +2681,17 @@ test("name conflict restores the accepting Hub as reconnect intent", async () =>
 				name?: string;
 			};
 			if (hello.type !== "hello" || !hello.room || !hello.name) return;
-			if (watchReconnect) {
-				watchReconnect = false;
-				reconnectAttempt.resolve(hub);
-			}
-			if (hub === "hub-b") {
+			claims.push({ room: hello.room, name: hello.name });
+			if (hello.name === "taken") {
 				socket.send(
 					JSON.stringify({
 						type: "error",
 						code: "name_in_use",
-						message: "that name is already present on Hub B",
+						message: "that name is already present in this Room",
 					}),
 				);
 				return;
 			}
-			hubAClaims += 1;
 			socket.send(
 				JSON.stringify({
 					type: "claimed",
@@ -2456,12 +2699,12 @@ test("name conflict restores the accepting Hub as reconnect intent", async () =>
 					room: hello.room,
 					self: {
 						name: hello.name,
-						presenceId: `hub-a-presence-${hubAClaims}`,
+						presenceId: `presence-${claims.length}`,
 					},
 					peers: [],
 				}),
 			);
-			if (hubAClaims === 1) initialSocket.resolve(socket);
+			if (hello.room === "stable") initialSocket.resolve(socket);
 		});
 	});
 	const notifications: string[] = [];
@@ -2475,6 +2718,8 @@ test("name conflict restores the accepting Hub as reconnect intent", async () =>
 			notify(message: string) {
 				notifications.push(message);
 				if (message.includes("connection lost")) connectionLost.resolve();
+				if (message === "Connected to stable as worker" && claims.length > 1)
+					reconnected.resolve();
 			},
 		},
 		isIdle: () => true,
@@ -2513,17 +2758,19 @@ test("name conflict restores the accepting Hub as reconnect intent", async () =>
 		if (!commandHandler) throw new Error("a2a command was not registered");
 		await commandHandler("connect stable --as worker", context);
 		const oldSocket = await initialSocket.promise;
-
+		await commandHandler("connect neighbor --as worker", context);
+		await commandHandler("connect stable --as taken", context);
+		expect(notifications.at(-1)).toContain("name_in_use");
 		writeFileSync(
 			join(cwd, ".omp", "a2a.yml"),
 			`room: stable\nname: worker\nhubUrl: ${baseUrl}/hub-b\nautoConnect: false\n`,
 		);
-		await commandHandler("connect stable --as worker", context);
-		expect(notifications.at(-1)).toContain("name_in_use");
+		await commandHandler("connect other --as worker", context);
+		expect(notifications.at(-1)).toContain("disconnect");
 		await commandHandler("status", context);
 		expect(commandOutputs.at(-1)).toContain(`${baseUrl}/hub-a`);
+		expect(commandOutputs.at(-1)).toContain("Room: neighbor");
 
-		watchReconnect = true;
 		vi.useFakeTimers();
 		fakeTimers = true;
 		oldSocket.close(1012, "unexpected close");
@@ -2531,10 +2778,17 @@ test("name conflict restores the accepting Hub as reconnect intent", async () =>
 		vi.advanceTimersByTime(500);
 		vi.useRealTimers();
 		fakeTimers = false;
-		expect(await reconnectAttempt.promise).toBe("hub-a");
+		await reconnected.promise;
+		expect(claims).toEqual([
+			{ room: "stable", name: "worker" },
+			{ room: "neighbor", name: "worker" },
+			{ room: "stable", name: "taken" },
+			{ room: "stable", name: "worker" },
+		]);
 	} finally {
 		if (fakeTimers) vi.useRealTimers();
-		if (commandHandler) await commandHandler("disconnect", context);
+		await commandHandler?.("disconnect stable", context);
+		await commandHandler?.("disconnect neighbor", context);
 		for (const socket of webSockets.clients) socket.terminate();
 		webSockets.close();
 		server.closeAllConnections();

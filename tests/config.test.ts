@@ -1,8 +1,15 @@
 import { afterEach, expect, test } from "bun:test";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import {
+	mkdirSync,
+	mkdtempSync,
+	readdirSync,
+	readFileSync,
+	rmSync,
+	writeFileSync,
+} from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { loadLocalConfig } from "../src/config";
+import { loadLocalConfig, saveLocalConnections } from "../src/config";
 
 const roots: string[] = [];
 
@@ -37,8 +44,7 @@ test("local JSON config uses only connection-scoped fields", () => {
 		}),
 	);
 	expect(loadLocalConfig(root)).toEqual({
-		room: "billing",
-		name: "api",
+		rooms: [{ room: "billing", name: "api" }],
 		hubUrl: "http://hub:4173",
 		autoConnect: false,
 	});
@@ -52,11 +58,54 @@ test("local YAML preserves quoted URL punctuation", () => {
 		'room: " billing "\nname: " api "\nhubUrl: " http://hub:4173/path#fragment "\n',
 	);
 	expect(loadLocalConfig(root)).toEqual({
-		room: "billing",
-		name: "api",
+		rooms: [{ room: "billing", name: "api" }],
 		hubUrl: "http://hub:4173/path#fragment",
 		autoConnect: true,
 	});
+});
+
+test("local YAML accepts multiple Rooms with shared settings", () => {
+	const root = createRoot();
+	writeConfig(
+		root,
+		"a2a.yaml",
+		'rooms:\n  - room: " billing "\n    name: " api "\n  - room: support\n    name: " 支援 "\nhubUrl: http://hub:4173\n',
+	);
+	expect(loadLocalConfig(root)).toEqual({
+		rooms: [
+			{ room: "billing", name: "api" },
+			{ room: "support", name: "支援" },
+		],
+		hubUrl: "http://hub:4173",
+		autoConnect: true,
+	});
+});
+
+test.each([
+	{ rooms: [] },
+	{ rooms: [{ room: "billing", name: "api" }], room: "billing" },
+	{ rooms: [{ room: "billing", name: "api" }], name: "api" },
+	{ rooms: [{ room: "billing", name: "api", autoConnect: false }] },
+	{ rooms: [{ room: "billing", name: "api" }], autoConect: false },
+])("local config rejects invalid plural shape %j", (document) => {
+	const root = createRoot();
+	const file = writeConfig(root, "a2a.json", JSON.stringify(document));
+	expect(() => loadLocalConfig(root)).toThrow(`invalid a2a config at ${file}`);
+});
+
+test("local config rejects Rooms that match after trimming", () => {
+	const root = createRoot();
+	writeConfig(
+		root,
+		"a2a.json",
+		JSON.stringify({
+			rooms: [
+				{ room: "billing", name: "api" },
+				{ room: " billing ", name: "other" },
+			],
+		}),
+	);
+	expect(() => loadLocalConfig(root)).toThrow("unique Room names");
 });
 
 test("local config reports malformed YAML with its path", () => {
@@ -200,4 +249,56 @@ test("local config names invalid required and optional fields", () => {
 		}),
 	);
 	expect(() => loadLocalConfig(root)).toThrow("autoConnect must be boolean");
+});
+
+test("saving replaces the selected JSON config with all connections", () => {
+	const root = createRoot();
+	const file = writeConfig(
+		root,
+		"a2a.json",
+		'{"room":"billing","name":"old","autoConnect":false}',
+	);
+	const target = {
+		rooms: [
+			{ room: "billing", name: "api" },
+			{ room: "support", name: "triage" },
+		],
+		hubUrl: "http://hub:4173",
+	};
+	expect(saveLocalConnections(root, target)).toBe(file);
+	expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+		rooms: [
+			{ room: "billing", name: "api" },
+			{ room: "support", name: "triage" },
+		],
+		hubUrl: "http://hub:4173",
+		autoConnect: true,
+	});
+	expect(readdirSync(join(root, ".omp"))).toEqual(["a2a.json"]);
+
+	const singleton = { ...target, rooms: [target.rooms[1]] };
+	expect(saveLocalConnections(root, singleton)).toBe(file);
+	expect(JSON.parse(readFileSync(file, "utf8"))).toEqual({
+		room: "support",
+		name: "triage",
+		hubUrl: "http://hub:4173",
+		autoConnect: true,
+	});
+});
+
+test("saving unchanged connections leaves an existing YAML file untouched", () => {
+	const root = createRoot();
+	const content =
+		"# Kept on no-op\nrooms:\n  - {room: billing, name: api}\n  - {room: support, name: triage}\nhubUrl: http://hub:4173\n";
+	const file = writeConfig(root, "a2a.yml", content);
+	expect(
+		saveLocalConnections(root, {
+			rooms: [
+				{ room: "billing", name: "api" },
+				{ room: "support", name: "triage" },
+			],
+			hubUrl: "http://hub:4173",
+		}),
+	).toBe(file);
+	expect(readFileSync(file, "utf8")).toBe(content);
 });
