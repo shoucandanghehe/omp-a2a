@@ -13,6 +13,7 @@ The wire protocol is private version `6`. It is not the standard A2A protocol, r
 - `src/hub/server.ts`: Express HTTP control/history surface and the HTTP server lifecycle used by the WebSocket Hub.
 - `src/hub/realtime-server.ts`: WebSocket Presence, realtime routing, delivery outcomes, heartbeat, and shutdown.
 - `claude-code/`: Claude Code plugin loaded in place from `.claude-plugin/marketplace.json` or `--plugin-dir`; its MCP server `src/claude-code/main.ts` joins a Claude Code session as a Presence and delivers inbound Messages as Channel events.
+- `src/acp/`: standalone local ACP v1 stdio client and text-only Room adapter; `bun run acp` owns one ACP session, local approvals, and a bounded inbox.
 - `src/operations.ts`: `A2aRuntime`, the extension-facing module over HTTP and WebSocket clients.
 - `scripts/smoke.ts`: persistent SQLite Room-store smoke.
 - `scripts/smoke-hub.ts`: in-process HTTP/WebSocket/persistence smoke.
