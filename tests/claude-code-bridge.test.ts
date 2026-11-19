@@ -1,4 +1,4 @@
-import { afterEach, expect, test } from "bun:test";
+import { afterEach, expect, spyOn, test } from "bun:test";
 import {
 	mkdirSync,
 	mkdtempSync,
@@ -329,13 +329,30 @@ test("dialogs follow the configured language", async () => {
 	});
 	expect(prompts[0]).toContain("收件人: alice");
 	expect(prompts[1]).toContain("消息已拒绝");
-	expect(detectDialogLanguage({ LANG: "zh_CN.UTF-8" })).toBe("zh");
-	expect(detectDialogLanguage({ A2A_LANG: "en", LANG: "zh_CN.UTF-8" })).toBe(
-		"en",
-	);
-	expect(detectDialogLanguage({ LC_ALL: "en", LC_MESSAGES: "zh" })).toBe("en");
-	expect(detectDialogLanguage({ LC_MESSAGES: "zh_TW", LANG: "en" })).toBe("zh");
-	expect(detectDialogLanguage({})).toBe("en");
+});
+
+test("language detection uses the runtime locale unless overridden", () => {
+	const chinese = new Intl.DateTimeFormat("zh-CN").resolvedOptions();
+	const locale = spyOn(
+		Intl.DateTimeFormat.prototype,
+		"resolvedOptions",
+	).mockReturnValue(chinese);
+	try {
+		expect(detectDialogLanguage({})).toBe("zh");
+		expect(detectDialogLanguage({ LANG: "en_US.UTF-8" })).toBe("en");
+		expect(detectDialogLanguage({ LANG: "zh_CN.UTF-8" })).toBe("zh");
+		expect(detectDialogLanguage({ A2A_LANG: "en", LANG: "zh_CN.UTF-8" })).toBe(
+			"en",
+		);
+		expect(detectDialogLanguage({ LC_ALL: "en", LC_MESSAGES: "zh" })).toBe(
+			"en",
+		);
+		expect(detectDialogLanguage({ LC_MESSAGES: "zh_TW", LANG: "en" })).toBe(
+			"zh",
+		);
+	} finally {
+		locale.mockRestore();
+	}
 });
 
 test("rejection returns the reason, sends nothing, and suppresses repeats", async () => {

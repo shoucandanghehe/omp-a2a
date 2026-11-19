@@ -237,9 +237,10 @@ delete it, with confirmation. ANSI terminals offer keyboard navigation with
 a separate Room detail view on narrow screens.
 
 The A2A workbench is available in English and Simplified Chinese. The
-extension checks `A2A_LANG`, `LC_ALL`, `LC_MESSAGES`,
-then `LANG`; the first set value starting with `zh` selects Chinese. Use
-`A2A_LANG=zh omp` to force Chinese or `A2A_LANG=en omp` to force English.
+extension uses the first non-empty value from `A2A_LANG`, `LC_ALL`,
+`LC_MESSAGES`, and `LANG`, then falls back to the runtime's default locale.
+Locales starting with `zh` select Chinese; all others select English.
+Set `A2A_LANG` to `zh` or `en` before starting OMP to override the selection.
 Command names, Room names, and message text keep their original language.
 Buttons supplied by OMP itself follow the host.
 
@@ -397,7 +398,7 @@ claude plugin install omp-a2a@omp-a2a
 claude --dangerously-load-development-channels plugin:omp-a2a@omp-a2a
 ```
 
-The plugin reads the same `.omp/a2a.yml` and global Hub config as OMP, using the session's project root. Claude Code connects to one Room at a time. With multiple saved Rooms, run `/a2a connect <room>` to select one; its saved name is the default. Set `A2A_NAME` or pass `--as <name>` to override it, for example when using both clients in the same Room. Without local defaults, use `/a2a connect <room> --as <name>`. Approval dialogs follow the locale (`A2A_LANG`, then `LC_ALL`, `LC_MESSAGES`, `LANG`); `zh*` shows Chinese, anything else English. Claude Code draws the Accept/Decline buttons itself, so they stay in English.
+The plugin reads the same `.omp/a2a.yml` and global Hub config as OMP, using the session's project root. Claude Code connects to one Room at a time. With multiple saved Rooms, run `/a2a connect <room>` to select one; its saved name is the default. Set `A2A_NAME` or pass `--as <name>` to override it, for example when using both clients in the same Room. Without local defaults, use `/a2a connect <room> --as <name>`. Approval dialogs use the same language selection as the OMP workbench. Claude Code draws the Accept/Decline buttons itself, so they stay in English.
 
 Behavior differences from the OMP Extension:
 
