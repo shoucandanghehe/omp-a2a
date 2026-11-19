@@ -110,6 +110,12 @@ interface CompletionOption {
 	continues?: boolean;
 }
 
+type CompletionItems = Array<{
+	value: string;
+	label: string;
+	description: string;
+}> | null;
+
 const ROOT_COMPLETIONS: CompletionOption[] = [
 	{ token: "hub", description: "Show Hub status" },
 	{
@@ -179,7 +185,7 @@ function completionItems(
 	base: string,
 	current: string,
 	options: CompletionOption[],
-): Array<{ value: string; label: string; description: string }> | null {
+): CompletionItems {
 	const prefix = current.toLowerCase();
 	const items = options
 		.filter((option) => option.token.toLowerCase().startsWith(prefix))
@@ -193,8 +199,12 @@ function completionItems(
 
 function completeA2aArguments(
 	argumentPrefix: string,
-	rooms: string[],
-): Array<{ value: string; label: string; description: string }> | null {
+	rooms: {
+		tracked: string[];
+		connected: string[];
+		fromHub: () => Promise<string[]>;
+	},
+): CompletionItems | Promise<CompletionItems> {
 	const trailingSpace = /\s$/.test(argumentPrefix);
 	const normalized = argumentPrefix.trim().replace(/\s+/g, " ");
 	const words = normalized.length === 0 ? [] : normalized.split(" ");
@@ -207,11 +217,31 @@ function completeA2aArguments(
 		return completionItems(
 			"disconnect ",
 			current,
-			rooms.map((token) => ({ token, description: "Leave this Room" })),
+			rooms.tracked.map((token) => ({ token, description: "Leave this Room" })),
 		);
 	if (command === "room" && words.length === 1) {
 		return completionItems("room ", current, ROOM_COMPLETIONS);
 	}
+	if (command === "connect" && words.length === 1)
+		return rooms.fromHub().then((names) =>
+			completionItems(
+				"connect ",
+				current,
+				names.map((token) => ({
+					token,
+					description: "Join this Room",
+					continues: true,
+				})),
+			),
+		);
+	if (command === "room" && words[1] === "delete" && words.length === 2)
+		return rooms.fromHub().then((names) =>
+			completionItems(
+				"room delete ",
+				current,
+				names.map((token) => ({ token, description: "Hub Room" })),
+			),
+		);
 	if (command === "connect" && words.length === 2) {
 		return completionItems(`connect ${words[1]} `, current, [
 			{ token: "--as", description: "Set this Presence name", continues: true },
@@ -228,7 +258,11 @@ function completeA2aArguments(
 			return completionItems(
 				`${words.join(" ")} `,
 				current,
-				rooms.map((token) => ({ token, description: "Query this Room" })),
+				rooms.connected.map((token) => ({
+					token,
+					description: "Query this Room",
+					continues: true,
+				})),
 			);
 		}
 		if (
@@ -477,6 +511,10 @@ export default function a2aExtension(
 	const sessionRejections = new Map<string, string | null>();
 	const pendingSignatureRequests = new Map<string, symbol>();
 
+	let roomSuggestions:
+		| { hubUrl: string; expiresAt: number; names: Promise<string[]> }
+		| undefined;
+
 	const publishCommandOutput = (raw: string, output: string): void => {
 		const args = raw.trim();
 		const command =
@@ -540,6 +578,40 @@ export default function a2aExtension(
 	const hubClient = () =>
 		connectedTargets()[0]?.client ??
 		getClient(connections.hubUrl ?? configuredHubUrl());
+
+	const listRoomSuggestions = async (): Promise<string[]> => {
+		const cwd = activeContext?.cwd;
+		const session = sessionLifecycle.signal;
+		if (!cwd || session.aborted) return [];
+		try {
+			const hubUrl =
+				connections.hubUrl ??
+				resolveHubUrl({ hubUrl: loadLocalConfig(cwd)?.hubUrl });
+			const now = performance.now();
+			if (
+				roomSuggestions?.hubUrl !== hubUrl ||
+				roomSuggestions.expiresAt <= now
+			) {
+				// The editor serializes completion calls, so bound latency and reuse
+				// the lookup while the user types successive letters.
+				const signal = combineAbortSignals(session, AbortSignal.timeout(800));
+				roomSuggestions = {
+					hubUrl,
+					expiresAt: now + 2_000,
+					names: new HubClient(hubUrl).listRooms({ signal }).then(
+						(rooms) => rooms.map(({ name }) => name),
+						() => [],
+					),
+				};
+			}
+			const snapshot = roomSuggestions;
+			const names = await snapshot.names;
+			return !session.aborted && snapshot === roomSuggestions ? names : [];
+		} catch {
+			// Completion is read-only; explicit commands still report config errors.
+			return [];
+		}
+	};
 
 	const selectRuntime = (room?: string, replyTo?: string): A2aRuntime => {
 		if (replyTo !== undefined) {
@@ -754,6 +826,7 @@ export default function a2aExtension(
 		modelPeerNames.clear();
 		pendingConnectionMessage = undefined;
 		a2aEngaged = false;
+		roomSuggestions = undefined;
 		activeContext = null;
 		configState = { status: "unloaded" };
 		await connections.disconnect();
@@ -824,17 +897,24 @@ export default function a2aExtension(
 		modelPeerNames.clear();
 		pendingConnectionMessage = undefined;
 		activeContext = null;
+		roomSuggestions = undefined;
 		configState = { status: "unloaded" };
 		await connections.disconnect();
 	});
 
 	pi.registerCommand("a2a", {
 		description: "A2A realtime chat connection and Room administration",
-		getArgumentCompletions: (prefix) =>
-			completeA2aArguments(
-				prefix,
-				connections.entries().map(([room]) => room),
-			),
+		// @ts-expect-error OMP's TUI awaits the callback, but the extension SDK still types it as synchronous.
+		getArgumentCompletions: (prefix: string) => {
+			const entries = connections.entries();
+			return completeA2aArguments(prefix, {
+				tracked: entries.map(([room]) => room),
+				connected: entries
+					.filter(([, runtime]) => runtime.connected)
+					.map(([room]) => room),
+				fromHub: listRoomSuggestions,
+			});
+		},
 		handler: async (raw, context) => {
 			const sessionToken = sessionLifecycle.signal;
 			if (sessionToken.aborted) return;
@@ -908,6 +988,7 @@ export default function a2aExtension(
 						{ signal: sessionToken },
 					);
 					sessionToken.throwIfAborted();
+					roomSuggestions = undefined;
 					context.ui.notify(`Created Room ${name}`, "info");
 					return;
 				}
@@ -938,6 +1019,8 @@ export default function a2aExtension(
 						return;
 					sessionToken.throwIfAborted();
 					const deleted = await client.deleteRoom(name);
+					sessionToken.throwIfAborted();
+					roomSuggestions = undefined;
 					context.ui.notify(
 						deleted ? `Deleted Room ${name}` : `Room ${name} does not exist`,
 						"info",

@@ -252,7 +252,7 @@ independently. With multiple Rooms, pass a Room to `disconnect` and `--room`
 to `history`; with one Room, both can use it implicitly. Leave all Rooms
 before connecting to another Hub.
 
-`/a2a` provides Tab completion for root commands, `room create|list|delete`, `connect ... --as`, tracked Rooms in `disconnect` and `history --room`, and compatible history flags. `--before` and `--after` are never suggested together.
+`/a2a` provides Tab completion for subcommands and compatible history flags. `connect` and `room delete` suggest existing names from the current Hub; `disconnect` suggests tracked Rooms, and `history --room` suggests online Rooms. Hub suggestions are briefly cached while you type and refresh after a local Room creation or deletion. `--before` and `--after` are never suggested together.
 
 Room deletion requires confirmation. Humans do not use send, broadcast, reply, Inbox, join, or leave protocol commands.
 

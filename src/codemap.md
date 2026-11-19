@@ -65,7 +65,7 @@ On `session_shutdown`, the extension aborts Session work and disconnects every R
 - `history [--room <room>] [--before <ref> | --after <ref>] [--limit <n>] [--from <name>]`
 - `help` (also accepted as `--help` or `-h`)
 
-`completeA2aArguments` provides synchronous completion, including tracked Room names for `disconnect` and `history --room`. It preserves the full argument prefix, removes used history flags, and enforces the `before`/`after` mutual exclusion in suggestions.
+`completeA2aArguments` preserves the argument prefix, omits used history flags, and keeps `before`/`after` mutually exclusive. It reads tracked Rooms for `disconnect`, connected Rooms for `history --room`, and asynchronously reads the selected Hub's Room list for `connect` and `room delete`. Hub lookups have a short deadline and share a brief per-Session cache, invalidated by a local create/delete or Hub change.
 
 Read-only result commands (`help`/`--help`/`-h`, `hub`, `room`/`room list`, `status`, `peers`, and `history`) publish a visible transcript card whose custom-message title is the trimmed `/a2a` invocation, without triggering a model turn. The `context` hook removes only custom messages whose type is `/a2a` or starts with `/a2a ` before provider requests, preserving the contract that human command output stays outside model context. Mutating action results, connection lifecycle, Presence, delivery, and errors remain transient UI notifications.
 

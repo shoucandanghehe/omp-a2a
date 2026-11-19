@@ -94,7 +94,7 @@ The Hub runs locally with `bun run hub` or in Docker Compose. The CLI alone reso
 
 ### Human commands
 
-`/a2a connect` adds or replaces a single Room connection, preserving the others on the same Hub. `/a2a disconnect <room>` leaves one Room and `/a2a save` persists every live Room and its local name. Status and peers group by Room; history accepts `--room` and completion offers tracked Room names.
+`/a2a connect` adds or replaces a single Room connection, preserving the others on the same Hub. `/a2a disconnect <room>` leaves one Room and `/a2a save` persists every live Room and its local name. Status and peers group by Room. Completion uses the Hub Room list for `connect` and `room delete`, tracked Rooms for `disconnect`, and connected Rooms for `history --room`.
 
 Read-only results persist as visible `/a2a` transcript cards and are filtered out of model context. Action results, connection lifecycle, Presence, delivery, and errors remain transient UI notifications.
 

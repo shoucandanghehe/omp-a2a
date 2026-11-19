@@ -323,7 +323,7 @@ test("save pins the connected Hub and enables auto-connect in the selected proje
 	}
 });
 
-test("multiple Rooms route homonymous peers, replies and history independently and resume after save", async () => {
+test("multiple Rooms offer scoped completions, route messages independently and resume after save", async () => {
 	const dataDir = mkdtempSync(join(tmpdir(), "omp-a2a-extension-multi-"));
 	const hub = await startHubServer({ host: "127.0.0.1", port: 0, dataDir });
 	const client = new HubClient(hub.listenUrl);
@@ -336,10 +336,18 @@ test("multiple Rooms route homonymous peers, replies and history independently a
 	const context = {
 		cwd,
 		isIdle: () => true,
-		ui: { notify: (message: string) => notifications.push(message) },
+		ui: {
+			notify: (message: string) => notifications.push(message),
+			confirm: async () => true,
+		},
 	};
 	let run:
 		| ((args: string, commandContext: typeof context) => Promise<void>)
+		| undefined;
+	let complete:
+		| ((
+				prefix: string,
+		  ) => CompletionItem[] | null | Promise<CompletionItem[] | null>)
 		| undefined;
 	let start:
 		| ((event: unknown, eventContext: typeof context) => Promise<void>)
@@ -385,8 +393,15 @@ test("multiple Rooms route homonymous peers, replies and history independently a
 				if (message.customType.startsWith("/a2a"))
 					output.set(message.customType, message.content);
 			},
-			registerCommand(_name: string, command: { handler: typeof run }) {
+			registerCommand(
+				_name: string,
+				command: {
+					handler: typeof run;
+					getArgumentCompletions: typeof complete;
+				},
+			) {
 				run = command.handler;
+				complete = command.getArgumentCompletions;
 			},
 			registerTool(tool: RegisteredTool) {
 				tools.set(tool.name, tool);
@@ -395,12 +410,38 @@ test("multiple Rooms route homonymous peers, replies and history independently a
 		const send = tools.get("a2a_message");
 		const history = tools.get("a2a_history");
 		const roster = tools.get("a2a_peers");
-		if (!run || !start || !shutdown || !send || !history || !roster)
+		if (
+			!run ||
+			!complete ||
+			!start ||
+			!shutdown ||
+			!send ||
+			!history ||
+			!roster
+		)
 			throw new Error(
 				"A2A command, tools or lifecycle hooks were not registered",
 			);
 
+		await start({}, context);
+		expect((await complete("connect bi"))?.map(({ value }) => value)).toEqual([
+			"connect billing ",
+		]);
+		expect(await complete("history --room ")).toBeNull();
+		await run("room create tab-room", context);
+		expect(
+			(await complete("room delete tab"))?.map(({ value }) => value),
+		).toEqual(["room delete tab-room"]);
+		await run("room delete tab-room", context);
+		expect(await complete("connect tab")).toBeNull();
+
 		await run("connect billing --as api", context);
+		expect((await complete("disconnect "))?.map(({ value }) => value)).toEqual([
+			"disconnect billing",
+		]);
+		expect(
+			(await complete("history --room "))?.map(({ value }) => value),
+		).toEqual(["history --room billing "]);
 		await run("connect review --as judge", context);
 		await run("disconnect", context);
 		expect(notifications.at(-1)).toContain("Specify which Room");
