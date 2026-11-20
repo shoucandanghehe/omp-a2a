@@ -1,9 +1,7 @@
 import type { HubClient } from "./hub/client";
 import type { DeliveryEvent, Peer } from "./hub/realtime-types";
 import { A2aRuntime, type MessageView } from "./operations";
-
-const INITIAL_RECONNECT_DELAY_MS = 500;
-const MAX_RECONNECT_DELAY_MS = 10_000;
+import { canReconnectRoom, RoomReconnect } from "./room-reconnect";
 
 type RoomConnectionEvents = {
 	onConnected?: (room: string, runtime: A2aRuntime, changed: boolean) => void;
@@ -30,8 +28,7 @@ type RoomConnection = {
 	target: ConnectionTarget;
 	connecting: boolean;
 	reportedToken?: AbortSignal;
-	reconnectTimer?: NodeJS.Timeout;
-	reconnectDelayMs: number;
+	reconnect: RoomReconnect;
 };
 
 export class RoomConnections {
@@ -68,7 +65,7 @@ export class RoomConnections {
 				room,
 				state: self
 					? ("connected" as const)
-					: connection.reconnectDelayMs > INITIAL_RECONNECT_DELAY_MS
+					: connection.reconnect.backedOff
 						? ("reconnecting" as const)
 						: ("connecting" as const),
 				self: self?.name,
@@ -92,7 +89,7 @@ export class RoomConnections {
 		const target = { name };
 		let connection = this.#rooms.get(room);
 		if (connection) {
-			this.#clearReconnect(connection);
+			connection.reconnect.cancel();
 			connection.target = target;
 		} else {
 			connection = this.#createRoom(room, hubUrl, target);
@@ -159,7 +156,7 @@ export class RoomConnections {
 			runtime,
 			target,
 			connecting: false,
-			reconnectDelayMs: INITIAL_RECONNECT_DELAY_MS,
+			reconnect: new RoomReconnect(),
 		};
 		return connection;
 	}
@@ -185,14 +182,14 @@ export class RoomConnections {
 			connection.connecting = false;
 			const failure = error instanceof Error ? error : new Error(String(error));
 			const { message } = failure;
-			const retrying = !message.startsWith("name_in_use:");
+			const retrying = canReconnectRoom(failure);
 			if (retrying) {
 				this.#scheduleReconnect(connection);
 			} else {
 				const published = runtime.publishedTarget;
 				if (published) {
 					connection.target = { name: published.name };
-					connection.reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+					connection.reconnect.reset();
 				} else {
 					this.#remove(connection);
 				}
@@ -207,7 +204,7 @@ export class RoomConnections {
 			this.#scheduleReconnect(connection);
 			return;
 		}
-		connection.reconnectDelayMs = INITIAL_RECONNECT_DELAY_MS;
+		connection.reconnect.reset();
 		const token = runtime.connectionToken();
 		const changed = token !== connection.reportedToken;
 		connection.reportedToken = token;
@@ -215,27 +212,17 @@ export class RoomConnections {
 	}
 
 	#scheduleReconnect(connection: RoomConnection): void {
-		if (connection.connecting || connection.reconnectTimer) return;
+		if (connection.connecting) return;
 		const target = connection.target;
-		connection.reconnectTimer = setTimeout(() => {
-			connection.reconnectTimer = undefined;
+		connection.reconnect.schedule(() => {
 			void this.#attempt(connection, target);
-		}, connection.reconnectDelayMs);
-		connection.reconnectDelayMs = Math.min(
-			connection.reconnectDelayMs * 2,
-			MAX_RECONNECT_DELAY_MS,
-		);
-	}
-
-	#clearReconnect(connection: RoomConnection): void {
-		clearTimeout(connection.reconnectTimer);
-		connection.reconnectTimer = undefined;
+		});
 	}
 
 	#remove(connection: RoomConnection): void {
 		const { room, runtime } = connection;
 		this.#rooms.delete(room);
-		this.#clearReconnect(connection);
+		connection.reconnect.cancel();
 		const teardown = Promise.all([
 			this.#teardowns.get(room),
 			runtime.disconnect(),
