@@ -4,9 +4,10 @@ import { Context, Service } from "@deepseek-ai/cordis";
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import { createScope } from "@deepseek-ai/dsh-scope";
 import { ToolsService } from "@deepseek-ai/dsh-tools";
+import type { Connector } from "../src/binding";
 import { createApply } from "../src/index";
 
-test("real Cordis and ToolsService register only in selected scope and unwind", async () => {
+test("real Cordis removes scoped tools when the Hub disconnects", async () => {
 	const ctx = new Context();
 	const agents = new Map<string, Agent>();
 	class Agents extends Service {
@@ -54,19 +55,23 @@ test("real Cordis and ToolsService register only in selected scope and unwind", 
 	});
 	await scopes;
 	let closed = 0;
+	let disconnect: NonNullable<Parameters<Connector>[0]["events"]>["onClose"];
 	const adapter = ctx.plugin(
 		{
 			name: "test-adapter",
 			inject: ["agents"],
-			apply: createApply(async () => ({
-				close: async () => {
-					closed++;
-				},
-				peers: () => [],
-				send: async () => {
-					throw new Error("unused");
-				},
-			})),
+			apply: createApply(async (options) => {
+				disconnect = options.events?.onClose;
+				return {
+					close: async () => {
+						closed++;
+					},
+					peers: () => [],
+					send: async () => {
+						throw new Error("unused");
+					},
+				};
+			}),
 		},
 		{
 			hubUrl: "http://127.0.0.1:4173",
@@ -87,6 +92,12 @@ test("real Cordis and ToolsService register only in selected scope and unwind", 
 		);
 		assert.equal(ctx.tools.definitions(other).length, 0);
 		assert.equal(ctx.tools.definitions().length, 0);
+		assert.ok(disconnect);
+		disconnect({ manual: false, code: 1006, reason: "" });
+		await new Promise<void>((resolve) => setImmediate(resolve));
+		assert.equal(ctx.tools.definitions(selected).length, 0);
+		assert.equal(ctx.tools.definitions(other).length, 0);
+		assert.equal(closed, 0);
 		await adapter.dispose();
 		assert.equal(ctx.tools.definitions(selected).length, 0);
 		assert.equal(closed, 1);

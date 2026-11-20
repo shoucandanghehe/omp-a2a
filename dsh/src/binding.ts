@@ -74,6 +74,9 @@ export class Binding {
 		private current: () => Agent | undefined,
 		private connect: Connector = A2aConnection.connect,
 	) {}
+	get signal(): AbortSignal {
+		return this.controller.signal;
+	}
 	private assertCurrent() {
 		if (
 			!this.active ||

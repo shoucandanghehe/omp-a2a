@@ -10,7 +10,7 @@ const config = {
 	name: "dsh",
 	sessionId: "selected",
 };
-function fixture() {
+function fixture(disconnectDuringConnect = false) {
 	const listeners = new Map<
 		string,
 		(payload: { agent: Agent }) => void | Promise<void>
@@ -54,8 +54,11 @@ function fixture() {
 		) => listeners.set(name, callback),
 		effect: (fn: () => () => void | Promise<void>) => effects.push(fn()),
 	} as unknown as Context;
-	const apply = createApply(async () => {
+	const apply = createApply(async (options) => {
 		connections++;
+		if (disconnectDuringConnect) {
+			options.events?.onClose?.({ manual: false, code: 1006, reason: "" });
+		}
 		return {
 			close: async () => {
 				closes++;
@@ -111,4 +114,13 @@ test("other Agent disposal cannot disconnect the selected one", async () => {
 	f.listeners.get("agent/disposed")?.({ agent: f.other });
 	assert.equal(f.counts().closes, 0);
 	await f.effects[0]();
+});
+
+test("does not register tools when the Hub disconnects during attach", async () => {
+	const f = fixture(true);
+	f.registry.set("selected", f.selected);
+	await assert.rejects(async () => f.apply(f.ctx, config), /no longer current/);
+	await f.effects[0]();
+	assert.deepEqual(f.counts(), { connections: 1, closes: 1, toolDisposals: 0 });
+	assert.equal(f.tools.length, 0);
 });

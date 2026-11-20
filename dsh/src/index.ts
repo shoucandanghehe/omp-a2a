@@ -21,6 +21,15 @@ export function createApply(connect?: Connector) {
 		let binding: Binding | undefined;
 		let stopped = false;
 		let disposeTools: (() => Promise<void> | void) | undefined;
+		let toolsDisposal: Promise<void> | undefined;
+		function removeTools() {
+			const dispose = disposeTools;
+			if (dispose) {
+				disposeTools = undefined;
+				toolsDisposal = Promise.resolve().then(dispose);
+			}
+			return toolsDisposal;
+		}
 		async function attach(agent: Agent) {
 			if (stopped || selected || agent.session.id !== id) return;
 			selected = agent;
@@ -31,8 +40,17 @@ export function createApply(connect?: Connector) {
 				connect,
 			);
 			binding = next;
+			next.signal.addEventListener(
+				"abort",
+				() => {
+					void removeTools()?.catch((error) => {
+						console.error("[omp-a2a] could not remove session tools:", error);
+					});
+				},
+				{ once: true },
+			);
 			await next.start();
-			if (stopped || ctx.agents.get(id) !== agent) {
+			if (stopped || next.signal.aborted || ctx.agents.get(id) !== agent) {
 				await next.close();
 				return;
 			}
@@ -93,6 +111,7 @@ export function createApply(connect?: Connector) {
 				},
 			});
 			disposeTools = () => fork.dispose();
+			if (next.signal.aborted) await removeTools();
 		}
 		ctx.on("agent/created", async ({ agent }) => {
 			try {
@@ -110,8 +129,11 @@ export function createApply(connect?: Connector) {
 		});
 		ctx.effect(() => async () => {
 			stopped = true;
-			await binding?.close();
-			await disposeTools?.();
+			try {
+				await binding?.close();
+			} finally {
+				await removeTools();
+			}
 		});
 		const existing = ctx.agents.get(id);
 		if (existing) return attach(existing);
