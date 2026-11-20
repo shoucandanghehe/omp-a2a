@@ -109,3 +109,51 @@ test("ACP reports an idle agent exit", async () => {
 		await client.close();
 	}
 });
+
+test("ACP sparse tool permission resolves the latest same-session operation by ID", async () => {
+	const client = await open("sparse", async (request) => {
+		expect(request.title).toBe("Read a file");
+		expect(request.detail).toContain("Tool: read_file");
+		expect(request.detail).toContain("/tmp/latest");
+		expect(request.detail).not.toContain("/tmp/old");
+		expect(request.detail).not.toContain("/tmp/unrelated");
+		return "allow";
+	});
+	try {
+		expect((await client.prompt("test")).text).toBe("allow");
+	} finally {
+		await client.close();
+	}
+});
+
+test("ACP denies sparse, oversized and stale tool permission without offering approval", async () => {
+	for (const scenario of ["missing", "oversize-tool", "previous-turn"]) {
+		let calls = 0;
+		const client = await open(scenario, async () => {
+			calls++;
+			return "allow";
+		});
+		try {
+			const initialCalls = scenario === "previous-turn" ? 1 : 0;
+			if (initialCalls)
+				expect((await client.prompt("first")).text).toBe("allow");
+			expect((await client.prompt("test")).text).toBe("deny");
+			expect(calls).toBe(initialCalls);
+		} finally {
+			await client.close();
+		}
+	}
+});
+
+test("ACP invalidates a permission choice if the operation changes during approval", async () => {
+	const client = await open("changed", async (request) => {
+		expect(request.detail).toContain("/tmp/latest");
+		await Bun.sleep(25);
+		return "allow";
+	});
+	try {
+		expect((await client.prompt("test")).text).toBe("deny");
+	} finally {
+		await client.close();
+	}
+});

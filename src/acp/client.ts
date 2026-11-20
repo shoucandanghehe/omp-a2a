@@ -4,6 +4,8 @@ import { isAbsolute } from "node:path";
 const MAX_FRAME = 1024 * 1024;
 const MAX_TEXT = 64 * 1024;
 const MAX_PERMISSIONS = 8;
+const MAX_TOOL_CALLS = 32;
+const MAX_PERMISSION_DETAIL = 4_096;
 const START_TIMEOUT_MS = 15_000;
 const PROMPT_TIMEOUT_MS = 300_000;
 const CANCEL_TIMEOUT_MS = 5_000;
@@ -64,9 +66,20 @@ type Pending = {
 	readonly reject: (error: AcpError) => void;
 };
 
+type ToolCall = {
+	readonly title?: string;
+	readonly name?: string;
+	readonly kind?: string;
+	readonly rawInput?: string | null;
+	readonly locations?: string | null;
+	readonly content?: string | null;
+	readonly terminal: boolean;
+};
+
 type Turn = {
 	readonly chunks: string[];
 	readonly requests: Map<RpcId, AbortController>;
+	readonly toolCalls: Map<string, ToolCall>;
 	bytes: number;
 	cancelled: boolean;
 	cancelTimer?: ReturnType<typeof setTimeout>;
@@ -77,6 +90,96 @@ function object(value: unknown): JsonObject | undefined {
 		// The object is intentionally narrowed only to unknown properties.
 		return { ...value };
 	}
+}
+
+function toolCallId(value: unknown): string | undefined {
+	if (typeof value === "string" && value.length > 0 && value.length <= 128) {
+		return value;
+	}
+}
+
+function boundedDetail(value: unknown): string | null | undefined {
+	if (
+		(typeof value === "string" && value.trim().length > 0) ||
+		(Array.isArray(value) && value.length > 0) ||
+		(value !== null &&
+			typeof value === "object" &&
+			Object.keys(value).length > 0)
+	) {
+		const serialized = JSON.stringify(value).replace(
+			/[\p{Cc}\u202a-\u202e\u2066-\u2069]/gu,
+			(char) => `\\u${char.charCodeAt(0).toString(16).padStart(4, "0")}`,
+		);
+		return Buffer.byteLength(serialized) <= MAX_PERMISSION_DETAIL
+			? serialized
+			: null;
+	}
+}
+
+function mergeToolCall(
+	previous: ToolCall | undefined,
+	update: JsonObject,
+): ToolCall {
+	return {
+		title:
+			"title" in update
+				? label(update.title, "ACP tool permission")
+				: previous?.title,
+		name:
+			typeof update.name === "string" ? label(update.name, "") : previous?.name,
+		kind: "kind" in update ? label(update.kind, "other") : previous?.kind,
+		rawInput:
+			update.rawInput != null
+				? boundedDetail(update.rawInput)
+				: previous?.rawInput,
+		locations:
+			"locations" in update
+				? boundedDetail(update.locations)
+				: previous?.locations,
+		// A file diff can identify an edit when the agent supplied no raw input.
+		content:
+			"content" in update
+				? boundedDetail(
+						Array.isArray(update.content)
+							? update.content.filter((entry: unknown) => {
+									const diff = object(entry);
+									return (
+										diff?.type === "diff" &&
+										typeof diff.path === "string" &&
+										diff.path.length > 0 &&
+										typeof diff.newText === "string" &&
+										(diff.oldText === null || typeof diff.oldText === "string")
+									);
+								})
+							: undefined,
+					)
+				: previous?.content,
+		terminal:
+			previous?.terminal === true ||
+			update.status === "completed" ||
+			update.status === "failed",
+	};
+}
+
+function operationDetail(call: ToolCall): string | undefined {
+	if (
+		call.terminal ||
+		call.rawInput === null ||
+		call.content === null ||
+		call.locations === null ||
+		(!call.rawInput && !call.content)
+	)
+		return undefined;
+	const detail = [
+		call.name && `Tool: ${call.name}`,
+		call.kind && `Operation: ${call.kind}`,
+		call.rawInput && `Input: ${call.rawInput}`,
+		call.locations && `Locations: ${call.locations}`,
+		call.content && `Edits: ${call.content}`,
+	]
+		.filter(Boolean)
+		.join("\n");
+	if (Buffer.byteLength(detail) <= MAX_PERMISSION_DETAIL) return detail;
 }
 
 function permissionKind(value: unknown): value is PermissionKind {
@@ -215,6 +318,7 @@ export class AcpClient {
 			chunks: [],
 			bytes: 0,
 			requests: new Map(),
+			toolCalls: new Map(),
 			cancelled: false,
 		};
 		this.#turn = turn;
@@ -421,6 +525,19 @@ export class AcpClient {
 		if (!turn || turn.cancelled || params?.sessionId !== this.#sessionId)
 			return;
 		const update = object(params.update);
+		if (
+			update?.sessionUpdate === "tool_call" ||
+			update?.sessionUpdate === "tool_call_update"
+		) {
+			const id = toolCallId(update.toolCallId);
+			if (
+				id &&
+				(turn.toolCalls.has(id) || turn.toolCalls.size < MAX_TOOL_CALLS)
+			) {
+				turn.toolCalls.set(id, mergeToolCall(turn.toolCalls.get(id), update));
+			}
+			return;
+		}
 		if (update?.sessionUpdate !== "agent_message_chunk") return;
 		const content = object(update.content);
 		if (
@@ -503,21 +620,21 @@ export class AcpClient {
 		const controller = new AbortController();
 		turn.requests.set(id, controller);
 		const toolCall = object(params.toolCall);
-		const title = label(toolCall?.title, "ACP tool permission");
-		const detail =
-			toolCall?.rawInput === undefined && toolCall?.locations === undefined
-				? undefined
-				: JSON.stringify({
-						input: toolCall?.rawInput,
-						locations: toolCall?.locations,
-					});
+		const callId = toolCallId(toolCall?.toolCallId);
+		const call =
+			callId &&
+			toolCall &&
+			(turn.toolCalls.has(callId) || turn.toolCalls.size < MAX_TOOL_CALLS)
+				? mergeToolCall(turn.toolCalls.get(callId), toolCall)
+				: undefined;
+		// Record what was actually presented so any subsequent operation changes
+		// can invalidate the pending decision, including updates to inline details.
+		if (callId && call) turn.toolCalls.set(callId, call);
+		const title = call?.title ?? "ACP tool permission";
+		const detail = call && operationDetail(call);
 		void Promise.resolve()
 			.then(() => {
-				// Do not request approval if the supplied details cannot be shown in full.
-				if (
-					!controller.signal.aborted &&
-					(detail === undefined || Buffer.byteLength(detail) <= 4_096)
-				) {
+				if (!controller.signal.aborted && detail !== undefined) {
 					const visibleOptions = options.map((option) => ({ ...option }));
 					return callback?.(
 						{ title, detail, options: visibleOptions },
@@ -535,10 +652,19 @@ export class AcpClient {
 				)
 					return;
 				// Persistent grants cannot be expressed through this adapter.
+				const latest = callId && turn.toolCalls.get(callId);
+				const current =
+					detail !== undefined &&
+					latest &&
+					latest.title === call?.title &&
+					operationDetail(latest) === detail;
 				const selected =
-					options.find(
-						(option) => option.id === choice && option.kind === "allow_once",
-					) ?? reject;
+					(current
+						? options.find(
+								(option) =>
+									option.id === choice && option.kind === "allow_once",
+							)
+						: undefined) ?? reject;
 				this.#send({
 					id,
 					result: selected

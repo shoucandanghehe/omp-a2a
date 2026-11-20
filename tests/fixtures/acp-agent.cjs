@@ -15,7 +15,14 @@ const update = (sessionId, sessionUpdate, text) =>
 			update: { sessionUpdate, content: { type: "text", text } },
 		},
 	});
-const permission = () =>
+const toolUpdate = (sessionId, sessionUpdate, call) =>
+	send({
+		method: "session/update",
+		params: { sessionId, update: { sessionUpdate, ...call } },
+	});
+const permission = (
+	details = { title: "Read a file", rawInput: { path: "/tmp/demo" } },
+) =>
 	send({
 		id: "permission",
 		method: "session/request_permission",
@@ -23,8 +30,7 @@ const permission = () =>
 			sessionId: "test",
 			toolCall: {
 				toolCallId: "tool",
-				title: "Read a file",
-				rawInput: { path: "/tmp/demo" },
+				...details,
 			},
 			options: [
 				{ optionId: "allow", name: "Allow once", kind: "allow_once" },
@@ -60,6 +66,49 @@ rl.on("line", (line) => {
 		if (scenario === "permission" || (scenario === "cancel" && prompts === 1)) {
 			active = message.id;
 			permission();
+			return;
+		}
+		if (
+			[
+				"sparse",
+				"missing",
+				"oversize-tool",
+				"previous-turn",
+				"changed",
+			].includes(scenario)
+		) {
+			active = message.id;
+			if (scenario === "sparse" || scenario === "changed") {
+				toolUpdate("test", "tool_call", {
+					toolCallId: "tool",
+					title: "Read a file",
+					name: "read_file",
+					rawInput: { path: "/tmp/old" },
+				});
+				toolUpdate("test", "tool_call_update", {
+					toolCallId: "tool",
+					rawInput: { path: "/tmp/latest" },
+				});
+				toolUpdate("other", "tool_call_update", {
+					toolCallId: "tool",
+					rawInput: { path: "/tmp/unrelated" },
+				});
+			} else if (scenario === "oversize-tool") {
+				toolUpdate("test", "tool_call", {
+					toolCallId: "tool",
+					rawInput: { command: "x".repeat(4_500) },
+				});
+			}
+			if (scenario === "previous-turn" && prompts === 1) permission();
+			else
+				permission(scenario === "sparse" ? { rawInput: null, name: null } : {});
+			if (scenario === "changed") {
+				// Keep this update in the same stdio read as the pending request.
+				toolUpdate("test", "tool_call_update", {
+					toolCallId: "tool",
+					rawInput: { path: "/tmp/changed" },
+				});
+			}
 			return;
 		}
 		update("other", "agent_message_chunk", "wrong session");

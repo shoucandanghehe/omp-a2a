@@ -388,7 +388,9 @@ Use only a trusted Room and a locally installed, configured ACP executable. The
 literal command and argv come from the operator; Room messages cannot choose
 them. The terminal asks the local operator before handing each direct message
 to the Agent, before a tool permission is granted, and before sending the exact
-reply. Permanent permission choices are not accepted. EOF, missing approval,
+reply. Reply approval only permits sending; replies never carry an A2A action-authorization
+receipt. Tool approval requires complete operation details from the current ACP turn.
+Permanent permission choices are not accepted. EOF, missing approval,
 and cancellation do not grant permission. Ctrl+C cancels the active operation;
 Ctrl+D exits. Do not use a personal account as a shared or unattended service;
 follow the executable provider's terms and normal authentication flow.
@@ -403,7 +405,7 @@ are visible to Room history readers under the Hub's normal trust model.
 
 ### 通用 ACP worker（实验性）
 
-使用本机终端启动 ACP stdio 客户端，将桥管理的新会话加入指定房间，不接管已经打开的会话。首版只支持私聊文字，会在本机分别确认收件、工具权限和回信；拒绝广播、附件和永久授权。Hub 的 `delivered` 只表示桥已入队，不表示模型已经执行。Ctrl+C 取消本轮，Ctrl+D 退出。
+使用本机终端启动 ACP stdio 客户端，将桥管理的新会话加入指定房间，不接管已经打开的会话。首版只支持私聊文字，会在本机分别确认收件、工具权限和回信；拒绝广播、附件和永久授权。确认回信只允许发送，不附带 A2A 操作授权；工具操作详情缺失时不提供批准选项。Hub 的 `delivered` 只表示桥已入队，不表示模型已经执行。Ctrl+C 取消本轮，Ctrl+D 退出。
 
 ## Claude Code
 

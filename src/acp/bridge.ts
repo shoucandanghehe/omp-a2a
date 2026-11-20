@@ -127,7 +127,6 @@ export class AcpBridge {
 				target: [message.from.name],
 				text,
 				replyTo: message.messageRef,
-				userApproval: { kind: "omp-ui" },
 			},
 			{ signal, connectionToken },
 		);

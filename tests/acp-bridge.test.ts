@@ -57,18 +57,19 @@ async function setup(overrides: Partial<AcpBridgeOptions> = {}) {
 	return { delivery, reply, peer, bridge };
 }
 
-test("ACP bridge acknowledges receipt before a prompt finishes and replies to the original peer", async () => {
+test("ACP bridge acknowledges receipt early and sends ordinary replies without an authorization receipt", async () => {
 	const turn = Promise.withResolvers<{ text: string; stopReason: string }>();
 	const { delivery, reply, peer } = await setup({ prompt: () => turn.promise });
 	const sent = await peer.message({ target: ["worker"], text: "hello" });
 	expect(await delivery.promise).toMatchObject({ status: "delivered" });
 	await Bun.sleep(2_050);
 	turn.resolve({ text: "answer", stopReason: "end_turn" });
-	expect(await reply.promise).toMatchObject({
+	const answer = await reply.promise;
+	expect(answer).toMatchObject({
 		text: "answer",
 		replyTo: sent.message.messageRef,
-		userApproval: { kind: "omp-ui" },
 	});
+	expect(answer.userApproval).toBeUndefined();
 }, 10_000);
 
 test("ACP bridge does not forward a broadcast to the local agent", async () => {
