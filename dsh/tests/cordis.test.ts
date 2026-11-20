@@ -7,7 +7,7 @@ import { ToolsService } from "@deepseek-ai/dsh-tools";
 import type { Connector } from "../src/binding";
 import { createApply } from "../src/index";
 
-test("real Cordis removes scoped tools when the Hub disconnects", async () => {
+test("real Cordis keeps the same scoped tools across Hub disconnect and removes them on unload", async () => {
 	const ctx = new Context();
 	const agents = new Map<string, Agent>();
 	class Agents extends Service {
@@ -92,10 +92,11 @@ test("real Cordis removes scoped tools when the Hub disconnects", async () => {
 		);
 		assert.equal(ctx.tools.definitions(other).length, 0);
 		assert.equal(ctx.tools.definitions().length, 0);
+		const online = ctx.tools.schemas(selected);
 		assert.ok(disconnect);
 		disconnect({ manual: false, code: 1006, reason: "" });
 		await new Promise<void>((resolve) => setImmediate(resolve));
-		assert.equal(ctx.tools.definitions(selected).length, 0);
+		assert.deepEqual(ctx.tools.schemas(selected), online);
 		assert.equal(ctx.tools.definitions(other).length, 0);
 		assert.equal(closed, 0);
 		await adapter.dispose();

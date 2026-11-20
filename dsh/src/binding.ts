@@ -74,19 +74,22 @@ export class Binding {
 		private current: () => Agent | undefined,
 		private connect: Connector = A2aConnection.connect,
 	) {}
-	get signal(): AbortSignal {
-		return this.controller.signal;
-	}
 	private assertCurrent() {
-		if (
-			!this.active ||
-			this.controller.signal.aborted ||
-			this.current() !== this.agent
-		)
+		if (this.current() !== this.agent)
 			throw new Error("A2A session binding is no longer current");
+		if (!this.active || this.controller.signal.aborted)
+			throw new Error("A2A Hub is offline; reload the plugin to reconnect");
+	}
+	private connected() {
+		this.assertCurrent();
+		if (!this.connection) throw new Error("A2A Hub is not connected");
+		return this.connection;
 	}
 	start(): Promise<void> {
-		this.opening ??= this.open();
+		this.opening ??= this.open().catch((error: unknown) => {
+			this.active = false;
+			throw error;
+		});
 		return this.opening;
 	}
 	private async open() {
@@ -156,9 +159,7 @@ export class Binding {
 		this.assertCurrent();
 	}
 	peers() {
-		this.assertCurrent();
-		if (!this.connection) throw new Error("A2A is not connected");
-		return this.connection
+		return this.connected()
 			.peers()
 			.filter(
 				(peer) =>
@@ -177,14 +178,13 @@ export class Binding {
 		},
 		signal: AbortSignal,
 	) {
-		this.assertCurrent();
 		if (caller !== this.agent)
 			throw new Error("Tool caller is not the bound session");
 		if (input.requestUserSignature)
 			throw new Error(
 				"Sender approval UI is not implemented; nothing was sent",
 			);
-		if (!this.connection) throw new Error("A2A is not connected");
+		const connection = this.connected();
 		if (typeof input.text !== "string")
 			throw new Error("text must be a string");
 		validateText(input.text);
@@ -195,7 +195,7 @@ export class Binding {
 			target.some((peer) => !this.config.allowedPeers?.includes(peer))
 		)
 			throw new Error("Target is not in allowedPeers");
-		return this.connection.send(
+		return connection.send(
 			{
 				target,
 				text: input.text,

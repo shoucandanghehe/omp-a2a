@@ -21,14 +21,13 @@ export function createApply(connect?: Connector) {
 		let binding: Binding | undefined;
 		let stopped = false;
 		let disposeTools: (() => Promise<void> | void) | undefined;
-		let toolsDisposal: Promise<void> | undefined;
-		function removeTools() {
-			const dispose = disposeTools;
-			if (dispose) {
-				disposeTools = undefined;
-				toolsDisposal = Promise.resolve().then(dispose);
-			}
-			return toolsDisposal;
+		let shutdown: Promise<void> | undefined;
+		function stop() {
+			stopped = true;
+			shutdown ??= Promise.resolve().then(async () => {
+				await Promise.all([binding?.close(), disposeTools?.()]);
+			});
+			return shutdown;
 		}
 		async function attach(agent: Agent) {
 			if (stopped || selected || agent.session.id !== id) return;
@@ -40,20 +39,6 @@ export function createApply(connect?: Connector) {
 				connect,
 			);
 			binding = next;
-			next.signal.addEventListener(
-				"abort",
-				() => {
-					void removeTools()?.catch((error) => {
-						console.error("[omp-a2a] could not remove session tools:", error);
-					});
-				},
-				{ once: true },
-			);
-			await next.start();
-			if (stopped || next.signal.aborted || ctx.agents.get(id) !== agent) {
-				await next.close();
-				return;
-			}
 			const fork = agent.ctx.plugin({
 				name: "omp-a2a-session-tools",
 				inject: ["tools"],
@@ -111,30 +96,28 @@ export function createApply(connect?: Connector) {
 				},
 			});
 			disposeTools = () => fork.dispose();
-			if (next.signal.aborted) await removeTools();
+			try {
+				await next.start();
+			} catch (error) {
+				if (!stopped) console.error("[omp-a2a] Hub connection failed:", error);
+			}
 		}
 		ctx.on("agent/created", async ({ agent }) => {
 			try {
 				await attach(agent);
 			} catch (error) {
-				await binding?.close();
+				await stop();
 				console.error("[omp-a2a] could not attach:", error);
 			}
 		});
 		ctx.on("agent/disposed", ({ agent }) => {
 			if (selected === agent) {
-				stopped = true;
-				void binding?.close();
+				void stop().catch((error) => {
+					console.error("[omp-a2a] could not detach session:", error);
+				});
 			}
 		});
-		ctx.effect(() => async () => {
-			stopped = true;
-			try {
-				await binding?.close();
-			} finally {
-				await removeTools();
-			}
-		});
+		ctx.effect(() => stop);
 		const existing = ctx.agents.get(id);
 		if (existing) return attach(existing);
 	};

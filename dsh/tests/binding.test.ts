@@ -233,3 +233,19 @@ test("explicit allowlist denies unlisted inbound and outbound peers", async () =
 	);
 	await binding.close();
 });
+
+test("offline tools fail explicitly without dispatching or retrying", async () => {
+	const s = await setup();
+	s.options().events?.onClose?.({ manual: false, code: 1006, reason: "" });
+	assert.throws(() => s.binding.peers(), /Hub is offline/);
+	await assert.rejects(
+		s.binding.send(
+			s.agent,
+			{ target: ["peer"], text: "x" },
+			new AbortController().signal,
+		),
+		/Hub is offline/,
+	);
+	assert.equal(s.sent.length, 0);
+	await s.binding.close();
+});

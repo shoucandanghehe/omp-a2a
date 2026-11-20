@@ -49,9 +49,10 @@ external so Cordis shares the host's service instances. The draft pins DSH
 - Direct messages only; broadcasts, blank text, and text over 64 KiB UTF-8 are rejected in both directions. Optional `allowedPeers` restricts both directions and the roster; `[]` denies all peers. Omission trusts every directly addressing peer in the explicitly configured private Room. Names are not authentication.
 - Text only: inbound attachments fail explicitly. Outbound schema offers no file
   parameter. No history tool, Room administration, reconnect, or multi-Room support.
-- Failed connection does not fall back to another session or Hub. Reload the plugin
-  after fixing configuration. A creation-listener failure is logged and isolated
-  from creation of the user's Agent.
+- Tool definitions stay fixed for the lifetime of the bound Agent, even if the
+  Hub is offline or the initial connection failed. Calls report the connection
+  failure without sending or retrying. Reload the plugin to retry the connection;
+  it does not fall back to another session or Hub.
 - Plugin unload closes only its own socket and scoped tool child plugin. It does not
   cancel work already accepted into the user's inbox.
 - Hub has no authentication or tenant isolation; use only the existing trusted
@@ -62,6 +63,6 @@ external so Cordis shares the host's service instances. The draft pins DSH
 
 Strict TypeScript against the published rc.5 APIs; Node unit tests with controlled
 Agent/context/transport doubles; esbuild Node bundle and Node import without Bun.
-A real installed Cordis + DSH ToolsService test additionally verifies selected-agent scoping and unload. These are not a real DSH UI/model run or real Hub end-to-end test. Before release,
+A real installed Cordis + DSH ToolsService test additionally verifies selected-agent scoping, unchanged definitions across Hub disconnect, and unload. These are not a real DSH UI/model run or real Hub end-to-end test. Before release,
 verify actual Cordis agent scoping and local permission UI in a disposable DSH
 profile, plus one visible message in each direction with an actual OMP peer.

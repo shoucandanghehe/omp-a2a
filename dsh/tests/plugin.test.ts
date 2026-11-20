@@ -103,6 +103,8 @@ test("binds pre-existing session once and never rebinds after disposal", async (
 	await f.listeners.get("agent/created")?.({ agent: f.selected });
 	assert.equal(f.counts().connections, 1);
 	f.listeners.get("agent/disposed")?.({ agent: f.selected });
+	await new Promise<void>((resolve) => setImmediate(resolve));
+	assert.equal(f.counts().toolDisposals, 1);
 	await f.listeners.get("agent/created")?.({ agent: f.selected });
 	assert.equal(f.counts().connections, 1);
 	await f.effects[0]();
@@ -116,11 +118,12 @@ test("other Agent disposal cannot disconnect the selected one", async () => {
 	await f.effects[0]();
 });
 
-test("does not register tools when the Hub disconnects during attach", async () => {
+test("keeps scoped tools if the Hub disconnects during attach", async () => {
 	const f = fixture(true);
 	f.registry.set("selected", f.selected);
-	await assert.rejects(async () => f.apply(f.ctx, config), /no longer current/);
-	await f.effects[0]();
+	await f.apply(f.ctx, config);
+	assert.equal(f.tools.length, 2);
 	assert.deepEqual(f.counts(), { connections: 1, closes: 1, toolDisposals: 0 });
-	assert.equal(f.tools.length, 0);
+	await f.effects[0]();
+	assert.equal(f.counts().toolDisposals, 1);
 });
