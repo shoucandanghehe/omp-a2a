@@ -6,6 +6,7 @@ import {
 	normalizeRequestTarget,
 	type RealtimeMessage,
 } from "../../src/hub/realtime-types";
+import { canReconnectRoom, RoomReconnect } from "../../src/room-reconnect";
 
 export interface Config {
 	hubUrl: string;
@@ -61,63 +62,110 @@ export type Connector = (
 	options: Parameters<typeof A2aConnection.connect>[0],
 ) => Promise<Connection>;
 
+type Attempt = {
+	controller: AbortController;
+	connection?: Connection;
+};
+
 /** Borrows one live Agent; never creates, resumes, cancels, or disposes it. */
 export class Binding {
 	private controller = new AbortController();
-	private connection?: Connection;
+	private reconnect = new RoomReconnect();
+	private attempt?: Attempt;
 	private opening?: Promise<void>;
 	private closing?: Promise<void>;
-	private active = true;
+	private terminalError?: Error;
 	constructor(
 		readonly config: Config,
 		readonly agent: Agent,
 		private current: () => Agent | undefined,
 		private connect: Connector = A2aConnection.connect,
 	) {}
+	private isCurrent(): boolean {
+		return !this.controller.signal.aborted && this.current() === this.agent;
+	}
 	private assertCurrent() {
-		if (this.current() !== this.agent)
+		if (!this.isCurrent())
 			throw new Error("A2A session binding is no longer current");
-		if (!this.active || this.controller.signal.aborted)
-			throw new Error("A2A Hub is offline; reload the plugin to reconnect");
 	}
 	private connected() {
 		this.assertCurrent();
-		if (!this.connection) throw new Error("A2A Hub is not connected");
-		return this.connection;
+		const attempt = this.attempt;
+		if (!attempt?.connection || attempt.controller.signal.aborted)
+			throw new Error(
+				this.terminalError
+					? "A2A Hub is offline; reload the plugin to reconnect"
+					: "A2A Hub is offline; reconnecting",
+			);
+		return {
+			connection: attempt.connection,
+			signal: attempt.controller.signal,
+		};
 	}
 	start(): Promise<void> {
-		this.opening ??= this.open().catch((error: unknown) => {
-			this.active = false;
-			throw error;
+		this.assertCurrent();
+		if (this.terminalError) return Promise.reject(this.terminalError);
+		if (this.attempt?.connection) return Promise.resolve();
+		this.opening ??= this.open().finally(() => {
+			this.opening = undefined;
 		});
 		return this.opening;
 	}
-	private async open() {
-		this.assertCurrent();
-		const connection = await this.connect({
-			baseUrl: this.config.hubUrl,
-			room: this.config.room,
-			name: this.config.name,
-			signal: this.controller.signal,
-			events: {
-				onMessage: (message) => this.receive(message),
-				onClose: () => {
-					this.active = false;
-					this.controller.abort(new Error("A2A connection closed"));
-				},
-			},
+	private schedule() {
+		if (!this.isCurrent() || this.terminalError) return;
+		this.reconnect.schedule(() => {
+			if (this.isCurrent()) void this.start().catch(() => undefined);
 		});
+	}
+	private disconnectAttempt(attempt: Attempt): void {
+		if (this.attempt !== attempt) return;
+		this.attempt = undefined;
+		attempt.controller.abort(new Error("A2A connection closed"));
+		if (attempt.connection) this.schedule();
+	}
+	private async open() {
+		const attempt: Attempt = { controller: new AbortController() };
+		this.attempt = attempt;
 		try {
-			this.assertCurrent();
+			const connection = await this.connect({
+				baseUrl: this.config.hubUrl,
+				room: this.config.room,
+				name: this.config.name,
+				signal: AbortSignal.any([
+					this.controller.signal,
+					attempt.controller.signal,
+				]),
+				events: {
+					onMessage: (message) => {
+						if (this.attempt !== attempt || !attempt.connection)
+							throw new Error("A2A connection is not published");
+						this.receive(message);
+					},
+					onClose: ({ manual }) => {
+						if (!manual) this.disconnectAttempt(attempt);
+					},
+				},
+			});
+			if (!this.isCurrent() || this.attempt !== attempt) {
+				await connection.close();
+				this.schedule();
+				return;
+			}
+			attempt.connection = connection;
+			this.reconnect.reset();
 		} catch (error) {
-			await connection.close();
-			throw error;
+			if (this.attempt === attempt) this.attempt = undefined;
+			if (!this.isCurrent()) return;
+			const failure = error instanceof Error ? error : new Error(String(error));
+			if (!canReconnectRoom(failure)) {
+				this.terminalError = failure;
+				throw failure;
+			}
+			this.schedule();
 		}
-		this.connection = connection;
 	}
 	receive(message: RealtimeMessage): void {
-		this.assertCurrent();
-		if (!this.connection) throw new Error("A2A connection is not published");
+		const { signal } = this.connected();
 		if (message.room !== this.config.room) throw new Error("Wrong A2A room");
 		if (
 			message.target.type !== "agents" ||
@@ -156,11 +204,12 @@ export class Binding {
 				],
 			}),
 		);
+		signal.throwIfAborted();
 		this.assertCurrent();
 	}
 	peers() {
 		return this.connected()
-			.peers()
+			.connection.peers()
 			.filter(
 				(peer) =>
 					!this.config.allowedPeers ||
@@ -184,7 +233,7 @@ export class Binding {
 			throw new Error(
 				"Sender approval UI is not implemented; nothing was sent",
 			);
-		const connection = this.connected();
+		const { connection, signal: connectionSignal } = this.connected();
 		if (typeof input.text !== "string")
 			throw new Error("text must be a string");
 		validateText(input.text);
@@ -202,16 +251,23 @@ export class Binding {
 				replyTo: input.replyTo,
 				messageId: input.messageId,
 			},
-			{ signal: AbortSignal.any([signal, this.controller.signal]) },
+			{
+				signal: AbortSignal.any([
+					signal,
+					this.controller.signal,
+					connectionSignal,
+				]),
+			},
 		);
 	}
 	close(): Promise<void> {
-		this.active = false;
+		this.reconnect.cancel();
 		this.controller.abort(new Error("A2A binding disposed"));
 		this.closing ??= (async () => {
 			await this.opening?.catch(() => undefined);
-			await this.connection?.close();
-			this.connection = undefined;
+			const attempt = this.attempt;
+			this.attempt = undefined;
+			await attempt?.connection?.close();
 		})();
 		return this.closing;
 	}

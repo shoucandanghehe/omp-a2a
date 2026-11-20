@@ -3,6 +3,7 @@ import { test } from "node:test";
 import type { Agent } from "@deepseek-ai/dsh-agent";
 import { encodeTextPayload } from "../../src/hub/payload";
 import type { RealtimeMessage } from "../../src/hub/realtime-types";
+import { RoomReconnect } from "../../src/room-reconnect";
 import { Binding, type Connector, validateConfig } from "../src/binding";
 
 const config = {
@@ -248,4 +249,137 @@ test("offline tools fail explicitly without dispatching or retrying", async () =
 	);
 	assert.equal(s.sent.length, 0);
 	await s.binding.close();
+});
+
+test("reconnect retries transport only, ignores stale callbacks and stops on disposal", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	let injections = 0;
+	let dispatches = 0;
+	let closes = 0;
+	const attempts: Parameters<Connector>[0][] = [];
+	const agent = {
+		followup() {
+			injections++;
+		},
+	} as unknown as Agent;
+	const binding = new Binding(
+		config,
+		agent,
+		() => agent,
+		async (options) => {
+			attempts.push(options);
+			if (attempts.length === 2) throw new Error("temporary error");
+			return {
+				peers: () => [],
+				close: async () => {
+					closes++;
+				},
+				send: (_input, request) => {
+					dispatches++;
+					return new Promise((_, reject) => {
+						const signal = request?.signal;
+						signal?.addEventListener("abort", () => reject(signal.reason), {
+							once: true,
+						});
+					});
+				},
+			};
+		},
+	);
+	const flush = () => new Promise<void>((resolve) => setImmediate(resolve));
+	const drop = { manual: false, code: 1006, reason: "" };
+	try {
+		await binding.start();
+		const send = binding.send(
+			agent,
+			{ target: ["peer"], text: "do not replay" },
+			new AbortController().signal,
+		);
+		const rejected = assert.rejects(send, /connection closed/);
+		attempts[0].events?.onClose?.(drop);
+		attempts[0].events?.onClose?.(drop);
+		await rejected;
+		t.mock.timers.tick(499);
+		assert.equal(attempts.length, 1);
+		t.mock.timers.tick(1);
+		await flush();
+		assert.equal(attempts.length, 2);
+		t.mock.timers.tick(999);
+		assert.equal(attempts.length, 2);
+		t.mock.timers.tick(1);
+		await flush();
+		assert.equal(attempts.length, 3);
+		assert.equal(dispatches, 1);
+		assert.equal(attempts[2].room, config.room);
+		assert.equal(attempts[2].baseUrl, config.hubUrl);
+		assert.equal(attempts[2].name, config.name);
+		assert.throws(
+			() => attempts[0].events?.onMessage?.(message),
+			/not published/,
+		);
+		attempts[0].events?.onClose?.(drop);
+		await attempts[2].events?.onMessage?.(message);
+		assert.equal(injections, 1);
+		// A successful handoff resets the delayed schedule to 500 ms.
+		attempts[2].events?.onClose?.(drop);
+		t.mock.timers.tick(500);
+		await flush();
+		assert.equal(attempts.length, 4);
+		attempts[3].events?.onClose?.(drop);
+	} finally {
+		await binding.close();
+	}
+	t.mock.timers.tick(10_000);
+	assert.equal(attempts.length, 4);
+	assert.equal(closes, 0);
+});
+
+test("initial name conflict stops retrying and replacement cannot inherit a pending reconnect", async (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const agent = {} as Agent;
+	let current: Agent | undefined = agent;
+	let attempts = 0;
+	const conflict = new Binding(
+		config,
+		agent,
+		() => current,
+		async () => {
+			attempts++;
+			throw new Error("name_in_use: dsh");
+		},
+	);
+	await assert.rejects(conflict.start(), /name_in_use/);
+	t.mock.timers.tick(10_000);
+	assert.equal(attempts, 1);
+	await conflict.close();
+	const offline = new Binding(
+		config,
+		agent,
+		() => current,
+		async () => {
+			attempts++;
+			throw new Error("offline");
+		},
+	);
+	await offline.start();
+	current = {} as Agent;
+	t.mock.timers.tick(10_000);
+	assert.equal(attempts, 2);
+	assert.throws(() => offline.peers(), /no longer current/);
+	await offline.close();
+});
+
+test("shared room reconnect delay caps at ten seconds", (t) => {
+	t.mock.timers.enable({ apis: ["setTimeout"] });
+	const reconnect = new RoomReconnect();
+	let callbacks = 0;
+	for (const [i, delay] of [
+		500, 1_000, 2_000, 4_000, 8_000, 10_000, 10_000,
+	].entries()) {
+		reconnect.schedule(() => callbacks++);
+		t.mock.timers.tick(delay - 1);
+		assert.equal(callbacks, i);
+		t.mock.timers.tick(1);
+		assert.equal(callbacks, i + 1);
+	}
 });

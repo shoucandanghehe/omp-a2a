@@ -101,7 +101,7 @@ test("real Cordis keeps the same scoped tools across Hub disconnect and removes 
 		assert.equal(closed, 0);
 		await adapter.dispose();
 		assert.equal(ctx.tools.definitions(selected).length, 0);
-		assert.equal(closed, 1);
+		assert.equal(closed, 0);
 	} finally {
 		await adapter.dispose();
 		await scopes.dispose();

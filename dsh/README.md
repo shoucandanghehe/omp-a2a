@@ -48,11 +48,12 @@ external so Cordis shares the host's service instances. The draft pins DSH
   implemented. The plugin never manufactures an `omp-ui` receipt.
 - Direct messages only; broadcasts, blank text, and text over 64 KiB UTF-8 are rejected in both directions. Optional `allowedPeers` restricts both directions and the roster; `[]` denies all peers. Omission trusts every directly addressing peer in the explicitly configured private Room. Names are not authentication.
 - Text only: inbound attachments fail explicitly. Outbound schema offers no file
-  parameter. No history tool, Room administration, reconnect, or multi-Room support.
+  parameter. No history tool, Room administration, or multi-Room support.
 - Tool definitions stay fixed for the lifetime of the bound Agent, even if the
   Hub is offline or the initial connection failed. Calls report the connection
-  failure without sending or retrying. Reload the plugin to retry the connection;
-  it does not fall back to another session or Hub.
+  failure without sending or replaying. The connection retries the same Room,
+  name, and Hub with OMP's 500 ms to 10 s backoff. A name conflict stops retrying;
+  reload the plugin after resolving it. It never switches to another session.
 - Plugin unload closes only its own socket and scoped tool child plugin. It does not
   cancel work already accepted into the user's inbox.
 - Hub has no authentication or tenant isolation; use only the existing trusted
