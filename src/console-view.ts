@@ -1,5 +1,20 @@
-import type { Component, NativeNode, NativeUiEvent } from "@oh-my-pi/pi-tui";
-import * as tui from "@oh-my-pi/pi-tui";
+import {
+	batch,
+	createRoot,
+	type JSXNode,
+	type KeyEvent,
+	type KindAttributes,
+	nativeRendering,
+	type PasteEvent,
+	signal,
+	type TextEdit,
+	UiNode,
+} from "@oh-my-pi/pi-tui";
+import { widgetKeyMatches } from "@oh-my-pi/pi-tui/term/keymap";
+import { widgetContext } from "@oh-my-pi/pi-tui/term/widgets";
+import { fieldWidget } from "@oh-my-pi/pi-tui/term/widgets/editor";
+import { wrap } from "@oh-my-pi/pi-tui/text/width";
+import type { TspKind, TspProps } from "@oh-my-pi/pi-wire";
 import type { A2aLanguage } from "./locale";
 import {
 	type A2aLocalConfig,
@@ -7,12 +22,6 @@ import {
 	AGENT_NAME_RE,
 	ROOM_NAME_RE,
 } from "./types";
-
-// Older ANSI hosts omit the native builders. Only describe() uses them.
-const { col, item, list, node, row, span, text } = tui;
-const { Input, matchesKey, truncateToWidth, visibleWidth, wrapTextWithAnsi } =
-	tui;
-type TextInput = InstanceType<typeof Input>;
 
 type RoomSnapshot = {
 	room: string;
@@ -99,7 +108,6 @@ const en = {
 	},
 	close: "Close",
 	create: "Create Room…",
-	createAndJoin: (room: string) => `Create and join ${room}…`,
 	search: "Search Rooms",
 	tracked: "This session",
 	discovered: "Available to join",
@@ -113,7 +121,6 @@ const en = {
 	listError: (detail: string) => `Room list unavailable: ${detail}`,
 	noRooms: "No Rooms yet. Type a name to create one.",
 	noMatching: "No matching Rooms.",
-	selectRoom: "Select a Room to see its details.",
 	join: "Join…",
 	leave: "Leave",
 	delete: "Delete Room…",
@@ -141,7 +148,6 @@ const en = {
 	startupMissing: (enabled: boolean) =>
 		`Not saved for startup · Auto-connect ${enabled ? "on" : "off"}`,
 	startupNeedsName: "Join to save your name for startup.",
-	startupToggle: "Join at startup",
 	currentName: (name: string) => `Current name: ${name}`,
 	startupMismatch:
 		"Startup is configured for another Hub. Open Project Settings to change it.",
@@ -168,7 +174,6 @@ const en = {
 		`Could not prepare attachments: ${detail}`,
 	attachmentList: (names: string[]) => `Attachments: ${names.join(", ")}`,
 	replyTo: (ref: string) => `Reply to ${ref}`,
-	position: (index: number, count: number) => ` (${index}/${count})`,
 	keys: "Tab / Shift+Tab Move · ↑↓ Select · Enter Open · Esc Back",
 	formKeys: "Tab / Shift+Tab Move · Enter Confirm · Esc Cancel",
 	scroll: "PgUp / PgDn Scroll message",
@@ -210,7 +215,6 @@ const consoleCopy = {
 		},
 		close: "关闭",
 		create: "创建房间…",
-		createAndJoin: (room) => `创建并加入 ${room}…`,
 		search: "搜索房间",
 		tracked: "本会话",
 		discovered: "可加入",
@@ -224,7 +228,6 @@ const consoleCopy = {
 		listError: (detail) => `无法获取房间列表：${detail}`,
 		noRooms: "暂无房间。输入房间名即可创建。",
 		noMatching: "没有匹配的房间。",
-		selectRoom: "选择房间以查看详情。",
 		join: "加入…",
 		leave: "离开",
 		delete: "删除房间…",
@@ -252,7 +255,6 @@ const consoleCopy = {
 		startupMissing: (enabled) =>
 			`未加入启动列表 · 自动连接${enabled ? "已开启" : "已关闭"}`,
 		startupNeedsName: "加入房间后可保存启动名称。",
-		startupToggle: "启动时加入",
 		currentName: (name) => `当前名称：${name}`,
 		startupMismatch: "启动设置指向另一个 Hub。请到项目设置中修改。",
 		startupAdded: "已加入启动列表。",
@@ -277,7 +279,6 @@ const consoleCopy = {
 		attachmentError: (detail) => `无法准备附件：${detail}`,
 		attachmentList: (names) => `附件：${names.join("、")}`,
 		replyTo: (ref) => `回复 ${ref}`,
-		position: (index, count) => `（${index}/${count}）`,
 		keys: "Tab / Shift+Tab 切换 · ↑↓ 选择 · Enter 打开 · Esc 返回",
 		formKeys: "Tab / Shift+Tab 切换 · Enter 确认 · Esc 取消",
 		scroll: "PgUp / PgDn 滚动消息",
@@ -285,8 +286,8 @@ const consoleCopy = {
 } satisfies Record<A2aLanguage, typeof en>;
 
 const HISTORY_LIMIT = 20;
-const ANSI_DETAIL_LINES = 6;
-const ANSI_NARROW_WIDTH = 68;
+const DETAIL_LINES = 6;
+const NARROW_WIDTH = 68;
 
 type Request =
 	| "list"
@@ -317,6 +318,60 @@ type Control = {
 	tone?: "accent" | "error";
 };
 
+function node<K extends TspKind>(
+	kind: K,
+	props: KindAttributes<TspProps<K>>,
+): UiNode<K> {
+	return new UiNode(kind, props);
+}
+
+function text(value: string, style?: string): UiNode<"text"> {
+	return node("text", {
+		...(style ? { spans: [{ t: value, s: style }] } : { text: value }),
+		wrap: "word",
+	});
+}
+
+type Line = { text: string; cursor: number };
+type FieldId =
+	| "search"
+	| "sender"
+	| "name"
+	| "cfg-hub"
+	| "cfg-room"
+	| "cfg-name";
+
+class Field {
+	readonly line = signal<Line>({ text: "", cursor: 0 });
+	readonly #undo: Line[] = [];
+
+	getValue(): string {
+		return this.line.peek().text;
+	}
+
+	setValue(text: string): void {
+		this.#undo.length = 0;
+		this.line.set({ text, cursor: text.length });
+	}
+
+	edit({ len, from, to, text, cursor }: TextEdit): boolean {
+		const previous = this.line.peek();
+		if (len !== previous.text.length) return false;
+		const value = previous.text.slice(0, from) + text + previous.text.slice(to);
+		const changed = value !== previous.text;
+		if (changed) this.#undo.push(previous);
+		this.line.set({ text: value, cursor });
+		return changed;
+	}
+
+	undo(): boolean {
+		const previous = this.#undo.pop();
+		if (!previous) return false;
+		this.line.set(previous);
+		return true;
+	}
+}
+
 // Literal text for both hosts; keep paragraphs but discard terminal controls.
 function literal(value: string): string {
 	return Bun.stripANSI(value.replace(/\r\n?/g, "\n")).replace(
@@ -329,22 +384,25 @@ function errorText(error: unknown): string {
 	return literal(error instanceof Error ? error.message : String(error));
 }
 
-export class A2aConsole implements Component {
-	readonly nativeOverlay = { role: "omp.overlay.a2a", size: "lg" } as const;
+export class A2aConsole {
 	readonly #options: ConsoleOptions;
 	readonly #copy: typeof en;
-	readonly #search = new Input();
-	readonly #sender = new Input();
-	readonly #name = new Input();
-	readonly #hubInput = new Input();
-	readonly #startupRoom = new Input();
-	readonly #startupName = new Input();
+	readonly #search = new Field();
+	readonly #sender = new Field();
+	readonly #name = new Field();
+	readonly #hubInput = new Field();
+	readonly #startupRoom = new Field();
+	readonly #startupName = new Field();
+	readonly #revision = signal(0);
+	#root?: UiNode<"col">;
+	#disposeView?: () => void;
+	#inputs?: Record<FieldId, UiNode<"input">>;
+	#columns = () => 100;
 	#project?: Settings;
 	readonly #requests = new Map<Request, AbortController>();
 	#focus = "search";
 	#hubUrl?: string;
 	#room?: string;
-	#narrow = false;
 	#detailOpen = false;
 	#showHistory = false;
 	#disposed = false;
@@ -368,15 +426,7 @@ export class A2aConsole implements Component {
 		this.#copy = consoleCopy[options.language];
 		const snapshot = options.snapshot();
 		this.#hubUrl = snapshot.hubUrl;
-		this.#search.placeholder = this.#copy.search;
-		this.#search.prompt = `${this.#copy.search}: `;
-		this.#sender.placeholder = this.#copy.sender;
-		this.#sender.prompt = `${this.#copy.sender}: `;
-		this.#hubInput.placeholder = this.#copy.project.hub;
-		this.#startupRoom.placeholder = this.#copy.roomName;
-		this.#startupName.placeholder = this.#copy.rosterName;
-		for (const input of [this.#hubInput, this.#startupRoom, this.#startupName])
-			input.prompt = `${input.placeholder}: `;
+		if (!snapshot.hubUrl) this.#focus = "settings";
 		this.#room = this.#visibleRooms(snapshot)[0];
 		void this.#loadRooms();
 	}
@@ -450,7 +500,7 @@ export class A2aConsole implements Component {
 			this.#form = undefined;
 			this.#detailOpen = false;
 			this.#showHistory = false;
-			if (!this.#project) this.#focus = "search";
+			if (!this.#project) this.#focus = snapshot.hubUrl ? "search" : "settings";
 			this.#room = this.#visibleRooms(snapshot)[0];
 			this.#clearRoomContent();
 			void this.#loadRooms();
@@ -479,7 +529,7 @@ export class A2aConsole implements Component {
 		} finally {
 			if (!controller.signal.aborted) {
 				this.#requests.delete(key);
-				this.#options.redraw();
+				this.#redraw();
 			}
 		}
 	}
@@ -796,9 +846,6 @@ export class A2aConsole implements Component {
 		}
 		this.#form = form;
 		this.#formError = undefined;
-		this.#name.placeholder =
-			form.kind === "join" ? this.#copy.rosterName : this.#copy.roomName;
-		this.#name.prompt = `${this.#name.placeholder}: `;
 		this.#name.setValue(
 			form.kind === "join" && !form.create
 				? (this.#startup(snapshot)?.name ?? "")
@@ -809,7 +856,11 @@ export class A2aConsole implements Component {
 	}
 
 	#dismissForm(): void {
-		this.#focus = this.#form?.kind ?? "room-list";
+		const form = this.#form;
+		this.#focus =
+			form?.kind === "delete" || (form?.kind === "join" && !form.create)
+				? form.kind
+				: "search";
 		this.#form = undefined;
 		this.#formError = undefined;
 	}
@@ -930,8 +981,17 @@ export class A2aConsole implements Component {
 
 	#headerControls(snapshot: Snapshot): Control[] {
 		return [
-			{ id: "refresh", label: this.#copy.refresh },
-			...(snapshot.hubUrl && !this.#requests.has("mutation")
+			...(snapshot.hubUrl
+				? [
+						{
+							id: "refresh",
+							label: this.#listError ? this.#copy.retry : this.#copy.refresh,
+						},
+					]
+				: []),
+			...(snapshot.hubUrl &&
+			!nativeRendering() &&
+			!this.#requests.has("mutation")
 				? [{ id: "create", label: this.#copy.create }]
 				: []),
 			{ id: "close", label: this.#copy.close },
@@ -1020,29 +1080,50 @@ export class A2aConsole implements Component {
 	}
 
 	#controls(snapshot: Snapshot, narrow: boolean): Control[] {
-		if (this.#project) return this.#settingsControls(this.#project);
+		if (this.#project) {
+			return [
+				...this.#settingsControls(this.#project),
+				...(!this.#requests.has("settings-save")
+					? [{ id: "cfg-close", label: this.#copy.close }]
+					: []),
+			];
+		}
 		if (this.#form) return this.#formControls();
-		const controls =
-			narrow && this.#detailOpen
-				? []
-				: [
-						...this.#headerControls(snapshot),
-						{ id: "settings", label: this.#copy.settings },
-					];
-		if (!(narrow && !this.#detailOpen)) {
-			if (narrow && !this.#showHistory)
-				controls.push({ id: "back-list", label: this.#copy.backList });
+		const copy = this.#copy;
+		const controls: Control[] = [];
+		if (narrow && this.#detailOpen) {
+			if (!this.#showHistory)
+				controls.push({ id: "back-list", label: copy.backList });
+		} else if (!this.#showHistory) {
+			const candidate = this.#createCandidate(snapshot);
+			if (candidate)
+				controls.push({
+					id: "create-join",
+					label: `${copy.confirmCreateAndJoin} · ${literal(candidate)}`,
+					value: candidate,
+					tone: "accent",
+				});
+			controls.push({
+				id: "settings",
+				label: snapshot.hubUrl ? copy.settings : copy.configureHub,
+			});
+		}
+		if (!narrow || this.#detailOpen) {
 			if (this.#showHistory) controls.push(...this.#historyControls());
 			else if (!this.#requests.has("mutation"))
 				controls.push(...this.#roomControls(snapshot));
 		}
-		return controls;
+		return [...controls, ...this.#headerControls(snapshot)];
 	}
 
 	#run(control: Control, snapshot: Snapshot): void {
 		if (this.#project) {
-			this.#runSettings(this.#project, control.id);
-			this.#options.redraw();
+			if (control.id === "cfg-close") {
+				this.#cancel("startup-browse");
+				this.#project = undefined;
+				this.#focus = this.#showHistory ? "sender" : "search";
+			} else this.#runSettings(this.#project, control.id);
+			this.#redraw();
 			return;
 		}
 		const room = this.#room;
@@ -1058,6 +1139,13 @@ export class A2aConsole implements Component {
 				break;
 			case "create":
 				this.#openForm({ kind: "create" }, snapshot);
+				break;
+			case "create-join":
+				if (control.value)
+					this.#openForm(
+						{ kind: "join", room: control.value, create: true },
+						snapshot,
+					);
 				break;
 			case "join":
 				if (room) this.#openForm({ kind: "join", room }, snapshot);
@@ -1116,11 +1204,11 @@ export class A2aConsole implements Component {
 				void this.#loadAttachments();
 				break;
 		}
-		this.#options.redraw();
+		this.#redraw();
 	}
 
-	#input(field: string): TextInput | undefined {
-		switch (field) {
+	#field(id: string): Field | undefined {
+		switch (id) {
 			case "search":
 				return this.#search;
 			case "sender":
@@ -1149,35 +1237,44 @@ export class A2aConsole implements Component {
 		} else if (field === "name") this.#formError = undefined;
 	}
 
+	#redraw(): void {
+		batch(() => {
+			this.#revision.set(this.#revision.peek() + 1);
+			this.#options.redraw();
+		});
+	}
+
+	#focusField(id: FieldId): void {
+		if (this.#disposed || this.#focus === id) return;
+		this.#focus = id;
+		this.#redraw();
+	}
+
 	#focusStops(
 		snapshot: Snapshot,
 		controls: Control[],
-		narrow = this.#narrow,
+		narrow: boolean,
 	): string[] {
 		if (this.#project) {
-			const fields = this.#settingsFields(this.#project).map(([id]) => id);
 			const entries = this.#settingsList(this.#project);
 			return [
-				...fields,
+				...this.#settingsFields(this.#project),
 				...(entries?.rows.length ? [entries.id] : []),
 				...controls.map(({ id }) => id),
 			];
 		}
-		if (this.#form) {
+		if (this.#form)
 			return [
 				...(this.#form.kind !== "delete" && !this.#requests.has("mutation")
 					? ["name"]
 					: []),
 				...controls.map(({ id }) => id),
 			];
-		}
-		const showList = !narrow || !this.#detailOpen;
+		const showRooms = (!narrow || !this.#detailOpen) && snapshot.hubUrl;
 		return [
-			...(showList && snapshot.hubUrl
-				? [
-						"search",
-						...(this.#visibleRooms(snapshot).length ? ["room-list"] : []),
-					]
+			...(showRooms && !this.#showHistory ? ["search"] : []),
+			...(showRooms && this.#visibleRooms(snapshot).length
+				? ["room-list"]
 				: []),
 			...(this.#showHistory
 				? [
@@ -1189,57 +1286,75 @@ export class A2aConsole implements Component {
 		];
 	}
 
-	#enterRoom(): void {
-		if (!this.#room) return;
-		this.#detailOpen = true;
-		this.#focus = this.#showHistory
-			? "sender"
-			: this.#tracked(this.#options.snapshot())
-				? "history"
-				: "join";
-	}
-
-	handleInput(data: string): void {
-		if (this.#disposed) return;
+	#onKey(key: KeyEvent): boolean {
+		if (this.#disposed || key.kind === "release") return false;
 		const snapshot = this.#snapshot();
-		const controls = this.#controls(snapshot, this.#narrow);
+		const narrow = this.#columns() < NARROW_WIDTH;
+		const controls = this.#controls(snapshot, narrow);
 		const run = (id: string) => {
 			const control = controls.find((control) => control.id === id);
 			if (control) this.#run(control, snapshot);
 		};
-		if (matchesKey(data, "escape")) {
+		if (widgetKeyMatches(key, "select.cancel")) {
 			if (this.#project) run("cfg-back");
 			else if (this.#form) run("cancel");
 			else if (this.#showHistory) run("back-room");
-			else if (this.#narrow && this.#detailOpen) run("back-list");
+			else if (narrow && this.#detailOpen) run("back-list");
 			else this.#close();
-			return;
+			return true;
 		}
-		const stops = this.#focusStops(snapshot, controls);
+		const stops = this.#focusStops(snapshot, controls, narrow);
 		const current = stops.indexOf(this.#focus);
 		const focus = stops[current] ?? stops[0];
-		if (!focus) return;
-		if (matchesKey(data, "tab") || matchesKey(data, "shift+tab")) {
-			const delta = matchesKey(data, "tab") ? 1 : -1;
+		if (focus === undefined) return true;
+		if (key.id === "tab" || key.id === "shift+tab") {
+			const delta = key.id === "tab" ? 1 : -1;
 			this.#focus =
-				current === -1
-					? ((delta === 1 ? stops[0] : stops.at(-1)) ?? focus)
-					: (stops[(current + delta + stops.length) % stops.length] ?? focus);
-		} else if (matchesKey(data, "enter")) {
-			if (focus === "search" || focus === "room-list") this.#enterRoom();
-			else if (focus === "sender") run("filter");
-			else if (focus === "name") run("confirm");
-			else if (focus === "message-list") run("attachments");
-			else if (this.#project) {
-				if (focus === "cfg-hub") this.#focus = "cfg-auto";
-				else if (focus === "cfg-room") this.#focus = "cfg-name";
-				else if (focus === "cfg-name") run("cfg-apply");
-				else if (focus === "cfg-rooms" || focus === "cfg-choices")
-					this.#runSettings(this.#project, focus);
-				else run(focus);
-			} else run(focus);
-		} else if (matchesKey(data, "up") || matchesKey(data, "down")) {
-			const delta = matchesKey(data, "up") ? -1 : 1;
+				(current < 0
+					? delta === 1
+						? stops[0]
+						: stops.at(-1)
+					: stops[(current + delta + stops.length) % stops.length]) ?? focus;
+		} else if (widgetKeyMatches(key, "select.confirm")) {
+			switch (focus) {
+				case "search":
+					if (this.#room) this.#enterRoom();
+					else run("create-join");
+					break;
+				case "room-list":
+					this.#enterRoom();
+					break;
+				case "sender":
+					run("filter");
+					break;
+				case "name":
+					run("confirm");
+					break;
+				case "message-list":
+					run("attachments");
+					break;
+				case "cfg-hub":
+					this.#focus = "cfg-auto";
+					break;
+				case "cfg-room":
+					this.#focus = "cfg-name";
+					break;
+				case "cfg-name":
+					run("cfg-apply");
+					break;
+				case "cfg-rooms":
+				case "cfg-choices":
+					if (this.#project) this.#runSettings(this.#project, focus);
+					break;
+				default:
+					run(focus);
+					return true;
+			}
+		} else if (
+			widgetKeyMatches(key, "select.up") ||
+			widgetKeyMatches(key, "select.down")
+		) {
+			const delta = widgetKeyMatches(key, "select.up") ? -1 : 1;
 			if (this.#project && (focus === "cfg-rooms" || focus === "cfg-choices")) {
 				const entries = this.#settingsList(this.#project);
 				if (entries?.rows.length) {
@@ -1255,16 +1370,20 @@ export class A2aConsole implements Component {
 				const index = this.#room ? rooms.indexOf(this.#room) : -1;
 				const room =
 					rooms[Math.min(rooms.length - 1, Math.max(0, index + delta))];
-				if (room) this.#selectRoom(room);
-				this.#focus = "room-list";
+				if (room) {
+					this.#selectRoom(room);
+					this.#focus = "room-list";
+				}
 			} else if (focus === "sender" || focus === "message-list") {
 				const messages = this.#historyPage?.messages ?? [];
 				const index = this.#message ? messages.indexOf(this.#message) : -1;
 				const message =
 					messages[Math.min(messages.length - 1, Math.max(0, index + delta))];
-				if (message) this.#selectMessage(message);
-				this.#focus = "message-list";
-			} else if (!this.#input(focus)) {
+				if (message) {
+					this.#selectMessage(message);
+					this.#focus = "message-list";
+				}
+			} else if (!this.#field(focus)) {
 				this.#focus =
 					stops[(stops.indexOf(focus) + delta + stops.length) % stops.length] ??
 					focus;
@@ -1272,198 +1391,145 @@ export class A2aConsole implements Component {
 		} else if (
 			!this.#project &&
 			!this.#form &&
-			this.#room &&
-			(matchesKey(data, "pageUp") || matchesKey(data, "pageDown"))
+			(widgetKeyMatches(key, "select.pageUp") ||
+				widgetKeyMatches(key, "select.pageDown"))
 		) {
-			const delta = matchesKey(data, "pageUp")
-				? -ANSI_DETAIL_LINES
-				: ANSI_DETAIL_LINES;
+			const delta = widgetKeyMatches(key, "select.pageUp")
+				? -DETAIL_LINES
+				: DETAIL_LINES;
 			this.#detailOffset = Math.max(
 				0,
 				Math.min(
 					this.#detailOffset + delta,
-					this.#detailLineCount - ANSI_DETAIL_LINES,
+					this.#detailLineCount - DETAIL_LINES,
 				),
 			);
 		} else {
-			const field =
-				snapshot.hubUrl &&
-				!this.#project &&
-				!this.#form &&
-				!this.#showHistory &&
-				tui.isNativeRendering?.()
-					? "search"
-					: focus;
-			const input = this.#input(field);
-			if (!input) return;
-			input.handleInput(data);
-			this.#edited(field, snapshot);
+			// custom() hands the keys to the root, not its input descendants.
+			// Let the SDK field widget handle editing, selection, and the keymap.
+			const input = this.#inputs?.[focus as FieldId];
+			return input
+				? fieldWidget.key?.(input, key, this.#fieldContext(input)) === true
+				: false;
 		}
-		this.#options.redraw();
+		this.#redraw();
+		return true;
 	}
 
-	handleNativeEvent(event: NativeUiEvent): void {
-		if (this.#disposed) return;
-		const snapshot = this.#snapshot();
-		const key = event.key.slice(event.key.lastIndexOf("/") + 1);
-		if (event.type === "edit" || event.type === "undo") {
-			if (
-				key === "search-input" &&
-				!this.#project &&
-				!this.#form &&
-				!this.#showHistory
-			)
-				this.#focus = "search";
-			if (key !== `${this.#focus}-input`) return;
-			this.#input(this.#focus)?.handleNativeEvent(event);
-			this.#edited(this.#focus, snapshot);
-		} else if (
-			(event.type === "select" || event.type === "activate") &&
-			!this.#form
-		) {
-			if (this.#project) {
-				const entries = this.#settingsList(this.#project);
-				if (!entries || key !== entries.id) return;
-				const index = entries.rows.findIndex(({ room }) => room === event.item);
-				if (index === -1) return;
-				if (entries.id === "cfg-rooms") this.#project.roomIndex = index;
-				else this.#project.choiceIndex = index;
-				this.#runSettings(this.#project, entries.id);
-				this.#options.redraw();
-				return;
-			}
-			const { tracked, discovered } = this.#roomGroups(snapshot);
-			if (
-				(key === "tracked-list" && tracked.includes(event.item)) ||
-				(key === "discovered-list" && discovered.includes(event.item))
-			) {
-				this.#selectRoom(event.item);
-				this.#focus = this.#showHistory ? "sender" : "search";
+	#button({ id, label, value, tone }: Control, face = label): UiNode<"button"> {
+		const action = value === undefined ? id : `${id}=${value}`;
+		return node("button", {
+			key: id === "focus" ? `focus-${value}` : id,
+			text: face,
+			title: label,
+			aria: label,
+			size: "sm",
+			on: this.#focus === id,
+			variant:
+				tone === "error" ? "danger" : tone === "accent" ? "primary" : "default",
+			actions: { click: action },
+			onAction: (act, event) => {
 				if (
-					event.type === "activate" &&
-					key === "discovered-list" &&
-					!this.#requests.has("mutation")
+					this.#disposed ||
+					(act !== action && (act !== id || event.value !== value))
 				)
-					this.#openForm({ kind: "join", room: event.item }, snapshot);
-			} else if (key === "message-list" && this.#showHistory) {
-				const message = this.#historyPage?.messages.find(
-					({ ref }) => ref === event.item,
-				);
-				if (message) this.#selectMessage(message);
-				this.#focus = "message-list";
-			} else return;
-		} else if (event.type === "action") {
-			if (event.act === "close" && key === "close") {
-				this.#close();
-				return;
-			}
-			if (this.#project && event.act === "cfg-close" && key === "cfg-close") {
-				if (this.#requests.has("settings-save")) return;
-				this.#cancel("startup-browse");
-				this.#project = undefined;
-				this.#focus = this.#showHistory ? "sender" : "search";
-				this.#options.redraw();
-				return;
-			}
-			if (!this.#form && !this.#project && !this.#requests.has("mutation")) {
-				if (
-					event.act === "create-join" &&
-					event.value &&
-					event.value === this.#createCandidate(snapshot)
-				) {
-					this.#openForm(
-						{ kind: "join", room: event.value, create: true },
-						snapshot,
-					);
-					this.#options.redraw();
+					return;
+				const snapshot = this.#snapshot();
+				if (id === "focus") {
+					const fields = this.#project
+						? this.#settingsFields(this.#project)
+						: [this.#showHistory ? "sender" : "name"];
+					const field = fields.find((field) => field === value);
+					if (field) this.#focusField(field as FieldId);
 					return;
 				}
-				if (
-					event.act === "delete" &&
-					event.value &&
-					key === event.value &&
-					this.#roomGroups(snapshot).discovered.includes(event.value)
-				) {
-					this.#selectRoom(event.value);
-					this.#openForm({ kind: "delete", room: event.value }, snapshot);
-					this.#options.redraw();
-					return;
-				}
-			}
-			const control = this.#controls(snapshot, false).find(
-				({ id, value }) => id === event.act && value === event.value,
-			);
-			if (control) {
-				this.#run(control, snapshot);
-				return;
-			}
-			if (
-				event.act !== "focus" ||
-				!event.value ||
-				!this.#input(event.value) ||
-				!this.#focusStops(
+				const current = this.#controls(
 					snapshot,
-					this.#controls(snapshot, false),
-					false,
-				).includes(event.value)
-			)
-				return;
-			this.#focus = event.value;
-		} else return;
-		this.#options.redraw();
+					this.#columns() < NARROW_WIDTH,
+				).find((entry) => entry.id === id && entry.value === value);
+				if (current) this.#run(current, snapshot);
+				else if (id === "close") this.#close();
+			},
+		});
 	}
 
-	#button(
-		{ id, label, value, tone }: Control,
-		fullRow = false,
-		face = label,
-	): NativeNode {
-		return node(
-			"row",
-			{
-				role: "omp.btn",
-				gap: "xs",
-				align: "center",
-				...(fullRow ? { min: { w: 1 }, justify: "between" as const } : {}),
-				actions: { click: value === undefined ? id : `${id}=${value}` },
-				title: label,
-				aria: label,
-				tone: this.#focus === id && tone !== "error" ? "accent" : tone,
-			},
-			[text(face), ...(fullRow ? [text([span("›", "muted")])] : [])],
-			value === undefined || id !== "focus" ? id : `focus-${value}`,
-		);
+	#describeInput(id: FieldId): JSXNode {
+		const input = this.#inputs?.[id];
+		if (!input) return;
+		if (id === "search" || this.#focus === id) return input;
+		const label = input.props().title ?? "";
+		const value = this.#field(id)?.line().text;
+		return this.#button({
+			id: "focus",
+			value: id,
+			label: value ? `${label}: ${literal(value)}` : label,
+		});
 	}
 
-	#describeInput(
-		field: string,
-		input: TextInput,
-		suspended = false,
-	): NativeNode {
-		if (suspended)
-			return text([span(input.getValue() || input.placeholder || "", "muted")]);
-		// The host focuses the first native input in a component. Room search is
-		// the only input on its page; the startup editor can switch between two.
-		if (field !== "search" && this.#focus !== field)
-			return this.#button({
-				id: "focus",
-				value: field,
-				label: input.getValue()
-					? `${input.prompt}${literal(input.getValue())}`
-					: (input.placeholder ?? ""),
-			});
-		return node(
-			"input",
-			{
-				role: "omp.a2a.input",
-				text: input.getValue(),
-				cursor: input.getCursor(),
-				placeholder: input.placeholder,
-				grow: 1,
-			},
-			undefined,
-			`${field}-input`,
+	#fieldContext(input: UiNode<"input">) {
+		return widgetContext([input], { focus: () => {}, pageRows: DETAIL_LINES });
+	}
+
+	#onPaste(paste: PasteEvent): boolean {
+		if (this.#disposed) return false;
+		const snapshot = this.#snapshot();
+		const narrow = this.#columns() < NARROW_WIDTH;
+		const stops = this.#focusStops(
+			snapshot,
+			this.#controls(snapshot, narrow),
+			narrow,
 		);
+		const focus = stops.includes(this.#focus) ? this.#focus : stops[0];
+		const input = this.#inputs?.[focus as FieldId];
+		return input
+			? fieldWidget.paste?.(input, paste, this.#fieldContext(input)) === true
+			: false;
+	}
+
+	#createInput(
+		id: FieldId,
+		field: Field,
+		label: () => string,
+	): UiNode<"input"> {
+		const edited = (edit?: TextEdit) => {
+			if (this.#disposed) return;
+			const snapshot = this.#snapshot();
+			const changed = edit ? field.edit(edit) : field.undo();
+			if (changed) this.#edited(id, snapshot);
+			if (changed || this.#focus !== id) {
+				this.#focus = id;
+				this.#redraw();
+			}
+		};
+		return node("input", {
+			key: `${id}-input`,
+			role: "omp.a2a.input",
+			title: label,
+			aria: label,
+			text: () => field.line().text,
+			cursor: () => field.line().cursor,
+			placeholder: label,
+			grow: 1,
+			term: () => {
+				this.#revision();
+				return this.#focus === id
+					? undefined
+					: { caret: "none", caretEnd: "none" };
+			},
+			onEdit: edited,
+			onUndo: () => edited(),
+			onFocus: () => this.#focusField(id),
+		});
+	}
+
+	#enterRoom(): void {
+		if (!this.#room) return;
+		this.#detailOpen = true;
+		this.#focus = this.#showHistory
+			? "sender"
+			: this.#tracked(this.#options.snapshot())
+				? "history"
+				: "join";
 	}
 
 	#status(room?: RoomSnapshot): string {
@@ -1528,57 +1594,81 @@ export class A2aConsole implements Component {
 		if (this.#historyPage?.messages.length === 0) return this.#copy.noMessages;
 	}
 
-	#describeHistory(): NativeNode[] {
+	#describeHistory(width: number): JSXNode {
 		const [back, ...controls] = this.#historyControls();
 		const messages = this.#historyPage?.messages ?? [];
 		const notice = this.#historyNotice();
 		const message = this.#message;
+		const selectMessage = (ref: string) => {
+			this.#snapshot();
+			if (this.#disposed || !this.#showHistory || this.#project || this.#form)
+				return;
+			const next = this.#historyPage?.messages.find(
+				(entry) => entry.ref === ref,
+			);
+			if (!next) return;
+			this.#selectMessage(next);
+			this.#focus = "message-list";
+			this.#redraw();
+		};
+		const lines = message ? this.#messageLines(message) : [];
+		const wrapped = nativeRendering()
+			? lines
+			: lines.flatMap((line) => wrap(line, width));
+		this.#detailLineCount = wrapped.length;
+		const offset = Math.min(
+			this.#detailOffset,
+			Math.max(0, wrapped.length - DETAIL_LINES),
+		);
 		return [
-			...(back && this.#room
-				? [this.#button(back, false, `‹ ${literal(this.#room)}`)]
-				: []),
-			text([span(this.#copy.history, "strong")]),
-			row(
-				[
-					...(!this.#form ? [this.#describeInput("sender", this.#sender)] : []),
-					...controls.map((control) => this.#button(control)),
-				],
-				{ gap: "sm", wrap: true },
-			),
-			...(notice ? [text(notice, { wrap: "word" })] : []),
-			...(messages.length
-				? [
-						list(
-							messages.map(({ ref, from }) =>
-								item(ref, { label: literal(from), detail: literal(ref) }),
-							),
-							{
-								selected: message?.ref,
-								max: { lines: 5 },
-								actions: { click: "select" },
-							},
-							"message-list",
+			back && this.#room && this.#button(back, `‹ ${literal(this.#room)}`),
+			text(this.#copy.history, "strong"),
+			this.#describeInput("sender"),
+			this.#buttons(controls),
+			notice && text(notice),
+			messages.length > 0 &&
+				node("list", {
+					key: "message-list",
+					selected: message?.ref ?? null,
+					max: { lines: 5 },
+					actions: { click: "select" },
+					onSelect: selectMessage,
+					children: this.#listWindow(
+						messages,
+						message ? messages.indexOf(message) : -1,
+						5,
+					).map(({ ref, from }) =>
+						node("item", {
+							key: ref,
+							label: literal(from),
+							detail: literal(ref),
+						}),
+					),
+				}),
+			message &&
+				node("section", {
+					key: "message",
+					head: `${literal(message.ref)} · ${literal(message.from)}`,
+					children: [
+						...(nativeRendering()
+							? wrapped
+							: wrapped.slice(offset, offset + DETAIL_LINES)
+						).map((line) =>
+							node("text", {
+								text: line,
+								wrap: "word",
+								actions: { menu: ["copy"] },
+							}),
 						),
-					]
-				: []),
-			...(message
-				? [
-						node(
-							"section",
-							{ head: `${literal(message.ref)} · ${literal(message.from)}` },
-							this.#messageLines(message).map((line) =>
-								text(line, { wrap: "word", actions: { menu: ["copy"] } }),
-							),
-							"message",
-						),
-					]
-				: []),
+						!nativeRendering() &&
+							wrapped.length > DETAIL_LINES &&
+							text(this.#copy.scroll, "muted"),
+					],
+				}),
 		];
 	}
 
-	#describeForm(): NativeNode | undefined {
-		const form = this.#form;
-		if (!form) return;
+	#describeForm(form: Form): JSXNode {
 		const copy = this.#copy;
 		const label =
 			form.kind === "create"
@@ -1587,25 +1677,13 @@ export class A2aConsole implements Component {
 					? `${form.create ? copy.confirmCreateAndJoin : copy.confirmJoin} · ${literal(form.room)}`
 					: copy.confirmDeletion(literal(form.room));
 		const busy = this.#requests.has("mutation");
-		return col(
-			[
-				text([span(label, form.kind === "delete" ? "error" : "strong")], {
-					wrap: "word",
-				}),
-				...(!busy && form.kind !== "delete"
-					? [this.#describeInput("name", this.#name)]
-					: []),
-				...(busy ? [node("spinner", { label: copy.working })] : []),
-				...(this.#formError
-					? [text([span(this.#formError, "error")], { wrap: "word" })]
-					: []),
-				row(
-					this.#formControls().map((control) => this.#button(control)),
-					{ gap: "sm", wrap: true },
-				),
-			],
-			{ gap: "xs" },
-		);
+		return [
+			text(label, form.kind === "delete" ? "error" : "strong"),
+			!busy && form.kind !== "delete" && this.#describeInput("name"),
+			busy && node("spinner", { label: copy.working }),
+			this.#formError && text(this.#formError, "error"),
+			this.#buttons(this.#formControls()),
+		];
 	}
 
 	#hubLines(snapshot: Snapshot): string[] {
@@ -1620,14 +1698,10 @@ export class A2aConsole implements Component {
 		];
 	}
 
-	#settingsFields(settings: Settings): [string, TextInput][] {
+	#settingsFields(settings: Settings): FieldId[] {
 		if (this.#requests.has("settings-save")) return [];
-		if (settings.level === "project") return [["cfg-hub", this.#hubInput]];
-		if (settings.level === "room")
-			return [
-				["cfg-room", this.#startupRoom],
-				["cfg-name", this.#startupName],
-			];
+		if (settings.level === "project") return ["cfg-hub"];
+		if (settings.level === "room") return ["cfg-room", "cfg-name"];
 		return [];
 	}
 
@@ -1659,528 +1733,400 @@ export class A2aConsole implements Component {
 		return `${path} › ${settings.editing === undefined ? copy.project.add : copy.project.edit}`;
 	}
 
-	#describeSettings(settings: Settings): NativeNode[] {
+	#describeSettings(settings: Settings): JSXNode {
 		const copy = this.#copy;
 		const entries = this.#settingsList(settings);
+		const select = (room: string) => {
+			if (this.#disposed || this.#project !== settings) return;
+			const current = this.#settingsList(settings);
+			if (!entries || entries.id !== current?.id) return;
+			const index = current.rows.findIndex((entry) => entry.room === room);
+			if (index < 0) return;
+			if (entries.id === "cfg-rooms") settings.roomIndex = index;
+			else settings.choiceIndex = index;
+			this.#runSettings(settings, entries.id);
+			this.#redraw();
+		};
 		return [
-			row(
-				[
-					text([span(this.#settingsHeading(settings), "strong")], {
-						grow: 1,
-						wrap: "word",
-					}),
-					...(!this.#requests.has("settings-save")
-						? [this.#button({ id: "cfg-close", label: copy.close }, false, "×")]
-						: []),
+			node("row", {
+				gap: "sm",
+				align: "center",
+				children: [
+					text(this.#settingsHeading(settings), "strong"),
+					!this.#requests.has("settings-save") &&
+						this.#button({ id: "cfg-close", label: copy.close }, "×"),
 				],
-				{ align: "center", gap: "sm" },
-			),
-			...(settings.level === "project"
-				? [
-						text(copy.project.note, { wrap: "word" }),
-						text(copy.project.inherit(settings.inheritedHub), { wrap: "word" }),
-					]
-				: []),
-			...this.#settingsFields(settings).flatMap(([id, input]) =>
-				this.#focus === id
-					? [text(input.placeholder ?? ""), this.#describeInput(id, input)]
-					: [this.#describeInput(id, input)],
-			),
-			...(entries?.rows.length
-				? [
-						list(
-							entries.rows.map(({ room, name }) =>
-								item(room, {
-									label: literal(room),
-									detail: name ? literal(name) : undefined,
-								}),
-							),
-							{
-								selected: entries.rows[entries.index]?.room,
-								max: { lines: 6 },
-								actions: { click: "select" },
-							},
-							entries.id,
-						),
-					]
-				: entries
-					? [text(entries.empty)]
-					: []),
-			...(settings.error
-				? [text([span(settings.error, "error")], { wrap: "word" })]
-				: []),
-			...(this.#requests.has("settings-save")
-				? [node("spinner", { label: copy.working })]
-				: []),
-			...(this.#requests.has("startup-browse")
-				? [node("spinner", { label: copy.loadingRooms })]
-				: []),
-			row(
-				this.#settingsControls(settings).map((control) =>
-					this.#button(control),
-				),
-				{ gap: "sm", wrap: true },
-			),
-		];
-	}
-
-	describe(): NativeNode {
-		const copy = this.#copy;
-		const snapshot = this.#snapshot();
-		const groups = this.#roomGroups(snapshot);
-		const tracked = this.#tracked(snapshot);
-		const empty = this.#emptyRoomList(snapshot);
-		const form = this.#describeForm();
-		const globalFeedback = this.#feedbackFor();
-		const roomFeedback = this.#room ? this.#feedbackFor(this.#room) : undefined;
-		const candidate = this.#createCandidate(snapshot);
-		const members = this.#members(tracked);
-		const memberEmpty =
-			tracked?.state === "connected" ? copy.noMembers : copy.joinForMembers;
-		const browsing = !this.#form && !this.#project;
-		const master = col(
-			[
-				...(snapshot.hubUrl
-					? [
-							this.#describeInput(
-								"search",
-								this.#search,
-								!browsing || this.#showHistory,
-							),
-						]
-					: [text(copy.hubUnconfigured, { wrap: "word" })]),
-				...(["tracked", "discovered"] as const).flatMap((group) =>
-					groups[group].length
-						? [
-								text([span(copy[group], "muted")]),
-								list(
-									groups[group].map((name) => {
-										const room = snapshot.rooms.find(
-											({ room }) => room === name,
-										);
-										const menu =
-											browsing &&
-											group === "discovered" &&
-											!this.#requests.has("mutation")
-												? [
-														{
-															id: `delete=${name}`,
-															label: copy.delete,
-															danger: true,
-														},
-													]
-												: undefined;
-										return item(name, {
-											label: literal(name),
-											value: room
-												? room.self && room.state === "connected"
-													? literal(room.self)
-													: this.#status(room)
-												: undefined,
-											// @ts-expect-error The 18.8 SDK predates the host's labeled menu entries.
-											actions: menu && { menu },
-										});
-									}),
-									{
-										selected:
-											this.#room && groups[group].includes(this.#room)
-												? this.#room
-												: undefined,
-										max: { lines: 6 },
-										actions: browsing
-											? {
-													click: "select",
-													...(group === "discovered"
-														? { dblclick: "activate" }
-														: {}),
-												}
-											: undefined,
-									},
-									`${group}-list`,
-								),
-							]
-						: [],
-				),
-				...(browsing && snapshot.hubUrl && this.#listError !== undefined
-					? [
-							text([span(copy.listError(this.#listError), "error")], {
-								wrap: "word",
+			}),
+			settings.level === "project" && [
+				text(copy.project.note),
+				text(copy.project.inherit(settings.inheritedHub)),
+			],
+			this.#settingsFields(settings).map((id) => this.#describeInput(id)),
+			entries &&
+				node("list", {
+					key: entries.id,
+					selected: entries.rows[entries.index]?.room ?? null,
+					max: { lines: 6 },
+					empty: entries.empty,
+					actions: { click: "select" },
+					onSelect: select,
+					children: this.#listWindow(entries.rows, entries.index, 6).map(
+						({ room, name }) =>
+							node("item", {
+								key: room,
+								label: literal(room),
+								detail: name ? literal(name) : undefined,
 							}),
-							this.#button({ id: "refresh", label: copy.retry }),
-						]
-					: empty && !candidate
-						? [text(empty, { wrap: "word" })]
-						: []),
-				...(browsing && candidate
-					? [
-							this.#button(
-								{
-									id: "create-join",
-									label: copy.createAndJoin(literal(candidate)),
-									value: candidate,
-									tone: "accent",
-								},
-								true,
-							),
-						]
-					: []),
-				node("rule"),
-				this.#project || !browsing
-					? text([span(copy.settings, "muted")])
-					: this.#button(
-							{
-								id: "settings",
-								label: snapshot.hubUrl ? copy.settings : copy.configureHub,
-							},
-							true,
-						),
-			],
-			{ basis: 0.3, min: { w: "20ch" }, gap: "xs" },
-		);
-		const roomControls =
-			this.#form || this.#showHistory || this.#requests.has("mutation")
-				? []
-				: this.#roomControls(snapshot);
-		const overview = [
-			...(snapshot.startupHubUrl && this.#startupMismatch(snapshot)
-				? [
-						text(copy.startupHub(literal(snapshot.startupHubUrl)), {
-							wrap: "word",
-						}),
-					]
-				: this.#startup(snapshot)
-					? [text(this.#startupLabel(snapshot), { wrap: "word" })]
-					: []),
-			text([
-				span(copy.members, "strong"),
-				...(members.length ? [span(`  ${members.length}`, "muted")] : []),
-			]),
-			list(
-				members.map((name) => item(name, { label: name })),
-				{ max: { lines: 6 }, empty: memberEmpty },
-				"members-list",
-			),
-			...roomControls
-				.filter(({ id }) => id === "history")
-				.map((control) => this.#button(control, true)),
-		];
-		const detail = this.#project
-			? this.#describeSettings(this.#project)
-			: this.#showHistory
-				? this.#describeHistory()
-				: this.#room
-					? [
-							row(
-								[
-									text([span(literal(this.#room), "strong")]),
-									node("badge", {
-										text: this.#status(tracked),
-										tone:
-											tracked?.state === "connected"
-												? "success"
-												: tracked
-													? "pending"
-													: "muted",
-									}),
-									node("spacer", { grow: 1 }),
-									...roomControls
-										.filter(
-											({ id }) =>
-												id === "add-startup" || id === "remove-startup",
-										)
-										.map((control) =>
-											this.#button(
-												control,
-												false,
-												`${control.id === "remove-startup" ? "✓ " : ""}${copy.startupToggle}`,
-											),
-										),
-									...roomControls
-										.filter(({ id }) => id === "join" || id === "leave")
-										.map((control) => this.#button(control)),
-								],
-								{ gap: "sm", wrap: true },
-							),
-							...(tracked?.state === "connected" && tracked.self
-								? [
-										text([
-											span(copy.currentName(literal(tracked.self)), "muted"),
-										]),
-									]
-								: []),
-							...(roomFeedback
-								? [
-										text(
-											[
-												span(
-													roomFeedback.text,
-													roomFeedback.error ? "error" : "success",
-												),
-											],
-											{ wrap: "word" },
-										),
-									]
-								: []),
-							...(this.#requests.has("mutation") && !this.#form
-								? [node("spinner", { label: copy.working })]
-								: []),
-							...(form && this.#form?.kind !== "create" ? [form] : []),
-							...(!form ? overview : []),
-						]
-					: form && this.#form?.kind !== "create"
-						? [form]
-						: snapshot.hubUrl && !empty
-							? [text(copy.selectRoom, { wrap: "word" })]
-							: [];
-		return col(
-			[
-				row(
-					[
-						text([span("A2A", "strong")]),
-						...(snapshot.hubUrl
-							? [
-									text([span(literal(snapshot.hubUrl), "muted")]),
-									...(this.#requests.has("list")
-										? [node("spinner", { label: copy.loadingRooms })]
-										: [
-												node("badge", {
-													text:
-														this.#listError === undefined
-															? copy.hubOnline
-															: copy.hubUnavailable,
-													tone:
-														this.#listError === undefined ? "success" : "error",
-												}),
-											]),
-								]
-							: []),
-						node("spacer", { grow: 1 }),
-						this.#button({ id: "close", label: copy.close }, false, "×"),
-					],
-					{ gap: "sm", align: "center", wrap: true },
-				),
-				...(globalFeedback && !this.#project
-					? [
-							text(
-								[
-									span(
-										globalFeedback.text,
-										globalFeedback.error ? "error" : "success",
-									),
-								],
-								{ wrap: "word" },
-							),
-						]
-					: []),
-				...(form && this.#form?.kind === "create" ? [form] : []),
-				node("rule"),
-				row(
-					[
-						master,
-						...(detail.length
-							? [
-									col(detail, {
-										min: { w: "30ch" },
-										grow: 1,
-										basis: 0.55,
-										gap: "sm",
-										align: "stretch",
-									}),
-								]
-							: []),
-					],
-					{ align: "start", gap: "lg", wrap: true },
-				),
-			],
-			{ gap: "sm" },
-		);
-	}
-
-	render(width: number): readonly string[] {
-		width = Math.max(1, width);
-		this.#narrow = width < ANSI_NARROW_WIDTH;
-		const copy = this.#copy;
-		const snapshot = this.#snapshot();
-		const controls = this.#controls(snapshot, this.#narrow);
-		const stops = this.#focusStops(snapshot, controls);
-		const focus = stops.includes(this.#focus) ? this.#focus : stops[0];
-		const lines = [copy.title];
-		const wrap = (line: string) => lines.push(...wrapTextWithAnsi(line, width));
-		for (const line of this.#hubLines(snapshot)) wrap(line);
-		const buttons = (entries: Control[]) => {
-			if (entries.length)
-				wrap(
-					entries
-						.map(({ id, label }) =>
-							id === focus ? `[› ${label}]` : `[${label}]`,
-						)
-						.join("  "),
-				);
-		};
-		const field = (id: string, input: TextInput) => {
-			input.focused = focus === id;
-			if (input.focused) lines.push(...input.render(width));
-			else wrap(`${input.prompt}${literal(input.getValue())}`);
-		};
-		if (this.#project) {
-			const settings = this.#project;
-			wrap(this.#settingsHeading(settings));
-			if (settings.level === "project") {
-				wrap(copy.project.note);
-				wrap(copy.project.inherit(settings.inheritedHub));
-			}
-			for (const [id, input] of this.#settingsFields(settings))
-				field(id, input);
-			const entries = this.#settingsList(settings);
-			if (entries?.rows.length) {
-				const start = Math.max(
-					0,
-					Math.min(entries.index - 1, entries.rows.length - 4),
-				);
-				for (const { room, name } of entries.rows.slice(start, start + 4)) {
-					const marker =
-						entries.rows[entries.index]?.room === room ? "› " : "  ";
-					wrap(`${marker}${literal(room)}${name ? ` · ${literal(name)}` : ""}`);
-				}
-			} else if (entries) wrap(entries.empty);
-			if (settings.error) wrap(settings.error);
-			if (this.#requests.has("settings-save")) wrap(copy.working);
-			if (this.#requests.has("startup-browse")) wrap(copy.loadingRooms);
-			buttons(controls);
-			wrap(copy.keys);
-			return lines.map((line) => truncateToWidth(line, width));
-		}
-		const globalFeedback = this.#feedbackFor();
-		if (this.#listError !== undefined) wrap(copy.listError(this.#listError));
-		if (globalFeedback) wrap(globalFeedback.text);
-		if (this.#form) {
-			const form = this.#form;
-			if (form.kind === "delete")
-				wrap(copy.confirmDeletion(literal(form.room)));
-			else {
-				wrap(
-					form.kind === "join"
-						? `${copy.confirmJoin} · ${literal(form.room)}`
-						: copy.confirmCreate,
-				);
-				if (!this.#requests.has("mutation")) field("name", this.#name);
-			}
-			if (this.#requests.has("mutation")) wrap(copy.working);
-			if (this.#formError) wrap(this.#formError);
-			buttons(controls);
-			wrap(copy.formKeys);
-			return lines.map((line) => truncateToWidth(line, width));
-		}
-		if (!this.#narrow || !this.#detailOpen) {
-			buttons(this.#headerControls(snapshot));
-			if (snapshot.hubUrl) field("search", this.#search);
-			const groups = this.#roomGroups(snapshot);
-			for (const group of ["tracked", "discovered"] as const) {
-				const names = groups[group];
-				if (!names.length) continue;
-				lines.push(`${focus === "room-list" ? "› " : ""}${copy[group]}`);
-				const first = Math.max(0, names.indexOf(this.#room ?? "") - 1);
-				for (const name of names.slice(first, first + 3))
-					lines.push(
-						`${name === this.#room ? ">" : " "} ${literal(name)} · ${this.#status(snapshot.rooms.find(({ room }) => room === name))}`,
-					);
-			}
-			const empty = this.#emptyRoomList(snapshot);
-			if (empty) wrap(empty);
-			buttons(controls.filter(({ id }) => id === "settings"));
-		} else buttons(controls.filter(({ id }) => id === "back-list"));
-		if (this.#room && (!this.#narrow || this.#detailOpen)) {
-			const tracked = this.#tracked(snapshot);
-			wrap(
-				`${literal(this.#room)} · ${this.#showHistory ? copy.history : this.#status(tracked)}`,
-			);
-			const feedback = this.#feedbackFor(this.#room);
-			if (feedback) wrap(feedback.text);
-			if (this.#showHistory) {
-				field("sender", this.#sender);
-				buttons(this.#historyControls());
-				const notice = this.#historyNotice();
-				if (notice) wrap(notice);
-				if (this.#message) {
-					const messages = this.#historyPage?.messages ?? [];
-					wrap(
-						`${focus === "message-list" ? "› " : ""}${literal(this.#message.ref)} · ${literal(this.#message.from)}${copy.position(messages.indexOf(this.#message) + 1, messages.length)}`,
-					);
-					const body = this.#messageLines(this.#message).flatMap((line) =>
-						wrapTextWithAnsi(line, width),
-					);
-					this.#detailLineCount = body.length;
-					lines.push(
-						...body.slice(
-							this.#detailOffset,
-							this.#detailOffset + ANSI_DETAIL_LINES,
-						),
-					);
-					if (body.length > ANSI_DETAIL_LINES) wrap(copy.scroll);
-				}
-			} else {
-				if (this.#requests.has("mutation")) wrap(copy.working);
-				const roomControls = this.#requests.has("mutation")
-					? []
-					: this.#roomControls(snapshot);
-				buttons(
-					roomControls.filter(({ id }) => id === "join" || id === "leave"),
-				);
-				wrap(this.#startupLabel(snapshot));
-				buttons(
-					roomControls.filter(
-						({ id }) => id === "add-startup" || id === "remove-startup",
 					),
-				);
-				if (
-					!this.#startupMismatch(snapshot) &&
-					!this.#startup(snapshot) &&
-					!tracked?.self
-				)
-					wrap(copy.startupNeedsName);
-				const members = this.#members(tracked);
-				wrap(
-					members.length ? `${copy.members} · ${members.length}` : copy.members,
-				);
-				const roster = (
-					members.length
-						? members
-						: [
-								tracked?.state === "connected"
-									? copy.noMembers
-									: copy.joinForMembers,
-							]
-				).flatMap((name) => wrapTextWithAnsi(name, width));
-				this.#detailLineCount = roster.length;
-				const offset = Math.min(
-					this.#detailOffset,
-					Math.max(0, roster.length - ANSI_DETAIL_LINES),
-				);
-				lines.push(...roster.slice(offset, offset + ANSI_DETAIL_LINES));
-				if (roster.length > ANSI_DETAIL_LINES) wrap(copy.membersScroll);
-				if (roomControls.some(({ id }) => id === "history")) {
-					const label = truncateToWidth(
-						focus === "history" ? `› ${copy.history}` : copy.history,
-						Math.max(0, width - 1),
-					);
-					lines.push(
-						`${label}${" ".repeat(Math.max(0, width - visibleWidth(label) - 1))}›`,
-					);
-				}
-				buttons(roomControls.filter(({ id }) => id === "delete"));
-			}
-		}
-		wrap(copy.keys);
-		return lines.map((line) => truncateToWidth(line, width));
+				}),
+			settings.error && text(settings.error, "error"),
+			this.#requests.has("settings-save") &&
+				node("spinner", { label: copy.working }),
+			this.#requests.has("startup-browse") &&
+				node("spinner", { label: copy.loadingRooms }),
+			this.#buttons(this.#settingsControls(settings)),
+		];
 	}
 
-	invalidate(): void {
-		this.#search.invalidate();
-		this.#sender.invalidate();
-		this.#name.invalidate();
-		this.#hubInput.invalidate();
-		this.#startupRoom.invalidate();
-		this.#startupName.invalidate();
+	#buttons(controls: Control[]): JSXNode {
+		const children = controls.map((control) => this.#button(control));
+		return nativeRendering()
+			? node("row", { gap: "sm", wrap: true, children })
+			: node("col", { children });
+	}
+
+	#listWindow<T>(
+		entries: readonly T[],
+		index: number,
+		count: number,
+	): readonly T[] {
+		if (nativeRendering()) return entries;
+		// The terminal list painter clamps from the front; keep the selection in view.
+		const start = Math.max(0, Math.min(index - 1, entries.length - count));
+		return entries.slice(start, start + count);
+	}
+
+	#describeRoomList(
+		snapshot: Snapshot,
+		controls: Control[],
+		split: boolean,
+	): UiNode<"col"> {
+		const copy = this.#copy;
+		const groups = this.#roomGroups(snapshot);
+		const empty = this.#emptyRoomList(snapshot);
+		const enabled =
+			!this.#project && !this.#form && !this.#requests.has("mutation");
+		const select = (name: string, activate = false) => {
+			const current = this.#snapshot();
+			if (
+				this.#disposed ||
+				this.#form ||
+				this.#project ||
+				this.#requests.has("mutation") ||
+				!this.#visibleRooms(current).includes(name)
+			)
+				return;
+			this.#selectRoom(name);
+			this.#focus = this.#showHistory ? "sender" : "search";
+			if (this.#columns() < NARROW_WIDTH) this.#enterRoom();
+			if (activate && !this.#tracked(current))
+				this.#openForm({ kind: "join", room: name }, current);
+			this.#redraw();
+		};
+		return node("col", {
+			key: "rooms",
+			basis: split
+				? nativeRendering()
+					? 0.34
+					: Math.floor(this.#columns() / 3)
+				: undefined,
+			children: [
+				snapshot.hubUrl &&
+					(this.#project || this.#showHistory
+						? text(literal(this.#search.getValue()) || copy.search, "muted")
+						: this.#describeInput("search")),
+				...(["tracked", "discovered"] as const).flatMap((group) => {
+					const names = groups[group];
+					if (!names.length) return [];
+					const selected =
+						this.#room && names.includes(this.#room) ? this.#room : null;
+					const canDelete = enabled && group === "discovered";
+					return [
+						text(
+							copy[group],
+							this.#focus === "room-list" && selected ? "accent" : "muted",
+						),
+						node("list", {
+							key: `${group}-list`,
+							selected,
+							max: { lines: 6 },
+							actions: enabled
+								? {
+										click: "select",
+										...(canDelete ? { dblclick: "activate" } : {}),
+									}
+								: undefined,
+							onSelect: (name) => {
+								if (enabled) select(name);
+							},
+							onActivate: (name) => {
+								if (canDelete) select(name, true);
+							},
+							children: this.#listWindow(
+								names,
+								selected ? names.indexOf(selected) : -1,
+								5,
+							).map((name) => {
+								const room = snapshot.rooms.find(
+									(entry) => entry.room === name,
+								);
+								const deleteAction = `delete=${name}`;
+								const menu = [
+									{ id: deleteAction, label: copy.delete, danger: true },
+								];
+								return node("item", {
+									key: name,
+									label: literal(name),
+									value:
+										room?.state === "connected" && room.self
+											? literal(room.self)
+											: room && this.#status(room),
+									actions: canDelete ? { menu, hold: menu } : undefined,
+									onAction: (act, event) => {
+										if (
+											!canDelete ||
+											this.#disposed ||
+											(act !== deleteAction &&
+												(act !== "delete" || event.value !== name))
+										)
+											return;
+										const current = this.#snapshot();
+										if (
+											this.#form ||
+											this.#project ||
+											this.#requests.has("mutation") ||
+											!this.#roomGroups(current).discovered.includes(name)
+										)
+											return;
+										this.#selectRoom(name);
+										this.#openForm({ kind: "delete", room: name }, current);
+										this.#redraw();
+									},
+								});
+							}),
+						}),
+					];
+				}),
+				this.#listError !== undefined
+					? text(copy.listError(this.#listError), "error")
+					: empty && !controls.some(({ id }) => id === "create-join")
+						? text(empty)
+						: undefined,
+				...controls
+					.filter(({ id }) => id === "settings" || id === "create-join")
+					.map((control) => this.#button(control)),
+			],
+		});
+	}
+
+	#describeRoom(
+		snapshot: Snapshot,
+		room: string,
+		controls: Control[],
+	): JSXNode {
+		const copy = this.#copy;
+		const tracked = this.#tracked(snapshot);
+		const members = this.#members(tracked);
+		const feedback = this.#feedbackFor(room);
+		this.#detailLineCount = members.length;
+		const offset = Math.min(
+			this.#detailOffset,
+			Math.max(0, members.length - DETAIL_LINES),
+		);
+		const roster = nativeRendering()
+			? members
+			: members.slice(offset, offset + DETAIL_LINES);
+		return [
+			node("row", {
+				gap: "sm",
+				wrap: true,
+				children: [
+					text(literal(room), "strong"),
+					node("badge", {
+						text: this.#status(tracked),
+						tone:
+							tracked?.state === "connected"
+								? "success"
+								: tracked
+									? "pending"
+									: "muted",
+					}),
+				],
+			}),
+			tracked?.state === "connected" &&
+				tracked.self &&
+				text(copy.currentName(literal(tracked.self)), "muted"),
+			text(this.#startupLabel(snapshot)),
+			!this.#startupMismatch(snapshot) &&
+				!this.#startup(snapshot) &&
+				!tracked?.self &&
+				text(copy.startupNeedsName, "muted"),
+			feedback && text(feedback.text, feedback.error ? "error" : "success"),
+			this.#requests.has("mutation") &&
+				node("spinner", { label: copy.working }),
+			this.#buttons(controls),
+			text(
+				members.length ? `${copy.members} · ${members.length}` : copy.members,
+				"strong",
+			),
+			node("list", {
+				key: "members-list",
+				max: { lines: DETAIL_LINES },
+				empty:
+					tracked?.state === "connected" ? copy.noMembers : copy.joinForMembers,
+				children: roster.map((name) =>
+					node("item", { key: name, label: name }),
+				),
+			}),
+			!nativeRendering() &&
+				members.length > DETAIL_LINES &&
+				text(copy.membersScroll, "muted"),
+		];
+	}
+
+	#describeBody(): JSXNode {
+		const snapshot = this.#snapshot();
+		const columns = this.#columns();
+		const narrow = columns < NARROW_WIDTH;
+		const copy = this.#copy;
+		const controls = this.#controls(snapshot, narrow);
+		const feedback = this.#feedbackFor();
+		const showRooms =
+			!this.#form && (!narrow || (!this.#detailOpen && !this.#project));
+		const showOverview = this.#room && (!narrow || this.#detailOpen);
+		const showDetail =
+			this.#form || this.#project || this.#showHistory || showOverview;
+		const split = showRooms && Boolean(showDetail);
+		const detailWidth = Math.max(
+			1,
+			columns - (split ? Math.floor(columns / 3) + 3 : 0),
+		);
+		const detail = this.#form
+			? this.#describeForm(this.#form)
+			: this.#project
+				? this.#describeSettings(this.#project)
+				: this.#showHistory
+					? this.#describeHistory(detailWidth)
+					: showOverview && this.#room
+						? this.#describeRoom(
+								snapshot,
+								this.#room,
+								controls.filter(({ id }) =>
+									[
+										"back-list",
+										"join",
+										"leave",
+										"add-startup",
+										"remove-startup",
+										"history",
+										"delete",
+									].includes(id),
+								),
+							)
+						: undefined;
+		const rooms =
+			showRooms && this.#describeRoomList(snapshot, controls, split);
+		const headerButtons = [
+			...controls
+				.filter(({ id }) => id === "refresh" || id === "create")
+				.map((control) => this.#button(control)),
+			this.#button({ id: "close", label: copy.close }, "×"),
+		];
+		return [
+			node("row", {
+				gap: "sm",
+				wrap: true,
+				children: [
+					text(copy.title, "strong"),
+					snapshot.hubUrl &&
+						(this.#requests.has("list")
+							? node("spinner", { label: copy.loadingRooms })
+							: node("badge", {
+									text:
+										this.#listError === undefined
+											? copy.hubOnline
+											: copy.hubUnavailable,
+									tone: this.#listError === undefined ? "success" : "error",
+								})),
+					nativeRendering() && headerButtons,
+				],
+			}),
+			!nativeRendering() && node("row", { gap: "sm", children: headerButtons }),
+			this.#hubLines(snapshot).map((line) => text(line, "muted")),
+			feedback &&
+				!this.#project &&
+				text(feedback.text, feedback.error ? "error" : "success"),
+			node("rule", {}),
+			split
+				? node("row", {
+						gap: "lg",
+						align: "start",
+						children: [
+							rooms,
+							node("col", {
+								key: "detail",
+								grow: 1,
+								basis: nativeRendering() ? 0.55 : 0,
+								children: detail,
+							}),
+						],
+					})
+				: [rooms, detail],
+			text(this.#form ? copy.formKeys : copy.keys, "muted"),
+		];
+	}
+
+	describe(revision?: () => unknown, columns?: () => number): UiNode<"col"> {
+		if (this.#root) return this.#root;
+		if (columns) this.#columns = columns;
+		return createRoot((dispose) => {
+			this.#disposeView = dispose;
+			const copy = this.#copy;
+			this.#inputs = {
+				search: this.#createInput("search", this.#search, () => copy.search),
+				sender: this.#createInput("sender", this.#sender, () => copy.sender),
+				name: this.#createInput("name", this.#name, () => {
+					this.#revision();
+					return this.#form?.kind === "join" ? copy.rosterName : copy.roomName;
+				}),
+				"cfg-hub": this.#createInput(
+					"cfg-hub",
+					this.#hubInput,
+					() => copy.project.hub,
+				),
+				"cfg-room": this.#createInput(
+					"cfg-room",
+					this.#startupRoom,
+					() => copy.roomName,
+				),
+				"cfg-name": this.#createInput(
+					"cfg-name",
+					this.#startupName,
+					() => copy.rosterName,
+				),
+			};
+			this.#root = node("col", {
+				key: "a2a-workbench",
+				onKey: (key) => this.#onKey(key),
+				onPaste: (paste) => this.#onPaste(paste),
+				children: () => {
+					this.#revision();
+					revision?.();
+					return this.#describeBody();
+				},
+			});
+			return this.#root;
+		});
 	}
 
 	dispose(): void {
@@ -2188,5 +2134,6 @@ export class A2aConsole implements Component {
 		this.#disposed = true;
 		for (const controller of this.#requests.values()) controller.abort();
 		this.#requests.clear();
+		this.#disposeView?.();
 	}
 }

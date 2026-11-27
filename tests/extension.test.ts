@@ -20,8 +20,9 @@ import type {
 	ExtensionAskDialogResult,
 } from "@oh-my-pi/pi-coding-agent";
 import { InternalUrlRouter } from "@oh-my-pi/pi-coding-agent/internal-urls/router";
-import { lexDocument, Markdown } from "@oh-my-pi/pi-tui/components/markdown";
-import { ensureThemeSync, getMarkdownTheme } from "@oh-my-pi/pi-tui/theme";
+import { lexMarkdown } from "@oh-my-pi/pi-tui/text/markdown/lexer";
+import { renderMarkdown } from "@oh-my-pi/pi-tui/text/markdown/render";
+import { PLAIN_THEME } from "@oh-my-pi/pi-tui/theme/plain";
 import type WebSocket from "ws";
 import { WebSocketServer } from "ws";
 import a2aExtension from "../src/extension";
@@ -115,6 +116,7 @@ const EXPECTED_SYSTEM_PROMPT = [
 function beforeAgentStartEvent(): BeforeAgentStartEvent {
 	return {
 		type: "before_agent_start",
+		reason: "prompt",
 		prompt: "test prompt",
 		systemPrompt: [...UPSTREAM_SYSTEM_PROMPT],
 	};
@@ -1336,14 +1338,11 @@ test("a2a_message preserves user approval and attachments in delivery and histor
 		});
 		const approvalPreview = approvalQuestion?.options[0]?.preview ?? "";
 		expect(
-			lexDocument(approvalPreview).some((token) => token.type === "code"),
+			lexMarkdown(approvalPreview).some((token) => token.type === "code"),
 		).toBe(false);
 		expect(approvalQuestion?.options[1]?.preview).toBe(approvalPreview);
-		ensureThemeSync();
 		const renderedPreview = Bun.stripANSI(
-			new Markdown(approvalPreview, 0, 0, getMarkdownTheme())
-				.render(80)
-				.join("\n"),
+			renderMarkdown(approvalPreview, 80, { theme: PLAIN_THEME }).join("\n"),
 		);
 		expect(renderedPreview).toContain("Target: Agent receiver");
 		expect(renderedPreview).toContain("Use the attached training contract.");
@@ -1799,13 +1798,10 @@ test("user approval rejection, cancellation, and headless requests fail closed p
 		expect(escapedDialog).not.toContain("\u001b");
 		expect(escapedDialog).not.toContain("\u202e");
 		expect(
-			lexDocument(escapedDialog).some((token) => token.type === "code"),
+			lexMarkdown(escapedDialog).some((token) => token.type === "code"),
 		).toBe(false);
-		ensureThemeSync();
 		const renderedApproval = Bun.stripANSI(
-			new Markdown(escapedDialog, 0, 0, getMarkdownTheme())
-				.render(64)
-				.join("\n"),
+			renderMarkdown(escapedDialog, 64, { theme: PLAIN_THEME }).join("\n"),
 		).replace(/\s/g, "");
 		expect(renderedApproval).toContain(longApprovalText);
 		expect(renderedApproval).toContain(

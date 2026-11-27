@@ -97,7 +97,7 @@ omp-a2a is for a fully trusted private network of matching Hub and Extension ver
 ## Current operational constraints
 
 - **Custom protocol:** this repository implements a private realtime protocol, not the standard A2A protocol. Do not assume interoperability with standard A2A clients or servers.
-- **OMP runtime:** attachment transfer requires OMP `>=18.3.2`; the extension uses the session-scoped `local://` router to locate files without bypassing protocol path checks.
+- **OMP runtime:** the extension requires OMP `19.2.1` or later and uses its shared Tern and terminal rendering API. Attachments use OMP's session-scoped `local://` router.
 - **Tern native UI:** when OMP's TSP backend is active, inbound messages and tool views use native cards, member tables, and Markdown message sections. Message cards show sender/target names, message references, replies, and attachments—not protocol IDs or duplicate metadata. Approved messages use success-colored chrome, with sender-user approval explained on hover. OMP owns terminal negotiation and input; ordinary terminals use the same compact inbound presentation through ANSI rendering. Model context and Hub messaging are unchanged.
 - **Hub changes while connected:** an established WebSocket, connected status, and history remain bound to the Hub that accepted the Presence. Room administration intentionally uses the currently configured Hub. Disconnect and reconnect to move realtime messaging and connected history to a new `hubUrl`.
 - **Hub HTTP bounds:** metadata, Room administration, and history requests have a 15-second deadline by default. Caller cancellation also covers response-body reading, and failed requests are never retried automatically.
@@ -106,7 +106,7 @@ These are current implementation boundaries, not delivery guarantees. The most i
 
 ## Install
 
-Use Bun `>=1.3.14`; the repository toolchain and Docker image are pinned to `1.4.3`.
+Use Bun `>=1.4.4` to install the extension and run the repository checks. The repository pins Bun `1.4.5`; the standalone Hub Docker image ships with its own Bun runtime.
 
 ```bash
 cd ~/code/omp-a2a
@@ -231,10 +231,10 @@ list. The full-width **Message history** row opens a separate view with sender
 filtering, older pages, and attachment links on demand. History is available
 before joining. Join and leave in place; closing the workbench keeps Rooms
 connected.
-In Tern, double-click a discovered Room to open its join form, or type an
-unused name in search to create and join it. Use the Room's context menu to
-delete it, with confirmation. ANSI terminals offer keyboard navigation with
-a separate Room detail view on narrow screens.
+In Tern, double-click a discovered Room to open its join form or use its context
+menu to delete it. Search for an unused name to create and join a Room. In
+ordinary terminals, use Tab and the arrow keys to move, Enter to activate, and
+Esc to go back or close. Deleting a Room asks for confirmation.
 
 The A2A workbench is available in English and Simplified Chinese. The
 extension uses the first non-empty value from `A2A_LANG`, `LC_ALL`,

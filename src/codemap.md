@@ -11,7 +11,7 @@ The central seam is `A2aRuntime`: extension callbacks and commands depend on one
 | File | Responsibility | Primary interface |
 | --- | --- | --- |
 | `extension.ts` | OMP registration, session lifecycle, UI notifications, reconnect policy, slash commands, completions, and model tools. | `a2aExtension(pi, dependencies?)` |
-| `presentation.ts` | Native TSP descriptions for inbound messages and tool calls/results, with ANSI inbound rendering through OMP components. | `renderInboundMessage`, `describeMessageCall`, `describePeers`, `describeHistory` |
+| `presentation.ts` | Shared OMP UI nodes for inbound messages and tool calls/results. | `renderInboundMessage`, `renderMessageCall`, `renderPeers`, `renderHistory` |
 | `local-attachments.ts` | Cancellable snapshot of uncapped sender-session `local://` file bytes and leak-free materialization of validated attachment basenames into the calling session. | `snapshotLocalAttachments`, `materializeLocalAttachments` |
 | `operations.ts` | Connected runtime over one WebSocket plus HTTP Room/history operations. | `A2aRuntime`, `A2aRuntimeEvents`, `MessageView`, `AcceptedMessageView`, `RuntimeStatus` |
 | `console-view.ts` | Room workbench: current and available Rooms, join/leave, history, and nested project settings for Tern and ANSI. | `A2aConsole` |
@@ -73,7 +73,7 @@ Bare `/a2a` mounts the Room workbench. Tern keeps search as a native field in th
 
 Read-only result commands (`help`/`--help`/`-h`, `hub`, `room`/`room list`, `status`, `peers`, and `history`) publish a visible transcript card whose custom-message title is the trimmed `/a2a` invocation, without triggering a model turn. The `context` hook removes only custom messages whose type is `/a2a` or starts with `/a2a ` before provider requests, preserving the contract that human command output stays outside model context. Mutating action results, connection lifecycle, Presence, delivery, and errors remain transient UI notifications.
 
-`presentation.ts` supplies the inbound renderer's `describe()` and the three tools' `describeCall`/`describeResult` hooks. Native and ANSI inbound views show message references, sender/target names, Markdown text, optional replies, and local attachment URLs. Confirmed sender-user approval uses semantic success colors rather than a text row; native hover and accessibility labels preserve its provenance. Protocol IDs, duplicate Room/sequence fields, timestamps, and unsigned approval status stay out of message cards; native member tables show names and roles without Presence UUIDs. Model content and structured details remain unchanged. The OMP backend owns TSP negotiation, framing, input, and existing slash-output cards, notifications, and approval dialogs. Runtime imports use the public TUI root rather than internal native/chat modules so compiled OMP forks can resolve them.
+`presentation.ts` supplies the inbound message renderer and tool `renderCall`/`renderResult` hooks. The same OMP UI nodes display message references, sender/target names, Markdown text, optional replies, and local attachment URLs in Tern and ANSI. Confirmed sender-user approval uses semantic success colors with hover and accessibility context. Protocol IDs and duplicate metadata stay out of message cards and roster cells. Model content and structured details remain unchanged.
 
 ## Model tool surface
 
@@ -157,7 +157,7 @@ OMP callbacks / slash / tools
 ## Tests touching this directory
 
 - `extension.test.ts`: registered surfaces, strict invalid-configuration isolation, stable system-prompt/context filtering, help and ArkType contracts, multi-level completion, push-driven tools, Presence notifications, sender-owned approval/rejection and attachment ownership, Session/Room-switch cancellation, outbound send fencing, stale UI suppression, and reconnect intent.
-- `presentation.test.ts`: registered renderers through the real OMP native backend and TSP document applier; checks Markdown source, compact human context without protocol metadata, approval tones and labels, attachment references, roster identity, ordered history, approval-request previews, error fallback, ANSI presentation, and unchanged model content/details.
+- `presentation.test.ts`: exercises registered renderers through the real OMP native and terminal backends; also drives Room workbench list, settings, history and attachment interactions.
 - `local-attachments.test.ts`: `materializeLocalAttachments` rejects unsafe, blank, path-like, control-character, and duplicate names.
 - `operations.test.ts`: published Hub bindings, shared transition teardown, peer snapshots, HTTP and realtime cancellation, new/replayed acceptance, ordered injection, Delivery outcomes, and disconnected-state errors.
 - `config.test.ts`: strict configuration parsing and migration failures.

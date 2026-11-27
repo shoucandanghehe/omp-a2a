@@ -94,7 +94,7 @@ The Hub runs locally with `bun run hub` or in Docker Compose. The CLI alone reso
 
 ### Human commands
 
-Bare `/a2a` opens the interactive Room workbench through `ctx.ui.custom`; the same component describes a pointer-first Tern view and renders a keyboard-driven ANSI view. Tern puts creation in Room search and deletion in the Room context menu. The Room overview lists current members and opens message history on demand. Project settings start below the Room list and open in the workbench's detail pane. Settings commit their draft to project configuration without replacing live connections. Explicit subcommands remain available.
+Bare `/a2a` opens the interactive Room workbench through `ctx.ui.custom`; OMP renders the same reactive UI tree in Tern and ordinary terminals. The Room overview lists current members and opens message history on demand. Project settings start below the Room list and commit their draft without replacing live connections. Explicit subcommands remain available.
 
 `/a2a connect` adds or replaces a single Room connection, preserving the others on the same Hub. `/a2a disconnect <room>` leaves one Room and `/a2a save` persists every live Room and its local name. Status and peers group by Room. Completion uses the Hub Room list for `connect` and `room delete`, tracked Rooms for `disconnect`, and connected Rooms for `history --room`.
 

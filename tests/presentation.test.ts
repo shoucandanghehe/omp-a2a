@@ -1,25 +1,35 @@
 import { expect, test } from "bun:test";
 import type {
+	ExtensionRender,
+	ExtensionTheme,
 	MessageRenderer,
 	ToolDefinition,
 } from "@oh-my-pi/pi-coding-agent";
-import { CustomMessageComponent } from "@oh-my-pi/pi-tui/chat/custom-message";
-import type { CustomMessage } from "@oh-my-pi/pi-tui/chat/messages";
-import { TspDocument } from "@oh-my-pi/pi-tui/native/apply";
+import { createSurface, type Signal, signal, UiNode } from "@oh-my-pi/pi-tui";
+import type { InputEvent } from "@oh-my-pi/pi-tui/driver/contract";
+import { createTerminalDriver } from "@oh-my-pi/pi-tui/driver/index";
+import { setNativeRenderingForTest } from "@oh-my-pi/pi-tui/host";
+import { NativeBackend } from "@oh-my-pi/pi-tui/native/backend";
 import {
-	assumedTspHello,
-	NativeBackend,
-} from "@oh-my-pi/pi-tui/native/backend";
-import { encodeTspJson, splitTspMessage } from "@oh-my-pi/pi-tui/native/encode";
-import type { NativeChild } from "@oh-my-pi/pi-tui/native/node";
-import type { Terminal } from "@oh-my-pi/pi-tui/terminal";
-import { ensureThemeSync } from "@oh-my-pi/pi-tui/theme";
-import type { TspEvent, TspFrame, TspNode } from "@oh-my-pi/pi-wire";
+	assumedHello,
+	TspConnection,
+} from "@oh-my-pi/pi-tui/native/connection";
+import { memoryTerminal } from "@oh-my-pi/pi-tui/testing/memory-terminal";
+import { createTestTerminal } from "@oh-my-pi/pi-tui/testing/terminal";
+import { PLAIN_THEME } from "@oh-my-pi/pi-tui/theme/plain";
+import type { TspEvent, TspNode } from "@oh-my-pi/pi-wire";
 import { A2aConsole } from "../src/console-view";
 import a2aExtension from "../src/extension";
 import type { MaterializedMessageView } from "../src/presentation";
 
-ensureThemeSync();
+const theme: ExtensionTheme = {
+	...PLAIN_THEME,
+	bold: String,
+	italic: String,
+	underline: String,
+	strikethrough: String,
+	inverse: String,
+};
 
 function registeredPresentation() {
 	const tools = new Map<string, ToolDefinition>();
@@ -43,66 +53,81 @@ function registeredPresentation() {
 	return { tools, inbound };
 }
 
+const workbenchWidths = new WeakMap<A2aConsole, Signal<number>>();
+
+function workbenchRoot(view: A2aConsole, columns: number) {
+	let width = workbenchWidths.get(view);
+	if (!width) {
+		width = signal(columns);
+		workbenchWidths.set(view, width);
+	} else width.set(columns);
+	return view.describe(undefined, width);
+}
+
 function renderDocument(
-	children: readonly NativeChild[],
+	children: ExtensionRender | A2aConsole | undefined,
 	interact?: (nodes: TspNode[], sf: string) => TspEvent,
 ): TspNode[] {
-	const writes: string[] = [];
-	const terminal = {
-		columns: 80,
-		rows: 24,
-		write(data: string) {
-			writes.push(data);
-		},
-	} as Terminal;
-	const backend = new NativeBackend(
-		{
-			terminal,
-			describeSurface: () => ({ main: children, dock: [] }),
-			overlays: () => [],
-			focused: () => null,
-			focusFromPointer() {},
-			requestRender() {},
-			appearanceChanged() {},
-			motionChanged() {},
-			invalidate() {},
-		},
-		assumedTspHello(terminal),
+	if (children && typeof children === "object" && "render" in children)
+		throw new Error("expected OMP UI nodes, received terminal-only rows");
+	const roots: TspNode[] = [];
+	const nodes: TspNode[] = [];
+	const surface = createSurface(() => ({
+		dock:
+			children instanceof A2aConsole ? workbenchRoot(children, 100) : children,
+	}));
+	const driver = createTerminalDriver(
+		memoryTerminal({ columns: 80, rows: 24 }).options,
 	);
-	try {
-		backend.start();
-		expect(backend.fallbackCount).toBe(0);
-		let document: TspDocument | undefined;
-		let surface: string | undefined;
-		for (const output of writes) {
-			const message = splitTspMessage(output);
-			if (message?.verb !== "f") continue;
-			const frame = JSON.parse(message.body) as TspFrame;
-			surface = frame.sf;
-			document ??= new TspDocument(frame.sf);
-			expect(document.applyFrame(frame)).toEqual([]);
-		}
-		if (!document || !surface)
-			throw new Error("native backend did not emit a frame");
-		const nodes: TspNode[] = [];
-		const visit = (node: TspNode) => {
-			nodes.push(node);
-			for (const child of node.c ?? []) visit(child);
+	const listeners = new Set<(event: InputEvent) => void>();
+	driver.onInput = (listener) => {
+		listeners.add(listener);
+		return () => {
+			listeners.delete(listener);
 		};
-		visit(document.snapshot());
+	};
+	const connection = new TspConnection(driver, assumedHello(driver));
+	const visit = (node: TspNode) => {
+		nodes.push(node);
+		for (const child of node.c ?? []) visit(child);
+	};
+	const backend = new NativeBackend({
+		surface,
+		onFrame: ({ ops }) => {
+			for (const op of ops) {
+				if (op[0] !== "add") continue;
+				const [, , , before, node] = op;
+				const index =
+					before === null
+						? roots.length
+						: roots.findIndex(({ id }) => id === before);
+				expect(index).toBeGreaterThanOrEqual(0);
+				roots.splice(index, 0, node);
+			}
+		},
+	});
+	try {
+		setNativeRenderingForTest(true);
+		backend.start(connection);
+		for (const root of roots) visit(root);
+		expect(nodes.length).toBeGreaterThan(0);
 		if (interact) {
-			expect(
-				backend.handleInput(encodeTspJson("e", interact(nodes, surface))),
-			).toBe(true);
+			const body = JSON.stringify(interact(nodes, backend.id));
+			for (const listener of listeners) {
+				listener({ type: "tsp", verb: "e", params: {}, body });
+			}
 		}
 		return nodes;
 	} finally {
 		backend.stop(false);
+		connection.close();
+		surface.dispose();
+		setNativeRenderingForTest(false);
 	}
 }
 
 function nativeAction(view: A2aConsole, act: string, value?: string): void {
-	renderDocument([view], (nodes, sf) => {
+	renderDocument(view, (nodes, sf) => {
 		const click = value === undefined ? act : `${act}=${value}`;
 		const button = nodes.find(({ p }) => p?.actions?.click === click);
 		if (!button) throw new Error(`native action not rendered: ${click}`);
@@ -111,7 +136,7 @@ function nativeAction(view: A2aConsole, act: string, value?: string): void {
 }
 
 function nativeSelect(view: A2aConsole, label: string, activate = false): void {
-	renderDocument([view], (nodes, sf) => {
+	renderDocument(view, (nodes, sf) => {
 		const list = nodes.find(
 			(node) =>
 				node.k === "list" &&
@@ -134,7 +159,7 @@ function nativeSelect(view: A2aConsole, label: string, activate = false): void {
 }
 
 function nativeDeleteRoom(view: A2aConsole, room: string): void {
-	renderDocument([view], (nodes, sf) => {
+	renderDocument(view, (nodes, sf) => {
 		const item = nodes.find(({ k, p }) => k === "item" && p?.label === room);
 		if (!item) throw new Error(`Room item not rendered: ${room}`);
 		expect<unknown>(item.p?.actions?.menu).toEqual([
@@ -145,7 +170,7 @@ function nativeDeleteRoom(view: A2aConsole, room: string): void {
 }
 
 function nativeEdit(view: A2aConsole, value: string): void {
-	renderDocument([view], (nodes, sf) => {
+	renderDocument(view, (nodes, sf) => {
 		const input = nodes.find((node) => node.k === "input");
 		if (!input) throw new Error("native input not rendered");
 		const length = input.p?.text?.length ?? 0;
@@ -160,6 +185,24 @@ function nativeEdit(view: A2aConsole, value: string): void {
 			text: value,
 		};
 	});
+}
+
+function workbenchTerminal(view: A2aConsole, columns = 100) {
+	const terminal = createTestTerminal(
+		() => ({ dock: workbenchRoot(view, columns) }),
+		{ columns, rows: 45 },
+	);
+	terminal.focus(terminal.surface.dock()[0] ?? null);
+	return terminal;
+}
+
+function workbenchKey(view: A2aConsole, key: string) {
+	const terminal = workbenchTerminal(view);
+	try {
+		terminal.press(key);
+	} finally {
+		terminal.dispose();
+	}
 }
 
 test.each([
@@ -229,7 +272,7 @@ test.each([
 		});
 		try {
 			await repaint.promise;
-			const initialNodes = renderDocument([view]);
+			const initialNodes = renderDocument(view);
 			expect(
 				initialNodes
 					.filter(({ k }) => k === "list")
@@ -254,18 +297,22 @@ test.each([
 				initialNodes.find(({ p }) => p?.actions?.click === "history=billing")?.p
 					?.title,
 			).toBe(historyLabel);
-			expect(Bun.stripANSI(view.render(100).join("\n"))).toContain(title);
+			const terminal = workbenchTerminal(view);
+			try {
+				expect(terminal.screen().join("\n")).toContain(title);
+			} finally {
+				terminal.dispose();
+			}
 			expect(requests).toEqual([]);
 			nativeSelect(view, "review");
 			expect(
-				renderDocument([view]).some(
+				renderDocument(view).some(
 					({ p }) => p?.actions?.click === "join=review",
 				),
 			).toBe(true);
 			expect(requests).toEqual([]);
 			expect(
-				renderDocument([view]).find((node) => node.k === "input")?.p
-					?.placeholder,
+				renderDocument(view).find((node) => node.k === "input")?.p?.placeholder,
 			).toBe(language === "zh" ? "搜索房间" : "Search Rooms");
 			nativeAction(view, "history", "review");
 			repaint = Promise.withResolvers<void>();
@@ -274,7 +321,7 @@ test.each([
 				["review", { limit: 20, before: undefined, from: undefined }],
 			]);
 			expect(
-				renderDocument([view]).some(
+				renderDocument(view).some(
 					({ k, p }) => k === "text" && p?.text === "**review notes**",
 				),
 			).toBe(true);
@@ -295,13 +342,13 @@ test.each([
 			await repaint.promise;
 			expect(attachmentRequests).toEqual([["review", "review:1"]]);
 			expect(
-				renderDocument([view]).some(
+				renderDocument(view).some(
 					({ k, p }) =>
 						k === "text" && p?.text === "notes.txt: local://notes.txt",
 				),
 			).toBe(true);
 			nativeAction(view, "back-room");
-			const returned = renderDocument([view]);
+			const returned = renderDocument(view);
 			expect(
 				returned.some(({ p }) => p?.actions?.click === "join=review"),
 			).toBe(true);
@@ -315,7 +362,7 @@ test.each([
 test("the workbench keeps Room actions inline and discards pending history when the effective Hub changes", async () => {
 	const oldHub = "http://old.example";
 	const newHub = "http://new.example";
-	let hubUrl = oldHub;
+	const hubUrl = signal(oldHub);
 	let rooms: {
 		room: string;
 		state: "connected" | "reconnecting";
@@ -339,19 +386,18 @@ test("the workbench keeps Room actions inline and discards pending history when 
 	const creates: string[] = [];
 	const joins: [string, string][] = [];
 	let repaint = Promise.withResolvers<void>();
-	let ready = () => true;
 	const view = new A2aConsole({
 		language: "en",
 		snapshot: () => ({
-			hubUrl,
+			hubUrl: hubUrl(),
 			startupHubUrl: oldHub,
 			autoConnect: false,
 			startup,
 			rooms,
 		}),
-		list: async () => (hubUrl === oldHub ? oldRooms : ["other"]),
+		list: async () => (hubUrl() === oldHub ? oldRooms : ["other"]),
 		history: (_room, _query, signal) => {
-			if (holdHistory && hubUrl === oldHub) {
+			if (holdHistory && hubUrl() === oldHub) {
 				pendingHistory = signal;
 				return stale.promise;
 			}
@@ -385,39 +431,30 @@ test("the workbench keeps Room actions inline and discards pending history when 
 		loadSettings: () => ({ config: null }),
 		listStartupRooms: async () => [],
 		saveSettings: async () => {},
-		redraw: () => {
-			if (ready()) repaint.resolve();
-		},
+		redraw: () => repaint.resolve(),
 		close: () => {
 			throw new Error("Room actions must stay inline");
 		},
 	});
 	try {
 		await repaint.promise;
-		const narrow = () => Bun.stripANSI(view.render(58).join("\n"));
-		expect(narrow()).toContain("Available to join");
-		expect(narrow()).not.toContain("[Join…]");
-		view.handleInput("\t");
-		view.handleInput("\r");
-		expect(narrow()).toContain("[› Join…]");
-		expect(narrow()).not.toContain("Available to join");
-		view.handleInput("\x1b");
-		expect(narrow()).toContain("Available to join");
-		view.handleInput("\x1b[Z");
+		const terminal = workbenchTerminal(view, 58);
+		try {
+			expect(terminal.screen().join("\n")).toContain("Available to join");
+			terminal.type("rev");
+			expect(terminal.screen().join("\n")).toContain("rev");
+		} finally {
+			terminal.dispose();
+		}
 		nativeEdit(view, "rev");
 		nativeAction(view, "history", "review");
 		nativeDeleteRoom(view, "review");
 		expect(
-			renderDocument([view]).some(
+			renderDocument(view).some(
 				({ p }) => p?.actions?.click === "confirm=delete:review",
 			),
 		).toBe(true);
-		const confirmation = Bun.stripANSI(view.render(100).join("\n"));
-		expect(confirmation).toContain(
-			"Delete review and its complete message history?",
-		);
-		expect(confirmation).toContain("[› Cancel]");
-		view.handleInput("\r");
+		workbenchKey(view, "enter");
 		expect(deleted).toEqual([]);
 		nativeEdit(view, "revisions");
 		nativeAction(view, "create-join", "revisions");
@@ -428,7 +465,7 @@ test("the workbench keeps Room actions inline and discards pending history when 
 		expect(creates).toEqual(["revisions"]);
 		expect(joins).toEqual([["revisions", "conflict"]]);
 		expect(
-			renderDocument([view]).find((node) => node.k === "input")?.p?.text,
+			renderDocument(view).find((node) => node.k === "input")?.p?.text,
 		).toBe("conflict");
 		nativeEdit(view, "live");
 		nativeAction(view, "confirm", "join:revisions");
@@ -447,24 +484,26 @@ test("the workbench keeps Room actions inline and discards pending history when 
 		nativeDeleteRoom(view, "revisions");
 		nativeAction(view, "confirm", "delete:revisions");
 		repaint = Promise.withResolvers<void>();
-		ready = () =>
-			Bun.stripANSI(view.render(100).join("\n")).includes("Deleted revisions.");
 		await repaint.promise;
-		ready = () => true;
 		expect(deleted).toEqual(["revisions"]);
 		expect(
-			renderDocument([view]).some(
+			renderDocument(view)
+				.filter((node) => node.k === "text")
+				.map(({ p }) => p?.spans?.map((span) => span.t).join("") ?? p?.text),
+		).toContain("Deleted revisions.");
+		expect(
+			renderDocument(view).some(
 				({ k, p }) => k === "item" && p?.label === "revisions",
 			),
 		).toBe(false);
 		nativeSelect(view, "review", true);
-		const joinInput = renderDocument([view]).find((node) => node.k === "input");
+		const joinInput = renderDocument(view).find((node) => node.k === "input");
 		expect(joinInput?.p?.text).toBe("saved");
 		nativeEdit(view, "retry");
 		nativeAction(view, "confirm", "join:review");
 		repaint = Promise.withResolvers<void>();
 		await repaint.promise;
-		const retrying = renderDocument([view]);
+		const retrying = renderDocument(view);
 		expect(retrying.some(({ p }) => p?.actions?.click === "leave=review")).toBe(
 			true,
 		);
@@ -480,13 +519,13 @@ test("the workbench keeps Room actions inline and discards pending history when 
 		repaint = Promise.withResolvers<void>();
 		await repaint.promise;
 		expect(
-			renderDocument([view]).some(
+			renderDocument(view).some(
 				({ k, p }) =>
 					k === "text" && p?.text === "Startup: saved · Auto-connect off",
 			),
 		).toBe(true);
 		expect(
-			renderDocument([view]).some(
+			renderDocument(view).some(
 				({ p }) => p?.actions?.click === "delete=review",
 			),
 		).toBe(false);
@@ -500,17 +539,19 @@ test("the workbench keeps Room actions inline and discards pending history when 
 		nativeAction(view, "history", "review");
 		const previousHistory = pendingHistory;
 		rooms = [];
-		hubUrl = newHub;
+		hubUrl.set(newHub);
 		repaint = Promise.withResolvers<void>();
-		renderDocument([view]);
+		renderDocument(view);
 		await repaint.promise;
-		const switched = renderDocument([view]);
+		const switched = renderDocument(view);
 		expect(
 			switched.filter((node) => node.k === "item").map(({ p }) => p?.label),
 		).toEqual(["other"]);
 		expect(
 			switched.some(
-				({ k, p }) => k === "text" && p?.text === `Startup Hub: ${oldHub}`,
+				(node) =>
+					node.k === "text" &&
+					node.p?.spans?.some(({ t }) => t === `Startup Hub: ${oldHub}`),
 			),
 		).toBe(true);
 		expect(
@@ -524,7 +565,7 @@ test("the workbench keeps Room actions inline and discards pending history when 
 		});
 		await stale.promise;
 		expect(
-			renderDocument([view]).some(
+			renderDocument(view).some(
 				({ k, p }) => k === "text" && p?.text?.includes("discard me"),
 			),
 		).toBe(false);
@@ -573,11 +614,11 @@ test("project settings drill down and stage startup Rooms in the same workbench"
 		nativeSelect(view, "billing");
 		nativeAction(view, "focus", "cfg-name");
 		nativeEdit(view, "discard");
-		view.handleInput("\x1b");
+		workbenchKey(view, "escape");
 		nativeSelect(view, "billing");
 		nativeAction(view, "focus", "cfg-name");
 		expect(
-			renderDocument([view]).find((node) => node.k === "input")?.p?.text,
+			renderDocument(view).find((node) => node.k === "input")?.p?.text,
 		).toBe("old");
 		nativeAction(view, "cfg-remove");
 		nativeAction(view, "cfg-add");
@@ -589,7 +630,7 @@ test("project settings drill down and stage startup Rooms in the same workbench"
 		nativeEdit(view, "writer");
 		nativeAction(view, "cfg-apply");
 		expect(saved).toEqual([]);
-		view.handleInput("\x1b");
+		workbenchKey(view, "escape");
 		nativeAction(view, "cfg-save");
 		repaint = Promise.withResolvers<void>();
 		await repaint.promise;
@@ -600,7 +641,7 @@ test("project settings drill down and stage startup Rooms in the same workbench"
 		nativeEdit(view, "discarded");
 		nativeAction(view, "cfg-close");
 		expect(saved).toEqual([{ room: "docs", name: "writer" }]);
-		const nodes = renderDocument([view]);
+		const nodes = renderDocument(view);
 		expect(nodes.some(({ p }) => p?.actions?.click === "join=review")).toBe(
 			true,
 		);
@@ -635,7 +676,7 @@ const options = { expanded: false, isPartial: false };
 
 test("registered inbound renderer keeps human context and markdown without exposing protocol metadata", () => {
 	const { inbound } = registeredPresentation();
-	const message: CustomMessage<MaterializedMessageView> = {
+	const message: Parameters<typeof inbound>[0] = {
 		role: "custom",
 		customType: "a2a-inbound",
 		content: 'metadata={"ref":"test:1"}\ntext="original model content"',
@@ -643,12 +684,15 @@ test("registered inbound renderer keeps human context and markdown without expos
 		details: structuredClone(first),
 		timestamp: 0,
 	};
-	const component = new CustomMessageComponent(
-		message,
-		inbound as MessageRenderer,
-	);
+	const rendered = inbound(message, options, theme);
+	if (!(rendered instanceof UiNode))
+		throw new Error("expected an inbound UI node");
+	const terminal = createTestTerminal(() => ({ dock: rendered }), {
+		columns: 120,
+		rows: 30,
+	});
 	try {
-		const ansi = Bun.stripANSI(component.render(120).join("\n"));
+		const ansi = terminal.screen().join("\n");
 		expect(ansi).toContain("A2A test:1 · sender → receiver");
 		expect(ansi).toContain("literal peer text");
 		expect(ansi).toContain("hello");
@@ -661,7 +705,7 @@ test("registered inbound renderer keeps human context and markdown without expos
 		expect(ansi).not.toContain("first-id");
 		expect(ansi).not.toContain("sender-presence");
 		expect(ansi).not.toContain("receiver-presence");
-		const nodes = renderDocument([component]);
+		const nodes = renderDocument(rendered);
 		expect(nodes.find((node) => node.k === "card")?.p?.head).toBe(
 			"A2A test:1 · sender → receiver",
 		);
@@ -684,13 +728,13 @@ test("registered inbound renderer keeps human context and markdown without expos
 		);
 		expect(message.details).toEqual(first);
 	} finally {
-		component.dispose();
+		terminal.dispose();
 	}
 });
 
 test("registered peer and history tool views preserve roster identity and message order", () => {
 	const { tools } = registeredPresentation();
-	const peers = tools.get("a2a_peers")?.describeResult?.(
+	const peers = tools.get("a2a_peers")?.renderResult?.(
 		{
 			content: [],
 			details: {
@@ -711,8 +755,9 @@ test("registered peer and history tool views preserve roster identity and messag
 			},
 		},
 		options,
+		theme,
 	);
-	const roster = renderDocument(peers?.body ?? []);
+	const roster = renderDocument(peers);
 	expect(roster.find((node) => node.k === "table")?.p?.cols).toEqual([
 		{ id: "room", head: "Room" },
 		{ id: "name", head: "Name" },
@@ -733,7 +778,7 @@ test("registered peer and history tool views preserve roster identity and messag
 			cells: { room: "other", name: "sender", role: "Peer" },
 		},
 	]);
-	const history = tools.get("a2a_history")?.describeResult;
+	const history = tools.get("a2a_history")?.renderResult;
 	if (!history) throw new Error("history renderer was not registered");
 	const second: MaterializedMessageView = {
 		...first,
@@ -749,8 +794,9 @@ test("registered peer and history tool views preserve roster identity and messag
 	const view = history(
 		{ content: [], details: { messages: [first, second] } },
 		options,
+		theme,
 	);
-	const nodes = renderDocument(view?.body ?? []);
+	const nodes = renderDocument(view);
 	expect(
 		nodes.filter((node) => node.k === "md").map((node) => node.p?.text),
 	).toEqual(["# literal peer text\n```text\nhello\n```", "second"]);
@@ -776,24 +822,31 @@ test("registered peer and history tool views preserve roster identity and messag
 		"Approved by sender's user",
 		undefined,
 	]);
-	expect(
-		history({ content: [], details: { messages: [] } }, options)?.body,
-	).toEqual([{ k: "text", p: { text: "No messages." } }]);
-	expect(
-		history(
-			{
-				content: [{ type: "text", text: "Disconnected" }],
-				details: { error: "Disconnected" },
-			},
-			options,
-		),
-	).toBeUndefined();
+	const empty = history(
+		{ content: [], details: { messages: [] } },
+		options,
+		theme,
+	);
+	expect(renderDocument(empty).find((node) => node.k === "text")?.p?.text).toBe(
+		"No messages.",
+	);
+	const error = history(
+		{
+			content: [{ type: "text", text: "Disconnected" }],
+			details: { error: "Disconnected" },
+		},
+		options,
+		theme,
+	);
+	expect(renderDocument(error).find((node) => node.k === "text")?.p?.text).toBe(
+		"Disconnected",
+	);
 });
 
 test("message tool native preview preserves targets, reply and attachments without claiming approval", () => {
 	const { tools } = registeredPresentation();
 	const tool = tools.get("a2a_message");
-	const view = tool?.describeCall?.(
+	const view = tool?.renderCall?.(
 		{
 			target: ["one", "two"],
 			text: "message",
@@ -802,27 +855,26 @@ test("message tool native preview preserves targets, reply and attachments witho
 			requestUserSignature: true,
 		},
 		options,
+		theme,
 	);
-	expect(view?.tool).toEqual({
-		title: "A2A Message",
-		target: "one, two",
-		meta: ["Reply to test:1"],
-		note: "approval requested",
-	});
-	const nodes = renderDocument(view?.body ?? []);
-	expect(nodes.find((node) => node.k === "md")?.p?.text).toBe("message");
-	expect(nodes.find((node) => node.k === "text")?.p?.text).toBe(
+	const nodes = renderDocument(view);
+	const text = nodes
+		.filter((node) => node.k === "text")
+		.map((node) => node.p?.text);
+	expect(text).toEqual([
+		"To one, two · Reply to test:1 · approval requested",
 		"local://file.txt",
-	);
-	const result = tool?.describeResult?.(
+	]);
+	expect(nodes.find((node) => node.k === "md")?.p?.text).toBe("message");
+	const result = tool?.renderResult?.(
 		{
 			content: [{ type: "text", text: "User rejected the A2A message" }],
 			details: { rejected: true, reason: null },
-			isError: true,
 		},
 		options,
+		theme,
 	);
-	expect(result?.body).toEqual([
-		{ k: "text", p: { text: "User rejected the A2A message" } },
-	]);
+	expect(
+		renderDocument(result).find((node) => node.k === "text")?.p?.text,
+	).toBe("User rejected the A2A message");
 });

@@ -1,17 +1,8 @@
-import type { MessageRenderer } from "@oh-my-pi/pi-coding-agent";
-import {
-	Box,
-	getMarkdownTheme,
-	Markdown,
-	Spacer,
-	Text,
-	type Theme,
-} from "@oh-my-pi/pi-tui";
-import type { NativeNode } from "@oh-my-pi/pi-tui/native/node";
 import type {
-	NativeToolView,
-	ToolRenderResult,
-} from "@oh-my-pi/pi-tui/tools/renderer";
+	AgentToolResult,
+	MessageRenderer,
+} from "@oh-my-pi/pi-coding-agent";
+import { UiNode } from "@oh-my-pi/pi-tui";
 import type { Peer } from "./hub/realtime-types";
 import type { LocalAttachmentReference } from "./local-attachments";
 import type { MessageView } from "./operations";
@@ -34,185 +25,115 @@ function messageHeading(message: MaterializedMessageView): string {
 	return `${message.messageRef} · ${message.from.name} → ${target}`;
 }
 
-function messageBody(message: MaterializedMessageView): NativeNode[] {
-	const body: NativeNode[] = [];
-	if (message.replyTo)
-		body.push({
-			k: "text",
-			p: { text: `Reply to ${message.replyTo}` },
-			key: "context",
-		});
-	body.push({ k: "md", p: { text: message.text }, key: "message" });
-	if (message.attachments.length > 0)
-		body.push({
-			k: "section",
-			p: { head: "Attachments" },
-			key: "attachments",
-			c: message.attachments.map((attachment) => ({
-				k: "text",
-				p: { text: `${attachment.name}\n${attachment.url}` },
-			})),
-		});
-	return body;
-}
-
-class InboundMessageComponent extends Box {
-	readonly #view: NativeNode;
-
-	constructor(details: MaterializedMessageView, theme: Theme) {
-		super(1, 1, (text) => theme.bg("customMessageBg", text));
-		const approved = details.userApproval?.kind === "omp-ui";
-		const heading = `A2A ${messageHeading(details)}`;
-		this.setIgnoreTight(true);
-		this.setBorder({
-			chars: theme.boxRound,
-			color: (text) => theme.fg(approved ? "success" : "borderMuted", text),
-		});
-		this.addChild(
-			new Text(
-				theme.fg(
-					approved ? "success" : "customMessageLabel",
-					theme.bold(`${theme.icon.package} ${heading}`),
-				),
-				0,
-				0,
-			),
-		);
-		if (details.replyTo)
-			this.addChild(new Text(`Reply to ${details.replyTo}`, 0, 0));
-		this.addChild(new Spacer(1));
-		this.addChild(
-			new Markdown(details.text, 0, 0, getMarkdownTheme(), {
-				color: (text) => theme.fg("customMessageText", text),
-			}),
-		);
-		if (details.attachments.length > 0) {
-			this.addChild(new Spacer(1));
-			this.addChild(new Text("Attachments", 0, 0));
-			for (const attachment of details.attachments)
-				this.addChild(new Text(`${attachment.name}\n${attachment.url}`, 0, 0));
-		}
-		this.#view = {
-			k: "card",
-			p: {
-				head: heading,
-				role: "omp.custom.a2a",
-				tone: approved ? "success" : undefined,
-				title: approved ? "Approved by sender's user" : undefined,
-				aria: approved ? `${heading} · Approved by sender's user` : undefined,
-			},
-			c: messageBody(details),
-		};
-	}
-
-	override describe(): NativeNode {
-		return this.#view;
-	}
-}
-
-export const renderInboundMessage: MessageRenderer<MaterializedMessageView> = (
-	message,
-	_options,
-	theme,
-) =>
-	message.details
-		? new InboundMessageComponent(message.details, theme)
-		: undefined;
-
-export function describeToolText(result: ToolRenderResult): NativeToolView {
-	return {
-		body: result.content
-			.filter((part) => part.type === "text")
-			.map((part) => ({ k: "text", p: { text: part.text } })),
-	};
-}
-
-export function describePeers(
-	result: ToolRenderResult<PeersDetails>,
-): NativeToolView | undefined {
-	const details = result.details;
-	if (!details || !("rooms" in details)) return undefined;
-	return {
-		body: [
-			{
-				k: "table",
-				p: {
-					cols: [
-						{ id: "room", head: "Room" },
-						{ id: "name", head: "Name" },
-						{ id: "role", head: "Role" },
-					],
-					rows: details.rooms.flatMap(({ room, self, peers }) =>
-						[self, ...peers].map((peer, index) => ({
-							id: peer.presenceId,
-							cells: {
-								room,
-								name: peer.name,
-								role: index === 0 ? "You" : "Peer",
-							},
-						})),
-					),
-				},
-			},
-		],
-	};
-}
-
-export function describeHistory(
-	result: ToolRenderResult<HistoryDetails>,
-): NativeToolView | undefined {
-	const details = result.details;
-	if (!details || !("messages" in details)) return undefined;
-	return {
-		body:
-			details.messages.length === 0
-				? [{ k: "text", p: { text: "No messages." } }]
-				: details.messages.map((message) => {
-						const approved = message.userApproval?.kind === "omp-ui";
-						const heading = messageHeading(message);
-						return {
-							k: "section",
-							key: message.messageId,
-							p: {
-								head: heading,
-								tone: approved ? "success" : undefined,
-								title: approved ? "Approved by sender's user" : undefined,
-								aria: approved
-									? `${heading} · Approved by sender's user`
-									: undefined,
-							},
-							c: messageBody(message),
-						};
+function messageBody(message: MaterializedMessageView): UiNode[] {
+	return [
+		...(message.replyTo
+			? [new UiNode("text", { text: `Reply to ${message.replyTo}` })]
+			: []),
+		new UiNode("md", { text: message.text }),
+		...(message.attachments.length
+			? [
+					new UiNode("section", {
+						head: "Attachments",
+						children: message.attachments.map(
+							({ name, url }) =>
+								new UiNode("text", { text: `${name}\n${url}` }),
+						),
 					}),
-	};
+				]
+			: []),
+	];
 }
 
-export function describeMessageCall(args: {
+function approvalStyle(message: MaterializedMessageView, heading: string) {
+	if (message.userApproval?.kind !== "omp-ui") return {};
+	const title = "Approved by sender's user";
+	return { tone: "success" as const, title, aria: `${heading} · ${title}` };
+}
+
+export const renderInboundMessage: MessageRenderer<MaterializedMessageView> = ({
+	details,
+}) => {
+	if (!details) return;
+	const heading = `A2A ${messageHeading(details)}`;
+	return new UiNode("card", {
+		head: heading,
+		role: "omp.custom.a2a",
+		...approvalStyle(details, heading),
+		children: messageBody(details),
+	});
+};
+
+export function renderToolText(result: AgentToolResult): UiNode[] {
+	return result.content.flatMap((part) =>
+		part.type === "text" ? [new UiNode("text", { text: part.text })] : [],
+	);
+}
+
+export function renderPeers(
+	result: AgentToolResult<PeersDetails>,
+): UiNode | UiNode[] {
+	const details = result.details;
+	if (!details || !("rooms" in details)) return renderToolText(result);
+	return new UiNode("table", {
+		cols: [
+			{ id: "room", head: "Room" },
+			{ id: "name", head: "Name" },
+			{ id: "role", head: "Role" },
+		],
+		rows: details.rooms.flatMap(({ room, self, peers }) =>
+			[self, ...peers].map((peer, index) => ({
+				id: peer.presenceId,
+				cells: { room, name: peer.name, role: index === 0 ? "You" : "Peer" },
+			})),
+		),
+	});
+}
+
+export function renderHistory(
+	result: AgentToolResult<HistoryDetails>,
+): UiNode[] {
+	const details = result.details;
+	if (!details || !("messages" in details)) return renderToolText(result);
+	if (details.messages.length === 0)
+		return [new UiNode("text", { text: "No messages." })];
+	return details.messages.map((message) => {
+		const heading = messageHeading(message);
+		return new UiNode("section", {
+			key: message.messageId,
+			head: heading,
+			...approvalStyle(message, heading),
+			children: messageBody(message),
+		});
+	});
+}
+
+export function renderMessageCall(args: {
 	room?: string;
 	target?: string[];
 	text?: string;
 	attachments?: string[];
 	replyTo?: string;
 	requestUserSignature?: boolean;
-}): NativeToolView {
-	const body: NativeNode[] = [];
-	if (args.text !== undefined) body.push({ k: "md", p: { text: args.text } });
-	if (args.attachments?.length)
-		body.push({
-			k: "section",
-			p: { head: "Attachments" },
-			c: args.attachments.map((url) => ({ k: "text", p: { text: url } })),
-		});
-	return {
-		tool: {
-			title: "A2A Message",
-			target: args.target?.join(", "),
-			meta: [
-				...(args.room ? [`Room ${args.room}`] : []),
-				...(args.replyTo ? [`Reply to ${args.replyTo}`] : []),
-			],
-			note: args.requestUserSignature ? "approval requested" : undefined,
-		},
-		body,
-	};
+}): UiNode[] {
+	const meta = [
+		args.target?.length ? `To ${args.target.join(", ")}` : "",
+		args.room ? `Room ${args.room}` : "",
+		args.replyTo ? `Reply to ${args.replyTo}` : "",
+		args.requestUserSignature ? "approval requested" : "",
+	].filter(Boolean);
+	return [
+		...(meta.length ? [new UiNode("text", { text: meta.join(" · ") })] : []),
+		...(args.text !== undefined ? [new UiNode("md", { text: args.text })] : []),
+		...(args.attachments?.length
+			? [
+					new UiNode("section", {
+						head: "Attachments",
+						children: args.attachments.map(
+							(url) => new UiNode("text", { text: url }),
+						),
+					}),
+				]
+			: []),
+	];
 }

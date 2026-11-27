@@ -4,6 +4,7 @@ import type {
 	ExtensionContext,
 	ExtensionUIContext,
 } from "@oh-my-pi/pi-coding-agent";
+import { signal, UiNode } from "@oh-my-pi/pi-tui";
 import { rejectionText, signatureFingerprint } from "./approval";
 import {
 	loadLocalConfig,
@@ -29,14 +30,14 @@ import {
 import { detectA2aLanguage } from "./locale";
 import type { A2aRuntime, MessageView } from "./operations";
 import {
-	describeHistory,
-	describeMessageCall,
-	describePeers,
-	describeToolText,
 	type HistoryDetails,
 	type MaterializedMessageView,
 	type PeersDetails,
+	renderHistory,
 	renderInboundMessage,
+	renderMessageCall,
+	renderPeers,
+	renderToolText,
 } from "./presentation";
 import { RoomConnections } from "./room-connections";
 import { escapeUnicode, safeJson } from "./safe-json";
@@ -1024,11 +1025,13 @@ export default function a2aExtension(
 	): Promise<void> => {
 		let startupConfig: A2aLocalConfig | null = null;
 		let mounted: typeof redrawConsole;
+		let view: A2aConsole | undefined;
 		try {
 			const closed = await context.ui.custom(
-				(tui, _theme, _keys, done) => {
-					const render = () => tui.requestRender();
-					const view = new A2aConsole({
+				(ui, _theme, _keys, done) => {
+					const revision = signal(0);
+					const render = () => revision.set(revision.peek() + 1);
+					view = new A2aConsole({
 						language,
 						redraw: render,
 						close: () => done(true),
@@ -1186,15 +1189,10 @@ export default function a2aExtension(
 						},
 					});
 					redrawConsole = mounted = render;
-					return view;
+					return view.describe(revision, () => ui.size().columns);
 				},
 				{
 					overlay: true,
-					overlayOptions: {
-						anchor: "center",
-						width: "90%",
-						maxHeight: "90%",
-					},
 					signal: session,
 				},
 			);
@@ -1202,6 +1200,7 @@ export default function a2aExtension(
 			if (!closed) publishCommandOutput("", usage());
 		} finally {
 			if (redrawConsole === mounted) redrawConsole = undefined;
+			view?.dispose();
 		}
 	};
 
@@ -1420,8 +1419,7 @@ export default function a2aExtension(
 		label: "A2A Peers",
 		description: `Show the exact roster names and your own name in each connected Room. Use peer names within the selected Room, or ${ALL_TARGET} for everyone in that Room.`,
 		parameters: peersParameters,
-		describeCall: () => ({ tool: { title: "A2A Peers" } }),
-		describeResult: describePeers,
+		renderResult: renderPeers,
 		async execute() {
 			try {
 				const rooms = roomRosters();
@@ -1473,8 +1471,8 @@ export default function a2aExtension(
 		label: "A2A Message",
 		description: `Send to one or more current peers in a Room. Specify room when connected to multiple Rooms, or set replyTo to route by the earlier message ref. target is a non-empty array of names from that Room in a2a_peers, or ["${ALL_TARGET}"] for everyone in it. Attachments must be current-session local:// regular files. Set requestUserSignature=true when an action you ask for needs user approval; your local OMP UI asks your user before sending. Rejection, cancellation, or unavailable UI sends nothing.`,
 		parameters: messageParameters,
-		describeCall: describeMessageCall,
-		describeResult: describeToolText,
+		renderCall: renderMessageCall,
+		renderResult: renderToolText,
 		async execute(_id, parameters, callerSignal, _onUpdate, context) {
 			try {
 				const approvalUi = parameters.requestUserSignature
@@ -1740,19 +1738,17 @@ export default function a2aExtension(
 		description:
 			"Review earlier messages in a Room; specify room when connected to multiple Rooms. Use before or after (mutually exclusive), limit, or from. Returned attachment links are valid in the current session. Use only for past context; never wait or poll for new replies.",
 		parameters: historyParameters,
-		describeCall: (args) => ({
-			tool: {
-				title: "A2A History",
-				target: args.from,
-				meta: [
-					args.room ? `Room ${args.room}` : undefined,
-					args.before ? `Before ${args.before}` : undefined,
-					args.after ? `After ${args.after}` : undefined,
-					args.limit !== undefined ? `Limit ${args.limit}` : undefined,
-				].filter((value): value is string => value !== undefined),
-			},
-		}),
-		describeResult: describeHistory,
+		renderCall: (args) => {
+			const meta = [
+				args.room ? `Room ${args.room}` : "",
+				args.from ? `From ${args.from}` : "",
+				args.before ? `Before ${args.before}` : "",
+				args.after ? `After ${args.after}` : "",
+				args.limit !== undefined ? `Limit ${args.limit}` : "",
+			].filter(Boolean);
+			if (meta.length) return new UiNode("text", { text: meta.join(" · ") });
+		},
+		renderResult: renderHistory,
 		async execute(_id, { room, ...query }, callerSignal, _onUpdate, context) {
 			try {
 				const sessionToken = sessionLifecycle.signal;
