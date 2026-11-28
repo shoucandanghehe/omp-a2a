@@ -496,3 +496,7 @@ scripts/
 Detailed repository maps are available in [`codemap.md`](codemap.md), [`src/codemap.md`](src/codemap.md), [`src/hub/codemap.md`](src/hub/codemap.md), and [`scripts/codemap.md`](scripts/codemap.md).
 
 The implemented realtime model and its accepted tradeoffs are recorded in [`docs/realtime-presence-architecture.md`](docs/realtime-presence-architecture.md).
+
+## Native DeepSeek Harness plugin
+
+See [dsh/README.md](dsh/README.md) for the experimental Cordis adapter, local installation, and supported versions. It joins an explicitly selected existing DSH session without using ACP.

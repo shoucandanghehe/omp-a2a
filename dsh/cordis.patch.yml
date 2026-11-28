@@ -1,0 +1,9 @@
+- insert:
+    - id: omp-a2a
+      name: dsh-omp-a2a
+      disabled: true
+      config:
+        hubUrl: http://127.0.0.1:4173
+        room: team
+        name: dsh
+        sessionId: REPLACE_WITH_EXACT_LIVE_SESSION_ID
